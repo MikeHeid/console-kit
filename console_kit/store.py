@@ -1,0 +1,181 @@
+"""Append-only JSONL store for the owner console (spec §4.1; rules R3 and R4; decision D3).
+
+This class is the only writer to its file. A record goes in once and is never
+edited or removed. `append` enforces the rules that need the other records:
+
+- a qid is minted once;
+- an answer names an existing question and picks only that question's options;
+- a lock locks the question's CURRENT answer, and locks it only once;
+- once an answer is locked, the next answer must name it in `supersedes` and
+  give a `reason`, because a lock is superseded, never undone (D3).
+
+A retried write (same content, same nonce) returns the stored record and
+writes nothing, so a flaky network cannot duplicate a message.
+
+**One writer process per file.** The rule checks run under a threading lock
+against this process's in-memory index; `flock` guards only the physical
+append. Two processes appending to one file could both pass a check (say,
+both lock the same answer) before either write lands. The console server is
+the file's only writer (spec §4.4), and the agent writes through it, never
+by opening a second `Store` on the live file.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import fcntl
+import json
+import os
+import threading
+from pathlib import Path
+from typing import Callable, Iterable
+
+from . import schema as S
+
+
+class StoreError(Exception):
+    """Raised for a record the store refuses, or a file it cannot read. The message says why."""
+
+
+def utc_now() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class Store:
+    def __init__(self, path: Path, *, known_items: Iterable[str] | None = None,
+                 clock: Callable[[], str] = utc_now) -> None:
+        self.path = Path(path)
+        self.known_items = None if known_items is None else frozenset(known_items)
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._records: list[dict] = []
+        self._by_id: dict[str, dict] = {}
+        self._load()
+
+    # -- reading -------------------------------------------------------------
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        raw = self.path.read_text(encoding="utf-8")
+        lines = raw.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        elif lines:
+            raise StoreError(f"{self.path}: line {len(lines)} has no newline, so a write was cut short. "
+                             f"Move that line aside by hand; the store does not guess what it said")
+        for n, line in enumerate(lines, 1):
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise StoreError(f"{self.path}:{n}: not JSON ({e.msg})") from None
+            if isinstance(rec, dict) and rec.get("schemaVersion") != S.SCHEMA_VERSION:
+                raise StoreError(f"{self.path}:{n}: schemaVersion {rec.get('schemaVersion')!r}; "
+                                 f"this kit reads only {S.SCHEMA_VERSION}")
+            errs = S.validate(rec)
+            if errs:
+                raise StoreError(f"{self.path}:{n}: " + "; ".join(errs))
+            if rec.get("seq") != n or rec.get("id") != S.record_id(rec):
+                raise StoreError(f"{self.path}:{n}: seq or id does not match the line; the file was edited")
+            self._index(rec)
+
+    def _index(self, rec: dict) -> None:
+        self._records.append(rec)
+        self._by_id[rec["id"]] = rec
+
+    def records(self) -> list[dict]:
+        """Return every record in append order. The list is a copy; the records are shared, so don't mutate them."""
+        return list(self._records)
+
+    def question(self, qid: str) -> dict | None:
+        return next((r for r in self._records if r["type"] == "question" and r["qid"] == qid), None)
+
+    def answers(self, qid: str) -> list[dict]:
+        return [r for r in self._records if r["type"] == "answer" and r["qid"] == qid]
+
+    def head(self, qid: str) -> dict | None:
+        """The question's current answer, which is its most recent one."""
+        a = self.answers(qid)
+        return a[-1] if a else None
+
+    def lock_of(self, answer_id: str) -> dict | None:
+        return next((r for r in self._records if r["type"] == "lock" and r["answer"] == answer_id), None)
+
+    # -- writing -------------------------------------------------------------
+
+    def append(self, rec: dict) -> dict:
+        """Check `rec`'s shape and the store's rules, then write it and return the stored record."""
+        rec = dict(rec)
+        rec.setdefault("schemaVersion", S.SCHEMA_VERSION)
+        for f in ("id", "seq", "ts"):
+            if f in rec:
+                raise StoreError(f"{f} is the store's to assign, not the writer's")
+        errs = S.validate(rec)
+        if errs:
+            raise StoreError("; ".join(errs))
+        rid = S.record_id(rec)
+        with self._lock:
+            if rid in self._by_id:
+                return self._by_id[rid]
+            self._check_rules(rec)
+            rec["id"] = rid
+            rec["seq"] = len(self._records) + 1
+            rec["ts"] = self.clock()
+            self._write(rec)
+            self._index(rec)
+            return rec
+
+    def _check_rules(self, rec: dict) -> None:
+        kind = rec["type"]
+        item = rec.get("item")
+        if item is not None and self.known_items is not None and item not in self.known_items:
+            raise StoreError(f"item {item!r} is not in the project's item list")
+        if kind == "question":
+            if self.question(rec["qid"]):
+                raise StoreError(f"qid {rec['qid']} already exists; a qid is minted once. Ask a new Q<n>")
+        elif kind == "message":
+            if "reply_to" in rec and rec["reply_to"] not in self._by_id:
+                raise StoreError(f"reply_to {rec['reply_to']!r} names no record")
+        elif kind == "answer":
+            self._check_answer(rec)
+        elif kind == "lock":
+            self._check_lock(rec)
+
+    def _check_answer(self, rec: dict) -> None:
+        q = self.question(rec["qid"])
+        if q is None:
+            raise StoreError(f"no question {rec['qid']}")
+        ids = [o["id"] for o in q["options"]]
+        stray = [p for p in rec["picks"] if p not in ids]
+        if stray:
+            raise StoreError(f"pick(s) {stray} are not options of {rec['qid']}; say it in your own words instead")
+        if q["kind"] == "single" and len(rec["picks"]) > 1:
+            raise StoreError(f"{rec['qid']} takes one pick, got {len(rec['picks'])}")
+        head = self.head(rec["qid"])
+        if "supersedes" in rec and (head is None or rec["supersedes"] != head["id"]):
+            raise StoreError(f"supersedes {rec['supersedes']!r} is not the current answer of {rec['qid']}")
+        if head is not None and self.lock_of(head["id"]) and "supersedes" not in rec:
+            raise StoreError(f"{rec['qid']} is locked. A new answer supersedes the lock: "
+                             f"name it (supersedes={head['id']}) and give a reason. A lock is never undone")
+
+    def _check_lock(self, rec: dict) -> None:
+        a = self._by_id.get(rec["answer"])
+        if a is None or a["type"] != "answer" or a["qid"] != rec["qid"]:
+            raise StoreError(f"answer {rec['answer']!r} is not an answer to {rec['qid']}")
+        head = self.head(rec["qid"])
+        if head is None or head["id"] != a["id"]:
+            raise StoreError(f"answer {a['id']} is not the current answer of {rec['qid']}; lock the current one")
+        if self.lock_of(a["id"]):
+            raise StoreError(f"answer {a['id']} is already locked")
+
+    def _write(self, rec: dict) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(rec, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n"
+        with open(self.path, "a", encoding="utf-8") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                fh.write(line)
+                fh.flush()
+                os.fsync(fh.fileno())
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)

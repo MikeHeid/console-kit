@@ -1,0 +1,218 @@
+"""Record shapes for the owner console (spec `architect/40-specs/owner-console.md` §4.1).
+
+This module is project-neutral: nothing here knows about Gradiance.
+
+Every record is one JSON object on one line of the store, and every record
+carries `schemaVersion`. A record from another schema version is refused BY
+NAME, never coerced.
+
+There are four kinds of record, and each has fixed writers (spec R4):
+
+    question  agent   `qid` is `<itemId>/Q<n>`, minted once and never reused
+    message   either  a thread entry on an item; a message the owner writes is "author input"
+    answer    owner   picks from the question's options, own words, or both
+    lock      owner   locks one answer; a later answer SUPERSEDES it, never undoes it (D3)
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+
+SCHEMA_VERSION = 1
+
+KINDS = ("question", "message", "answer", "lock")
+WRITERS = {
+    "question": frozenset({"agent"}),
+    "message": frozenset({"agent", "owner"}),
+    "answer": frozenset({"owner"}),
+    "lock": frozenset({"owner"}),
+}
+QUESTION_KINDS = ("single", "multi", "free")
+VALID_IF_KINDS = ("file_sha256", "item_status")
+
+# The fields the WRITER supplies; `id`, `seq` and `ts` belong to the store.
+REQUIRED = {
+    "question": ("qid", "item", "text", "kind", "options", "star", "valid_if", "source", "by", "nonce"),
+    "message": ("item", "text", "by", "nonce"),
+    "answer": ("qid", "picks", "own_text", "by", "nonce"),
+    "lock": ("qid", "answer", "by", "nonce"),
+}
+OPTIONAL = {
+    "question": frozenset(),
+    "message": frozenset({"reply_to"}),
+    "answer": frozenset({"supersedes", "reason"}),
+    "lock": frozenset(),
+}
+STORE_FIELDS = frozenset({"id", "seq", "ts", "schemaVersion", "type"})
+
+ITEM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
+QID = re.compile(r"^(?P<item>[A-Za-z0-9][A-Za-z0-9_.\-]*)/Q(?P<n>[1-9][0-9]*)$")
+OPTION_ID = re.compile(r"^[a-z][a-z0-9_]*$")
+NONCE = re.compile(r"^[A-Za-z0-9_\-]{8,64}$")
+# `source` is a path, optionally with `:line` or `:line-line`. It is rendered
+# inline into the rulings record, so it must never carry markup or a newline.
+SOURCE = re.compile(r"^[A-Za-z0-9_.\-/]+(:[0-9]+(-[0-9]+)?)?$")
+MAX_TEXT = 20_000
+MAX_LINE = 300       # a label, a description, or any other one-line field
+MAX_OPTIONS = 12
+MAX_VALID_IF = 16
+
+
+def validate(rec: object) -> list[str]:
+    """List every problem with `rec` as its author wrote it; an empty list means well-formed.
+
+    This checks shape only. Whether the qid exists, whether the answer is the
+    latest, and whether the item resolves are the STORE's job, because those
+    checks need the other records.
+    """
+    if not isinstance(rec, dict):
+        return ["a record must be a JSON object"]
+    kind = rec.get("type")
+    if kind not in KINDS:
+        return [f"unknown record type {kind!r}; expected one of {', '.join(KINDS)}"]
+    errs: list[str] = []
+    if rec.get("schemaVersion") != SCHEMA_VERSION:
+        errs.append(f"schemaVersion {rec.get('schemaVersion')!r} is not {SCHEMA_VERSION}; refused, not coerced")
+    missing = [k for k in REQUIRED[kind] if k not in rec]
+    if missing:
+        errs.append(f"{kind}: missing {', '.join(missing)}")
+    unknown = sorted(set(rec) - set(REQUIRED[kind]) - OPTIONAL[kind] - STORE_FIELDS)
+    if unknown:
+        errs.append(f"{kind}: unknown field(s) {', '.join(unknown)}")
+    if missing:
+        return errs
+    if rec["by"] not in WRITERS[kind]:
+        errs.append(f"{kind}: written by {rec['by']!r}, but only {sorted(WRITERS[kind])} may write one")
+    if not isinstance(rec["nonce"], str) or not NONCE.match(rec["nonce"]):
+        errs.append(f"{kind}: nonce must be 8-64 of [A-Za-z0-9_-]")
+    errs += _TYPE_CHECKS[kind](rec)
+    return errs
+
+
+def _text(rec: dict, field: str, *, allow_empty: bool = False) -> list[str]:
+    v = rec.get(field)
+    if not isinstance(v, str):
+        return [f"{field} must be a string"]
+    if not allow_empty and not v.strip():
+        return [f"{field} must not be empty"]
+    if len(v) > MAX_TEXT:
+        return [f"{field} is {len(v)} characters; the limit is {MAX_TEXT}"]
+    return []
+
+
+def one_line(v: object, field: str, *, allow_empty: bool = False) -> list[str]:
+    """Check a field that is rendered inline: a string of one line, at most MAX_LINE characters."""
+    if not isinstance(v, str):
+        return [f"{field} must be a string"]
+    if not allow_empty and not v.strip():
+        return [f"{field} must not be empty"]
+    if "\n" in v or "\r" in v or " " in v or " " in v:
+        return [f"{field} must be one line"]
+    if len(v) > MAX_LINE:
+        return [f"{field} is {len(v)} characters; the limit is {MAX_LINE}"]
+    return []
+
+
+def _check_question(rec: dict) -> list[str]:
+    errs = _text(rec, "text")
+    if not isinstance(rec["source"], str) or not SOURCE.match(rec["source"]) or len(rec["source"]) > MAX_LINE:
+        errs.append(f"source {rec['source']!r} must be a repo path, optionally with :line or :line-line")
+    m = QID.match(rec["qid"]) if isinstance(rec["qid"], str) else None
+    if not m:
+        errs.append(f"qid {rec['qid']!r} is not <itemId>/Q<n>")
+    elif m.group("item") != rec["item"]:
+        errs.append(f"qid {rec['qid']!r} names item {m.group('item')!r}, but the record says {rec['item']!r}")
+    if rec["kind"] not in QUESTION_KINDS:
+        errs.append(f"kind {rec['kind']!r} is not one of {', '.join(QUESTION_KINDS)}")
+    opts = rec["options"]
+    if not isinstance(opts, list):
+        return errs + ["options must be a list"]
+    if len(opts) > MAX_OPTIONS:
+        return errs + [f"{len(opts)} options; the limit is {MAX_OPTIONS}"]
+    ids = []
+    for o in opts:
+        if not isinstance(o, dict) or not isinstance(o.get("id"), str) or not OPTION_ID.match(o["id"]):
+            errs.append(f"option {o!r} needs an id matching {OPTION_ID.pattern}")
+            continue
+        errs += one_line(o.get("label"), f"option {o['id']!r} label")
+        if "description" in o:
+            errs += one_line(o["description"], f"option {o['id']!r} description", allow_empty=True)
+        if set(o) - {"id", "label", "description"}:
+            errs.append(f"option {o['id']!r}: unknown field(s) {sorted(set(o) - {'id', 'label', 'description'})}")
+        ids.append(o["id"])
+    if len(ids) != len(set(ids)):
+        errs.append("option ids repeat")
+    if rec["kind"] == "free" and opts:
+        errs.append("a free question offers no options")
+    if rec["kind"] in ("single", "multi") and len(opts) < 2:
+        errs.append(f"a {rec['kind']} question offers at least two options")
+    star = rec["star"]
+    if star is not None and star not in ids:
+        errs.append(f"star {star!r} is not one of the options")
+    vi = rec["valid_if"]
+    if not isinstance(vi, list):
+        errs.append("valid_if must be a list")
+    elif len(vi) > MAX_VALID_IF:
+        errs.append(f"{len(vi)} valid_if conditions; the limit is {MAX_VALID_IF}")
+    else:
+        for c in vi:
+            errs += _check_condition(c)
+    return errs
+
+
+def _check_condition(c: object) -> list[str]:
+    if not isinstance(c, dict) or c.get("kind") not in VALID_IF_KINDS:
+        return [f"valid_if condition {c!r} needs kind in {', '.join(VALID_IF_KINDS)}"]
+    want = {"file_sha256": {"kind", "path", "sha256"}, "item_status": {"kind", "item", "status"}}[c["kind"]]
+    if set(c) != want or not all(isinstance(c[k], str) and c[k] for k in want):
+        return [f"valid_if {c['kind']} takes exactly {sorted(want)}, all non-empty strings"]
+    if c["kind"] == "file_sha256" and (c["path"].startswith("/") or ".." in c["path"].split("/")):
+        return [f"valid_if path {c['path']!r} must be relative and stay inside the project"]
+    return []
+
+
+def _check_message(rec: dict) -> list[str]:
+    errs = _text(rec, "text")
+    if not isinstance(rec["item"], str) or not ITEM_ID.match(rec["item"]):
+        errs.append(f"item {rec['item']!r} is not an item id")
+    if "reply_to" in rec and not isinstance(rec["reply_to"], str):
+        errs.append("reply_to must be a record id")
+    return errs
+
+
+def _check_answer(rec: dict) -> list[str]:
+    errs = _text(rec, "own_text", allow_empty=True)
+    picks = rec["picks"]
+    if not isinstance(picks, list) or not all(isinstance(p, str) for p in picks) or len(picks) > MAX_OPTIONS:
+        errs.append(f"picks must be a list of at most {MAX_OPTIONS} option ids")
+    elif len(picks) != len(set(picks)):
+        errs.append("picks repeat")
+    elif not picks and isinstance(rec["own_text"], str) and not rec["own_text"].strip():
+        errs.append("an answer needs at least one pick or its own words")
+    if ("supersedes" in rec) != ("reason" in rec):
+        errs.append("supersedes and reason go together: a superseding answer says why (D3)")
+    if "reason" in rec:
+        errs += _text(rec, "reason")
+    return errs
+
+
+def _check_lock(rec: dict) -> list[str]:
+    return [] if isinstance(rec["answer"], str) and rec["answer"] else ["answer must be the id of the answer being locked"]
+
+
+_TYPE_CHECKS = {"question": _check_question, "message": _check_message,
+                "answer": _check_answer, "lock": _check_lock}
+
+
+def record_id(rec: dict) -> str:
+    """Hash the author's fields into the record's id, leaving out the store's own fields.
+
+    A retried write (same nonce, same content) hashes to the same id, so the
+    store keeps one copy. Two separate writes carry different nonces, so two
+    owner messages that both say "yes" on one item are two records, not one.
+    """
+    body = {k: v for k, v in rec.items() if k not in STORE_FIELDS or k == "type"}
+    canon = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:24]
