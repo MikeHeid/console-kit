@@ -1,0 +1,5 @@
+# The owner console server's dependencies beyond the standard library (spec owner-console.md, D5).
+# PyJWT does RS256 through cryptography. cryptography 50.0.1 clears CVE-2026-69247,
+# CVE-2026-69249 and GHSA-537c-gmf6-5ccf (bundled OpenSSL before 48.0.1), flagged on #165.
+PyJWT==2.15.0
+cryptography==50.0.1

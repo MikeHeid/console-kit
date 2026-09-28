@@ -1,0 +1,299 @@
+"""Tests for the owner console server (spec §4.4, §4.5; slice P3's ACs).
+
+The Access check runs for real: tokens are signed with a throwaway RSA key and
+verified by PyJWT through `access_verifier`. Only the key lookup is replaced,
+so no test reaches the network.
+
+    python3 tools/console-kit/test_server.py
+"""
+
+from __future__ import annotations
+
+import http.client
+import json
+import os
+import stat
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+
+import jwt
+from cryptography.hazmat.primitives.asymmetric import rsa
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from console_kit import server as SV  # noqa: E402
+
+TEAM = "team.example.cloudflareaccess.com"
+AUD = "a" * 64
+HOSTNAME = "console.example.com"
+ITEMS = {
+    "LANE": {"title": "a lane", "parent": None, "status": "open"},
+    "LANE.1": {"title": "a phase", "parent": "LANE", "status": "open"},
+}
+SEED = [{"qid": "LANE.1/Q1", "item": "LANE.1", "text": "Which?", "kind": "single",
+         "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B ★"}], "star": "b",
+         "valid_if": [], "source": "architect/40-specs/owner-console.md:1", "by": "agent",
+         "nonce": "seednonce0001"}]
+PAGE = "<!doctype html><html><body><p>board</p></body></html>\n"
+
+KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+OTHER = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+def token(key=KEY, **over) -> str:
+    now = int(time.time())
+    claims = {"aud": [AUD], "iss": f"https://{TEAM}", "email": "owner@example.com",
+              "iat": now, "exp": now + 600, "sub": "owner"}
+    claims.update(over)
+    for k in [k for k, v in claims.items() if v is None]:
+        del claims[k]
+    return jwt.encode(claims, key, algorithm="RS256", headers={"kid": "k1"})
+
+
+class FakeAdapter:
+    def items(self):
+        return dict(ITEMS)
+
+    def seed_questions(self):
+        return [dict(q) for q in SEED]
+
+    def record(self, entries, dry_run):
+        return []
+
+
+class ServerTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        (d / "page.html").write_text(PAGE)
+        self.cfg = SV.Config(root=d, page=d / "page.html", state=d / "state", adapter=d / "unused.py",
+                             team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="test")
+        self.console = SV.Console(self.cfg, FakeAdapter())
+        self.console.seed()
+        verify = SV.access_verifier(TEAM, AUD, key_for=lambda _t: KEY.public_key())
+        self.owner = SV.owner_server(self.console, verify, 0)
+        self.port = self.owner.server_address[1]
+        threading.Thread(target=self.owner.serve_forever, daemon=True).start()
+        self.agent = SV.agent_server(self.console)
+        threading.Thread(target=self.agent.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.owner.shutdown()
+        self.owner.server_close()
+        self.agent.shutdown()
+        self.agent.server_close()
+        self.tmp.cleanup()
+
+    def req(self, method, path, body=None, tok=None, headers=None, origin=True):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        h = dict(headers or {})
+        if method == "POST" and origin:  # what a browser on the console's own page sends
+            h.setdefault("Origin", f"https://{HOSTNAME}")
+        if tok is not None:
+            h["Cf-Access-Jwt-Assertion"] = tok
+        data = None
+        if body is not None:
+            data = body if isinstance(body, bytes) else json.dumps(body).encode()
+            h.setdefault("Content-Type", "application/json")
+        conn.request(method, path, body=data, headers=h)
+        r = conn.getresponse()
+        raw = r.read()
+        conn.close()
+        try:
+            return r.status, json.loads(raw)
+        except ValueError:
+            return r.status, raw.decode()
+
+    def answer(self, **over):
+        b = {"qid": "LANE.1/Q1", "picks": ["a"], "own_text": "", "nonce": "ownernonce01"}
+        b.update(over)
+        return b
+
+    def doorbell(self):
+        p = self.cfg.inbox
+        return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+
+    # -- the Access gate (P3 ACs) ---------------------------------------------
+
+    def test_loopback_request_without_a_token_is_refused(self):
+        # AC: refused directly on loopback, not only through the public hostname.
+        for path in ("/", "/api/view"):
+            code, body = self.req("GET", path)
+            self.assertEqual(code, 403, path)
+        code, _ = self.req("POST", "/api/answer", self.answer())
+        self.assertEqual(code, 403)
+        self.assertEqual(len(self.console.store.records()), 1)  # only the seed
+
+    def test_bad_signature_is_refused(self):
+        # Counter-check: a server that checks only that the header is present passes every other
+        # refusal test that sends no header, and must fail this one.
+        code, body = self.req("GET", "/api/view", tok=token(key=OTHER))
+        self.assertEqual(code, 403)
+        self.assertIn("InvalidSignatureError", body["error"])
+
+    def test_wrong_audience_issuer_or_expiry_is_refused(self):
+        cases = {
+            "aud": token(aud=["b" * 64]),
+            "iss": token(iss="https://other.cloudflareaccess.com"),
+            "exp": token(exp=int(time.time()) - 3600, iat=int(time.time()) - 7200),
+            "no exp": token(exp=None),
+            "garbage": "not.a.jwt",
+        }
+        for name, tok in cases.items():
+            code, _ = self.req("GET", "/api/view", tok=tok)
+            self.assertEqual(code, 403, name)
+
+    def test_an_unsigned_or_symmetric_token_is_refused(self):
+        # Catches: algorithms taken from the token's header instead of pinned to RS256.
+        claims = {"aud": [AUD], "iss": f"https://{TEAM}", "iat": int(time.time()), "exp": int(time.time()) + 600}
+        unsigned = jwt.api_jws.base64url_encode(json.dumps({"alg": "none", "typ": "JWT"}).encode()).decode() + "." + \
+            jwt.api_jws.base64url_encode(json.dumps(claims).encode()).decode() + "."
+        hs = jwt.encode(claims, "shared-secret-that-is-long-enough-for-hs256", algorithm="HS256")
+        for tok in (unsigned, hs):
+            code, _ = self.req("GET", "/api/view", tok=tok)
+            self.assertEqual(code, 403)
+
+    def test_a_valid_token_is_admitted(self):
+        code, body = self.req("GET", "/api/view", tok=token())
+        self.assertEqual(code, 200)
+        self.assertEqual(body["view"]["inbox"], ["LANE.1/Q1"])
+        self.assertEqual(set(body["items"]), set(ITEMS))
+        code, page = self.req("GET", "/", tok=token())
+        self.assertEqual(code, 200)
+        self.assertIn('id="console-kit-config"', page)
+
+    def test_every_other_method_meets_the_gate(self):
+        # Catches: only GET and POST gated, so PUT/OPTIONS/... reach a default handler unchecked
+        # (Sourcery on #165).
+        for method in ("HEAD", "PUT", "DELETE", "PATCH", "OPTIONS"):
+            self.assertEqual(self.req(method, "/api/view")[0], 403, method)
+            self.assertEqual(self.req(method, "/api/view", tok=token())[0], 405, method)
+
+    def test_the_server_binds_loopback_only(self):
+        self.assertEqual(self.owner.server_address[0], "127.0.0.1")
+
+    # -- owner writes and the doorbell (D8) -----------------------------------
+
+    def test_owner_answer_is_stamped_owner_and_rings_once(self):
+        code, body = self.req("POST", "/api/answer", self.answer(), tok=token())
+        self.assertEqual(code, 200, body)
+        self.assertEqual(body["record"]["by"], "owner")
+        # A retried submit (same nonce) stores nothing new and rings nothing new.
+        code, again = self.req("POST", "/api/answer", self.answer(), tok=token())
+        self.assertEqual((code, again["record"]["id"]), (200, body["record"]["id"]))
+        bell = self.doorbell()
+        self.assertEqual(len(bell), 1)
+        self.assertEqual((bell[0]["qid"], bell[0]["seq"]), ("LANE.1/Q1", body["record"]["seq"]))
+
+    def test_the_page_cannot_choose_its_author(self):
+        for field in ("by", "type", "schemaVersion"):
+            code, body = self.req("POST", "/api/answer", self.answer(**{field: "agent"}), tok=token())
+            self.assertEqual(code, 400, field)
+        self.assertEqual(self.doorbell(), [])
+
+    def test_store_refusals_come_back_as_400(self):
+        code, body = self.req("POST", "/api/answer", self.answer(picks=["zzz"]), tok=token())
+        self.assertEqual(code, 400)
+        self.assertIn("not options", body["error"])
+        code, _ = self.req("POST", "/api/message", {"item": "NOT-AN-ITEM", "text": "x", "nonce": "n0000001"},
+                           tok=token())
+        self.assertEqual(code, 400)
+
+    def test_cross_site_and_non_json_writes_are_refused(self):
+        code, _ = self.req("POST", "/api/answer", self.answer(), tok=token(),
+                           headers={"Origin": "https://evil.example"})
+        self.assertEqual(code, 403)
+        code, _ = self.req("POST", "/api/answer", json.dumps(self.answer()).encode(), tok=token(),
+                           headers={"Content-Type": "text/plain"})
+        self.assertEqual(code, 415)
+        code, _ = self.req("POST", "/api/answer", self.answer(), tok=token(),
+                           headers={"Origin": f"https://{HOSTNAME}"})
+        self.assertEqual(code, 200)
+
+    def test_a_write_with_no_origin_is_refused(self):
+        # Catches: "no Origin" read as trusted (#165 security review, MEDIUM).
+        code, _ = self.req("POST", "/api/answer", self.answer(), tok=token(), origin=False)
+        self.assertEqual(code, 403)
+        self.assertEqual(self.doorbell(), [])
+
+    def test_an_oversized_body_is_refused(self):
+        big = self.answer(own_text="x" * (SV.MAX_BODY + 1))
+        code, _ = self.req("POST", "/api/answer", big, tok=token())
+        self.assertEqual(code, 413)
+
+    def raw_post(self, content_length: str, body: bytes) -> int:
+        import socket as so
+        s = so.create_connection(("127.0.0.1", self.port), timeout=10)
+        head = (f"POST /api/answer HTTP/1.1\r\nHost: x\r\nOrigin: https://{HOSTNAME}\r\n"
+                f"Cf-Access-Jwt-Assertion: {token()}\r\nContent-Type: application/json\r\n"
+                f"Content-Length: {content_length}\r\nConnection: close\r\n\r\n").encode()
+        s.sendall(head + body)
+        s.shutdown(so.SHUT_WR)
+        data = b""
+        while chunk := s.recv(4096):
+            data += chunk
+        s.close()
+        return int(data.split(b" ", 2)[1])
+
+    def test_a_negative_or_malformed_content_length_is_refused(self):
+        # Catches: int("-1") accepted, so read(-1) reads to end of stream past the cap
+        # (#165 security review, HIGH, proved with a 262 KB body).
+        big = json.dumps(self.answer(own_text="x" * (4 * SV.MAX_BODY))).encode()
+        for cl in ("-1", "+5", "1e3", " -0", "²", "9" * 40):
+            self.assertEqual(self.raw_post(cl, big), 400, cl)
+        self.assertEqual(self.doorbell(), [])
+
+    def test_an_existing_loose_state_dir_is_tightened(self):
+        # Catches: mkdir(mode=0o700, exist_ok=True) leaving a pre-existing 0755 dir as it was
+        # (#165 security review, MEDIUM: store.jsonl became readable by every local account).
+        loose = Path(self.tmp.name) / "loose"
+        loose.mkdir(mode=0o755)
+        os.chmod(loose, 0o755)
+        SV.Console(SV.Config(**{**self.cfg.__dict__, "state": loose}), FakeAdapter())
+        self.assertEqual(stat.S_IMODE(os.stat(loose).st_mode), 0o700)
+
+    # -- the agent door -------------------------------------------------------
+
+    def test_agent_door_is_user_only_and_stamps_agent(self):
+        mode = stat.S_IMODE(os.lstat(self.cfg.socket).st_mode)
+        self.assertEqual(mode, 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(self.cfg.state).st_mode), 0o700)
+        code, body = SV.agent_request(self.cfg.socket, "POST", "/message",
+                                      {"item": "LANE", "text": "noted", "nonce": "agentnonce01"})
+        self.assertEqual(code, 200, body)
+        self.assertEqual(body["record"]["by"], "agent")
+        self.assertEqual(self.doorbell(), [])  # the doorbell is for the owner's writes only
+        code, body = SV.agent_request(self.cfg.socket, "POST", "/message",
+                                      {"item": "LANE", "text": "x", "by": "owner", "nonce": "agentnonce02"})
+        self.assertEqual(code, 400)
+
+    def test_cursor_round_trip_reaches_the_page(self):
+        code, _ = SV.agent_request(self.cfg.socket, "POST", "/cursor",
+                                   {"last_synced_at": "2026-09-28T10:00:00Z", "last_error": None})
+        self.assertEqual(code, 200)
+        _, body = self.req("GET", "/api/view", tok=token())
+        self.assertEqual(body["cursor"]["last_synced_at"], "2026-09-28T10:00:00Z")
+        code, _ = SV.agent_request(self.cfg.socket, "POST", "/cursor", {"last_error": "two\nlines"})
+        self.assertEqual(code, 400)
+        code, _ = SV.agent_request(self.cfg.socket, "POST", "/cursor", {"stray": 1})
+        self.assertEqual(code, 400)
+
+    def test_a_socket_path_too_long_is_refused_by_name(self):
+        # Catches: a --state deep enough that bind() fails with a bare OSError and the owner door never opens.
+        deep = SV.Config(**{**self.cfg.__dict__, "state": self.cfg.state / ("d" * 120)})
+        with self.assertRaises(SystemExit) as cm:
+            SV.agent_server(SV.Console(deep, FakeAdapter()))
+        self.assertIn("pass a shorter --state", str(cm.exception))
+
+    def test_seed_is_idempotent_across_restarts(self):
+        again = SV.Console(self.cfg, FakeAdapter())
+        self.assertEqual(again.seed(), [])
+        self.assertEqual(len(again.store.records()), 1)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=1)
