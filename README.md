@@ -13,6 +13,23 @@ and can:
 The next Claude session in that project is told what arrived, processes it,
 and folds locked answers into the project's own record.
 
+## Download
+
+Get **`console-kit-<version>.zip`** from
+[Releases](https://github.com/MikeHeid/console-kit/releases). Unzip it
+somewhere it can stay (it makes a `console-kit/` folder). Then, in Claude
+Desktop's **Code** tab or in `claude`:
+
+    /plugin marketplace add ~/console-kit
+    /plugin install console-kit@console-kit-local
+
+Then, in your project:
+
+    /console-kit:console-onboard
+
+It asks for the project name and your Cloudflare values, and tells you what
+to run next. `INSTALL.md` (also in the zip) has the whole guide.
+
 - **[INSTALL.md](INSTALL.md)**: install the plugin in Claude Desktop or the
   CLI, and onboard a project.
 - **[docs/CLOUDFLARE.md](docs/CLOUDFLARE.md)**: the Access application, the
