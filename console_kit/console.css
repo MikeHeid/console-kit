@@ -485,6 +485,10 @@
 .ck-reply-btn:hover { border-color: var(--c-accent); color: var(--c-fg); }
 
 /* --- Inbox button (fixed) --- */
+/* Fixed over the host page's top-right corner. Gradiance's lane board keeps its
+   header clear of it with `body:has(.ck-inbox-btn) .header-controls
+   { margin-inline-end: 120px }` (scripts/register/dashboard.py), sized for this
+   button at ~90px plus right: 12px. Widen the button and widen that too. */
 .ck-inbox-btn {
   position: fixed;
   top: env(safe-area-inset-top, 12px);
