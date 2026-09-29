@@ -148,7 +148,8 @@ class InstalledPluginTests(Base):
             self.assertTrue((kit / rel).is_file(), f"installed plugin lacks kit/{rel}")
         # Every KIT/<path> a skill tells a session to read must be in the installed kit.
         for skill in (skill_dir / "..").resolve().glob("*/SKILL.md"):
-            for rel in re.findall(r"`KIT/([\w./-]+)`", skill.read_text(encoding="utf-8")):
+            # Anywhere: inline code, indented or fenced blocks, quoted arguments.
+            for rel in re.findall(r"KIT/([A-Za-z0-9_./-]*[A-Za-z0-9_])", skill.read_text(encoding="utf-8")):
                 self.assertTrue((kit / rel).exists(), f"{skill.parent.name} cites KIT/{rel}, not in the installed kit")
 
     def test_an_install_from_the_repository_carries_the_kit(self):
