@@ -32,9 +32,9 @@ to run next. `INSTALL.md` (also in the zip) has the whole guide.
 
 - **[INSTALL.md](INSTALL.md)**: install the plugin in Claude Desktop or the
   CLI, and onboard a project.
-- **[docs/CLOUDFLARE.md](docs/CLOUDFLARE.md)**: the Access application, the
+- **[docs/CLOUDFLARE.md](plugin/kit/docs/CLOUDFLARE.md)**: the Access application, the
   tunnel, DNS.
-- **[docs/ADAPTER.md](docs/ADAPTER.md)**: connect the console to your
+- **[docs/ADAPTER.md](plugin/kit/docs/ADAPTER.md)**: connect the console to your
   project's work items and decision log.
 
 ## How it fits together

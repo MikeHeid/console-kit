@@ -32,10 +32,9 @@ script run, and a short list of commands **the user runs themselves**.
 
 ## 1. Find the kit
 
-The kit ships inside this plugin. Use the first of these that exists as `KIT`:
-
-- `${CLAUDE_SKILL_DIR}/../../kit` (the installed plugin);
-- `${CLAUDE_SKILL_DIR}/../../..` (a checkout of the console-kit repo).
+The kit ships inside this plugin, at `${CLAUDE_SKILL_DIR}/../../kit`, however the
+plugin was installed (from the release zip or straight from the repository).
+Call that folder `KIT`.
 
 `KIT/onboard.py` must exist. If it does not, stop and say the plugin is
 incomplete.

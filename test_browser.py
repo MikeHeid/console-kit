@@ -19,7 +19,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
+KIT = HERE / "plugin" / "kit"  # the kit ships inside the plugin, so every install carries it
+sys.path.insert(0, str(KIT))
 from console_kit import publish as P  # noqa: E402
 
 REQUIRED = os.environ.get("CONSOLE_KIT_BROWSER") == "1"

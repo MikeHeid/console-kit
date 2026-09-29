@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import shutil
 import tempfile
 import unittest
@@ -116,6 +118,42 @@ class ValidateTests(Base):
     def test_claude_validates_the_marketplace_and_the_plugin_strictly(self):
         _, _, note = B.build([], check=True, out_dir=self.tmp / "v")
         self.assertIn("pass `claude plugin validate --strict`", note)
+
+
+@unittest.skipUnless(shutil.which("claude"), "`claude` is not on PATH")
+class InstalledPluginTests(Base):
+    """Install for real, into a throwaway Claude config, by BOTH routes, and look inside.
+
+    The repository's own marketplace once pointed at a plugin folder without the
+    kit: installing from GitHub gave skills that stopped at "the plugin is
+    incomplete", while the zip (a different marketplace) was fine. Only an
+    install shows what a user gets.
+    """
+
+    def install(self, marketplace_dir: Path, plugin_id: str) -> Path:
+        cfg = self.tmp / f"cfg-{plugin_id.split('@')[1]}"
+        env = {**os.environ, "CLAUDE_CONFIG_DIR": str(cfg)}
+        for argv in (["plugin", "marketplace", "add", str(marketplace_dir)], ["plugin", "install", plugin_id]):
+            r = subprocess.run(["claude", *argv], env=env, capture_output=True, text=True, timeout=120,
+                               stdin=subprocess.DEVNULL)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        [skill] = cfg.glob("plugins/cache/*/console-kit/*/skills/console-onboard/SKILL.md")
+        return skill.parent
+
+    def assert_complete(self, skill_dir: Path):
+        kit = (skill_dir / "../../kit").resolve()     # where SKILL.md looks
+        for rel in ("onboard.py", "agent.py", "server.py", "deploy/install.sh", "docs/CLOUDFLARE.md",
+                    "adapter_template.py", "demo/index.html", "console_kit/console.js", "requirements.txt"):
+            self.assertTrue((kit / rel).is_file(), f"installed plugin lacks kit/{rel}")
+
+    def test_an_install_from_the_repository_carries_the_kit(self):
+        self.assert_complete(self.install(B.ROOT, "console-kit@console-kit"))
+
+    def test_an_install_from_the_release_zip_carries_the_kit(self):
+        out, _ = self.built()
+        with zipfile.ZipFile(out) as z:
+            z.extractall(self.tmp / "unzipped")
+        self.assert_complete(self.install(self.tmp / "unzipped/console-kit", "console-kit@console-kit-local"))
 
 
 if __name__ == "__main__":

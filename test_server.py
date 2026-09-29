@@ -24,7 +24,8 @@ import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE))
+KIT = HERE / "plugin" / "kit"  # the kit ships inside the plugin, so every install carries it
+sys.path.insert(0, str(KIT))
 from console_kit import server as SV  # noqa: E402
 
 TEAM = "team.example.cloudflareaccess.com"

@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import socket
 import stat
 import tempfile
@@ -17,7 +18,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import onboard as O
+sys.path.insert(0, str(Path(__file__).resolve().parent / "plugin" / "kit"))
+import onboard as O  # noqa: E402
 
 AUD = "0123456789abcdef" * 4
 GOOD = {"name": "acme", "team_domain": "acme.cloudflareaccess.com", "aud": AUD,
