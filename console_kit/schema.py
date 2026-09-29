@@ -30,6 +30,12 @@ WRITERS = {
     "lock": frozenset({"owner"}),
 }
 QUESTION_KINDS = ("single", "multi", "free")
+# A fork (spec §6): the owner asks the agent to deliberate. Only "fork" exists.
+INTENTS = ("fork",)
+FOCUSES = ("code", "design", "ui", "backend", "whole")
+MODES = ("explore", "tighten")
+# Whose recommendation a forked question's ★ is: the whole panel, or one reviewer (§6.3, §6.6).
+STAR_BY = ("panel", "architect", "ux", "security", "determinism")
 VALID_IF_KINDS = ("file_sha256", "item_status")
 
 # The fields the WRITER supplies; `id`, `seq` and `ts` belong to the store.
@@ -39,15 +45,21 @@ REQUIRED = {
     "answer": ("qid", "picks", "own_text", "by", "nonce"),
     "lock": ("qid", "answer", "by", "nonce"),
 }
+# Fork deliberations (spec §6.4) add optional fields, so SCHEMA_VERSION stays 1:
+# every existing record stays valid, and a kit from before them refuses a
+# record that carries them BY NAME (`unknown field(s)`) rather than dropping them.
 OPTIONAL = {
-    "question": frozenset(),
-    "message": frozenset({"reply_to"}),
+    "question": frozenset({"forked_from", "star_by"}),
+    "message": frozenset({"reply_to", "intent", "focus", "mode"}),
     "answer": frozenset({"supersedes", "reason"}),
     "lock": frozenset(),
 }
 STORE_FIELDS = frozenset({"id", "seq", "ts", "schemaVersion", "type"})
 
 ITEM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
+# A store record id (`record_id`). A field holding one is printed inline in the
+# rulings record, so it is held to exactly this shape, never "any string".
+RECORD_ID = re.compile(r"^[0-9a-f]{24}$")
 QID = re.compile(r"^(?P<item>[A-Za-z0-9][A-Za-z0-9_.\-]*)/Q(?P<n>[1-9][0-9]*)$")
 OPTION_ID = re.compile(r"^[a-z][a-z0-9_]*$")
 NONCE = re.compile(r"^[A-Za-z0-9_\-]{8,64}$")
@@ -151,6 +163,7 @@ def _check_question(rec: dict) -> list[str]:
     star = rec["star"]
     if star is not None and star not in ids:
         errs.append(f"star {star!r} is not one of the options")
+    errs += _check_fork_fields(rec, star)
     vi = rec["valid_if"]
     if not isinstance(vi, list):
         errs.append("valid_if must be a list")
@@ -159,6 +172,24 @@ def _check_question(rec: dict) -> list[str]:
     else:
         for c in vi:
             errs += _check_condition(c)
+    return errs
+
+
+def _check_fork_fields(rec: dict, star: object) -> list[str]:
+    """A forked question names its fork, and a starred one says whose ★ it is (§6.4).
+
+    That the fork exists and is an owner fork message is the STORE's check.
+    """
+    errs = []
+    if "forked_from" in rec and (not isinstance(rec["forked_from"], str) or not RECORD_ID.match(rec["forked_from"])):
+        errs.append("forked_from must be the id of the fork message (24 lowercase hex)")
+    if "star_by" in rec:
+        if rec["star_by"] not in STAR_BY:
+            errs.append(f"star_by {rec['star_by']!r} is not one of {', '.join(STAR_BY)}")
+        if star is None:
+            errs.append("star_by names whose ★ it is, and this question has no ★")
+    if "forked_from" in rec and star is not None and "star_by" not in rec:
+        errs.append("a forked question with a ★ says whose it is: add star_by")
     return errs
 
 
@@ -179,6 +210,20 @@ def _check_message(rec: dict) -> list[str]:
         errs.append(f"item {rec['item']!r} is not an item id")
     if "reply_to" in rec and not isinstance(rec["reply_to"], str):
         errs.append("reply_to must be a record id")
+    intent = rec.get("intent")
+    if "intent" in rec and intent not in INTENTS:
+        errs.append(f"intent {intent!r} is not one of {', '.join(INTENTS)}")
+    if intent == "fork":
+        if rec["by"] != "owner":
+            errs.append("a fork is the owner's request; only the owner writes intent 'fork'")
+        if "mode" not in rec:
+            errs.append("a fork says its mode: explore or tighten")
+    elif "focus" in rec or "mode" in rec:
+        errs.append("focus and mode belong to a fork: set intent 'fork' or leave them out")
+    if "focus" in rec and rec["focus"] not in FOCUSES:
+        errs.append(f"focus {rec['focus']!r} is not one of {', '.join(FOCUSES)}")
+    if "mode" in rec and rec["mode"] not in MODES:
+        errs.append(f"mode {rec['mode']!r} is not one of {', '.join(MODES)}")
     return errs
 
 

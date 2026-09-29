@@ -70,9 +70,19 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
         }
 
     threads: dict[str, list[dict]] = {}
+    forks: dict[str, dict] = {}
     for r in recs:
         if r["type"] == "message":
             threads.setdefault(r["item"], []).append(r)
+            if r.get("intent") == "fork":
+                forks[r["id"]] = {"message": r, "questions": []}
+    # Forked questions are grouped under their fork (§6.5 F1). `append` refuses a
+    # `forked_from` that is not an owner fork message, but loading a file does not
+    # re-run that rule, so one that names no fork is simply left ungrouped.
+    for q in questions.values():
+        fid = q["question"].get("forked_from")
+        if fid in forks:
+            forks[fid]["questions"].append(q["question"]["qid"])
 
     own: dict[str, dict[str, int]] = {i: dict.fromkeys(COUNTED, 0) for i in items}
     for q in questions.values():
@@ -99,6 +109,7 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
         "items": {i: {"own": own[i], "total": total[i]} for i in items},
         "questions": questions,
         "threads": threads,
+        "forks": forks,
         "inbox": [q["question"]["qid"] for q in inbox],
         "awaiting_agent": sorted(waiting_agent),
         "orphaned": orphaned,

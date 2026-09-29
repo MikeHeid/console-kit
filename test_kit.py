@@ -425,7 +425,7 @@ class FoldTests(Tmp):
     def test_refuses_a_broken_supersede_chain(self):
         def mutate(e):
             e["history"] = [dict(e["locked"], answer_id="older")]
-        self._refused(mutate, "does not supersede")
+        self._refused(mutate, "order must list every answer|without superseding")
 
     def test_refuses_a_forged_heading_in_an_inline_field(self):
         # Catches the #163 security HIGH: a crafted committed file whose inline
@@ -512,6 +512,305 @@ class PublishTests(unittest.TestCase):
         if not (HERE / "console_kit" / "console.js").exists():
             self.skipTest("console.js not written yet")
         P.console_block("{}")  # raises PublishError if either file contains a closing tag or a marker
+
+
+def fork(item="LANE.1", mode="tighten", focus="code", **kw):
+    return message(item=item, intent="fork", mode=mode, focus=focus, **kw)
+
+
+class ForkSchemaTests(unittest.TestCase):
+    """Spec §6.4: the fork fields are optional, bounded, and belong together."""
+
+    def test_a_fork_message_and_a_forked_question_are_well_formed(self):
+        self.assertEqual(S.validate(fork()), [])
+        self.assertEqual(S.validate(question(forked_from="f" * 24, star_by="panel")), [])
+        self.assertEqual(S.validate(question(kind="free", forked_from="f" * 24)), [])
+
+    def test_a_fork_without_a_mode_is_refused(self):
+        # AC (§6.5 F1). Catches: `mode` treated as optional everywhere, so a fork arrives with no mode.
+        r = fork()
+        del r["mode"]
+        self.assertTrue(any("mode" in e for e in S.validate(r)))
+
+    def test_focus_or_mode_without_a_fork_is_refused(self):
+        # Catches: stray fork fields on an ordinary message, which the view would then half-read as a fork.
+        self.assertTrue(S.validate(message(mode="explore")))
+        self.assertTrue(S.validate(message(focus="ui")))
+
+    def test_only_the_owner_asks_for_a_fork(self):
+        # Catches: the agent opening its own fork, which would let it widen its own brief.
+        self.assertTrue(any("owner" in e for e in S.validate(fork(by="agent"))))
+
+    def test_values_are_from_the_fixed_lists(self):
+        for r in (fork(mode="sideways"), fork(focus="everything"), message(intent="chat"),
+                  question(forked_from="f" * 24, star_by="the_owner")):
+            self.assertTrue(S.validate(r), r)
+
+    def test_a_starred_forked_question_says_whose_star(self):
+        # AC (§6.5 F1). Catches: a ★ on a forked question with no attribution, which the
+        # record would then print as though the owner's own drafter recommended it.
+        self.assertTrue(any("star_by" in e for e in S.validate(question(forked_from="f" * 24))))
+
+    def test_forked_from_is_a_record_id_and_nothing_else(self):
+        # PR #168 security review, CRITICAL: forked_from is printed inline in the rulings
+        # record, and "any non-empty string" let a backtick and a newline forge a heading.
+        forged = "x`\n\n## FORGED SECTION\n\n**Pick:** \"yes\"\n`"
+        for bad in (forged, "F" * 24, "f" * 23, "f" * 25, ""):
+            self.assertTrue(S.validate(question(forked_from=bad, star_by="panel")), bad)
+
+    def test_star_by_without_a_star_is_refused(self):
+        self.assertTrue(any("no ★" in e for e in S.validate(question(star=None, star_by="panel"))))
+
+
+class ForkStoreTests(Tmp):
+    def test_forked_from_must_name_an_owner_fork_message(self):
+        # AC (§6.5 F1) and its counter-check: a store that accepts ANY forked_from string
+        # passes the happy path below and must fail each of these.
+        st = self.store()
+        plain = st.append(message())
+        agent_msg = st.append(message(by="agent", text="noted"))
+        st.append(question())
+        for bad in ("0" * 24, plain["id"], agent_msg["id"], st.question("LANE.1/Q1")["id"]):
+            with self.assertRaisesRegex(StoreError, "not an owner fork message"):
+                st.append(question(qid="LANE.1/Q9", forked_from=bad, star_by="panel"))
+        f = st.append(fork())
+        q = st.append(question(qid="LANE.1/Q9", forked_from=f["id"], star_by="architect"))
+        self.assertEqual(q["forked_from"], f["id"])
+
+    def test_a_fork_writes_at_most_five_questions(self):
+        # Catches: an uncapped fork, the cost the owner's "Panel of 4, capped" ruled out.
+        from console_kit.store import MAX_FORK_QUESTIONS
+        st = self.store()
+        f = st.append(fork())
+        for n in range(1, MAX_FORK_QUESTIONS + 1):
+            st.append(question(qid=f"LANE.1/Q{n}", forked_from=f["id"], star_by="panel"))
+        with self.assertRaisesRegex(StoreError, "limit"):
+            st.append(question(qid="LANE.1/Q99", forked_from=f["id"], star_by="panel"))
+        st.append(question(qid="LANE.1/Q98"))  # an unforked question is not counted
+        # PR #168 review, MEDIUM. Catches: one counter shared by every fork, so a full
+        # fork blocks the next fork's first question.
+        g = st.append(fork(item="LANE", mode="explore", focus="ui"))
+        st.append(question(qid="LANE/Q1", forked_from=g["id"], star_by="ux"))
+
+    def test_fields_survive_a_reload(self):
+        st = self.store()
+        f = st.append(fork())
+        st.append(question(forked_from=f["id"], star_by="ux"))
+        again = self.store()
+        self.assertEqual(again.question("LANE.1/Q1")["star_by"], "ux")
+        self.assertEqual(again.records()[0]["intent"], "fork")
+
+
+class ForkViewTests(Tmp):
+    def test_forked_questions_are_grouped_under_their_fork(self):
+        # Catches: a view that lists forked questions only in the flat Inbox, so the page
+        # cannot show what came out of which fork.
+        st = self.store()
+        f1, f2 = st.append(fork()), st.append(fork(item="LANE", mode="explore", focus="whole"))
+        st.append(question(qid="LANE.1/Q1", forked_from=f1["id"], star_by="panel"))
+        st.append(question(qid="LANE.1/Q2"))
+        st.append(question(qid="LANE.1/Q3", forked_from=f1["id"], star_by="security"))
+        v = V.build(st, ITEMS, V.make_evaluator(self.dir, {}))
+        self.assertEqual(v["forks"][f1["id"]]["questions"], ["LANE.1/Q1", "LANE.1/Q3"])
+        self.assertEqual(v["forks"][f2["id"]]["questions"], [])
+        self.assertEqual(v["forks"][f1["id"]]["message"]["mode"], "tighten")
+        self.assertEqual(sorted(v["inbox"]), ["LANE.1/Q1", "LANE.1/Q2", "LANE.1/Q3"])
+
+
+class EarlierAnswerTests(Tmp):
+    """2026-09-28, TC-lane/Q1: an answer changed before locking carried the owner's own
+    words, and the export dropped it because it was never locked."""
+
+    # Borrowed, not inherited, so FoldTests' own tests do not run twice.
+    locked_store = FoldTests.locked_store
+    exported = FoldTests.exported
+    _refused = FoldTests._refused
+
+    def changed_then_locked(self):
+        st = self.store()
+        st.append(question())
+        first = st.append(answer(picks=("b",), own_text="and here is what I really mean"))
+        second = st.append(answer(picks=("b",)))
+        st.append(lock(second))
+        return st, first, second
+
+    def test_an_answer_changed_before_locking_is_exported_with_its_words(self):
+        # Catches: history built from locked answers only (the defect this test was written for).
+        st, first, second = self.changed_then_locked()
+        e = F.export(st)["LANE.1__Q1.json"]
+        self.assertEqual(e["locked"]["answer_id"], second["id"])
+        self.assertEqual([a["answer_id"] for a in e["earlier"]], [first["id"]])
+        self.assertEqual(e["earlier"][0]["own_text"], "and here is what I really mean")
+
+    def test_an_unlocked_superseding_answer_keeps_its_reason(self):
+        # PR #168 review, MEDIUM. Catches: `earlier` built without supersedes/reason, so an
+        # answer that overrode a lock, then was changed before its own lock, loses WHY.
+        st = self.store()
+        st.append(question())
+        a1 = st.append(answer())
+        st.append(lock(a1))
+        a2 = st.append(answer(picks=("a",), supersedes=a1["id"], reason="the spec moved under it"))
+        a3 = st.append(answer(picks=("c",)))
+        st.append(lock(a3))
+        e = F.export(st)["LANE.1__Q1.json"]
+        self.assertEqual([x["answer_id"] for x in e["earlier"]], [a2["id"]])
+        self.assertEqual((e["earlier"][0]["supersedes"], e["earlier"][0]["reason"]), (a1["id"], "the spec moved under it"))
+        out = self.exported(st)
+        written, _ = F.fold(out, self.dir / "folded.txt", FakeAdapter(ITEMS), dry_run=False)
+        self.assertEqual(written, ["LANE.1/Q1"])
+        self._refused(lambda x: x.__setitem__("earlier", [dict(x["earlier"][0] if x["earlier"] else {
+            "answer_id": "a" * 24, "picks": [], "picked_labels": [], "own_text": "x", "by": "owner",
+            "answered_at": "2026-09-28T00:00:01Z"}, supersedes="a" * 24)]), "together")
+
+    def superseded_through_earlier(self):
+        self.dir = Path(tempfile.mkdtemp(dir=self._td.name))
+        self.path = self.dir / "store.jsonl"
+        st = self.store()
+        st.append(question())
+        a1 = st.append(answer())
+        st.append(lock(a1))
+        a2 = st.append(answer(picks=("a",), supersedes=a1["id"], reason="the spec moved"))
+        a3 = st.append(answer(picks=("c",)))
+        st.append(lock(a3))
+        return a1, a2, a3, self.exported(st)
+
+    def refuse_sequence(self, mutate, pattern):
+        *_, out = self.superseded_through_earlier()
+        p = out / "LANE.1__Q1.json"
+        d = json.loads(p.read_text())
+        mutate(d)
+        p.write_text(json.dumps(d))
+        with self.assertRaisesRegex(F.FoldError, pattern):
+            F.fold(out, self.dir / "folded.txt", FakeAdapter(ITEMS), dry_run=False)
+
+    def test_the_decoy_supersession_is_refused(self):
+        # PR #168 security review, HIGH, round 3: the locked answer prints a made-up
+        # supersession while a decoy earlier answer carries the real link. A check of
+        # "some answer supersedes each lock" passed it; replaying the store's rule does not.
+        fake = "f" * 24
+
+        def decoy(d):
+            d["locked"].update(supersedes=fake, reason="a supersession that never happened")
+        self.refuse_sequence(decoy, "claims to supersede")
+
+    def test_the_answer_order_must_be_the_stores(self):
+        # Catches: an `order` taken on trust, so reshuffling it hides a lock nothing superseded.
+        def ids(d):  # the file's own ids: each call builds a fresh store, so ids differ per call
+            return d["history"][0]["answer_id"], d["earlier"][0]["answer_id"], d["locked"]["answer_id"]
+        self.refuse_sequence(lambda d: d.update(order=[ids(d)[0], ids(d)[2], ids(d)[1]]), "ends on an unlocked")
+        self.refuse_sequence(lambda d: d.update(order=[ids(d)[1], ids(d)[0], ids(d)[2]]), "nothing came before it")
+        self.refuse_sequence(lambda d: d.update(order=[ids(d)[0], ids(d)[2]]), "exactly once")
+        # Right length, wrong members: an unknown id, or one id twice. Refused by name, never a crash.
+        self.refuse_sequence(lambda d: d.update(order=[ids(d)[0], "e" * 24, ids(d)[2]]), "exactly once")
+        self.refuse_sequence(lambda d: d.update(order=[ids(d)[0], ids(d)[0], ids(d)[2]]), "exactly once")
+        self.refuse_sequence(lambda d: d.pop("order"), "must carry their order")
+        self.refuse_sequence(lambda d: d["earlier"][0].pop("supersedes") and d["earlier"][0].pop("reason"),
+                             "without superseding")
+
+    def test_the_answer_before_a_lock_is_the_one_it_supersedes(self):
+        # The legitimate history the store accepts must fold: lock A, B supersedes A, C, lock C.
+        *_, out = self.superseded_through_earlier()
+        written, _ = F.fold(out, self.dir / "folded.txt", FakeAdapter(ITEMS), dry_run=False)
+        self.assertEqual(written, ["LANE.1/Q1"])
+
+    def test_the_earlier_answer_reaches_the_adapter(self):
+        st, first, _ = self.changed_then_locked()
+        out, ledger, ad = self.exported(st), self.dir / "folded.txt", FakeAdapter(ITEMS)
+        F.fold(out, ledger, ad, dry_run=False)
+        self.assertEqual(ad.recorded[0][0]["earlier"][0]["own_text"], "and here is what I really mean")
+
+    def test_an_earlier_answer_is_checked_like_a_locked_one(self):
+        # Catches: `earlier` passed through unchecked, so a hand-edited file could print words
+        # the owner never wrote under an agent's name, or a pick that is not an option.
+        self._refused(lambda e: e.__setitem__("earlier", [{"answer_id": "a" * 24, "picks": [],
+                      "picked_labels": [], "own_text": "x", "by": "agent", "answered_at": "2026-09-28T00:00:01Z"}]),
+                      "only the owner answers")
+        self._refused(lambda e: e.__setitem__("earlier", [{"answer_id": "a" * 24, "picks": ["z"],
+                      "picked_labels": [], "own_text": "", "by": "owner", "answered_at": "2026-09-28T00:00:01Z"}]),
+                      "not an option")
+        self._refused(lambda e: e.__setitem__("earlier", "all of them"), "must be a list")
+
+    def test_a_file_exported_before_earlier_existed_still_folds(self):
+        # Catches: making `earlier` required, which would refuse the files already committed.
+        st, _ = self.locked_store()
+        out = self.exported(st)
+        p = out / "LANE.1__Q1.json"
+        e = json.loads(p.read_text())
+        del e["earlier"]
+        p.write_text(json.dumps(e))
+        written, _ = F.fold(out, self.dir / "folded.txt", FakeAdapter(ITEMS), dry_run=False)
+        self.assertEqual(written, ["LANE.1/Q1"])
+
+    def test_fork_attribution_is_exported_and_checked(self):
+        st = self.store()
+        f = st.append(fork())
+        st.append(question(forked_from=f["id"], star_by="determinism"))
+        st.append(lock(st.append(answer())))
+        e = F.export(st)["LANE.1__Q1.json"]
+        self.assertEqual((e["forked_from"], e["star_by"]), (f["id"], "determinism"))
+        # A committed file that drops star_by from a starred forked question is refused.
+        out = self.exported(st)
+        p = out / "LANE.1__Q1.json"
+        d = json.loads(p.read_text())
+        del d["star_by"]
+        p.write_text(json.dumps(d))
+        with self.assertRaisesRegex(F.FoldError, "star_by"):
+            F.fold(out, self.dir / "folded.txt", FakeAdapter(ITEMS), dry_run=False)
+
+    def forked_export(self, n=1):
+        self.dir = Path(tempfile.mkdtemp(dir=self._td.name))
+        self.path = self.dir / "store.jsonl"
+        st = self.store()
+        f = st.append(fork())
+        for i in range(1, n + 1):
+            st.append(question(qid=f"LANE.1/Q{i}", forked_from=f["id"], star_by="panel"))
+            st.append(lock(st.append(answer(qid=f"LANE.1/Q{i}"))))
+        return st, f, self.exported(st)
+
+    def refuse_fork_file(self, mutate, pattern):
+        _, _, out = self.forked_export()
+        p = out / "LANE.1__Q1.json"
+        d = json.loads(p.read_text())
+        mutate(d)
+        p.write_text(json.dumps(d))
+        with self.assertRaisesRegex(F.FoldError, pattern):
+            F.fold(out, self.dir / "folded.txt", FakeAdapter(ITEMS), dry_run=False)
+
+    def test_the_forged_heading_is_refused_at_fold(self):
+        # The reviewer's proof of concept, against the second gate: a committed file.
+        forged = "x`\n\n## FORGED SECTION\n\n**Pick:** \"yes\"\n`"
+        self.refuse_fork_file(lambda d: d.update(forked_from=forged), "forked_from")
+
+    def test_a_forked_file_carries_the_fork_it_names(self):
+        # PR #168 security review, HIGH. Catches: a file that claims any fork id, with no
+        # fork message to check it against, or one whose content does not hash to that id.
+        st, f, out = self.forked_export()
+        self.assertEqual(F.export(st)["LANE.1__Q1.json"]["fork"]["id"], f["id"])
+        self.refuse_fork_file(lambda d: d.pop("fork"), "does not carry the fork message")
+        self.refuse_fork_file(lambda d: d["fork"].update(text="something the owner never asked"),
+                              "does not match the fork message's own id")
+        self.refuse_fork_file(lambda d: d.update(forked_from="a" * 24), "does not match")
+        self.refuse_fork_file(lambda d: d["fork"].pop("intent"), "fork message")
+        self.refuse_fork_file(lambda d: d.pop("forked_from"), "without forked_from")
+
+    def test_the_fork_cap_holds_across_committed_files_folded_or_not(self):
+        # PR #168 security review, HIGH. Catches: a cap counted only in the store, or only
+        # over the files not yet folded, so six files for one fork fold one at a time.
+        st, f, out = self.forked_export(n=5)
+        ledger = self.dir / "folded.txt"
+        F.fold(out, ledger, FakeAdapter(ITEMS), dry_run=False)
+        extra = json.loads((out / "LANE.1__Q5.json").read_text())
+        extra["qid"] = "LANE.1/Q6"
+        extra["locked"]["lock_id"] = "b" * 24
+        (out / "LANE.1__Q6.json").write_text(json.dumps(extra))
+        with self.assertRaisesRegex(F.FoldError, "6 questions"):
+            F.fold(out, ledger, FakeAdapter(ITEMS), dry_run=False)
+
+    def test_earlier_is_capped(self):
+        # PR #168 security review, MEDIUM: fold reads files, not the 64 KiB server body.
+        one = {"answer_id": "a" * 24, "picks": [], "picked_labels": [], "own_text": "x", "by": "owner",
+               "answered_at": "2026-09-28T00:00:01Z"}
+        self._refused(lambda e: e.__setitem__("earlier", [one] * (F.MAX_EARLIER + 1)), "at most")
 
 
 if __name__ == "__main__":

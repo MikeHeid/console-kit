@@ -177,7 +177,8 @@ class Console:
 
     def _ring(self, rec: dict) -> None:
         line = {"seq": rec["seq"], "type": rec["type"], "ts": rec["ts"]}
-        line.update({k: rec[k] for k in ("qid", "item") if k in rec})
+        # `intent` lets the queue show a fork without reading the store (§6.3).
+        line.update({k: rec[k] for k in ("qid", "item", "intent") if k in rec})
         with open(self.cfg.inbox, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(line, sort_keys=True) + "\n")
 

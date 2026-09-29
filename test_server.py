@@ -189,6 +189,20 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(len(bell), 1)
         self.assertEqual((bell[0]["qid"], bell[0]["seq"]), ("LANE.1/Q1", body["record"]["seq"]))
 
+    def test_a_fork_request_rings_with_its_intent(self):
+        # §6.3: the queue shows a fork without reading the store. Catches: a doorbell line
+        # that names the item only, so a waiting fork looks like any other message.
+        body = {"item": "LANE.1", "text": "deliberate on this", "intent": "fork", "mode": "tighten",
+                "focus": "code", "nonce": "ownerfork001"}
+        code, got = self.req("POST", "/api/message", body, tok=token())
+        self.assertEqual(code, 200, got)
+        self.assertEqual(got["record"]["by"], "owner")
+        bell = self.doorbell()
+        self.assertEqual((bell[-1]["item"], bell[-1]["intent"]), ("LANE.1", "fork"))
+        code, _ = self.req("POST", "/api/message", {"item": "LANE.1", "text": "plain", "nonce": "ownerplain01"},
+                           tok=token())
+        self.assertNotIn("intent", self.doorbell()[-1])
+
     def test_the_page_cannot_choose_its_author(self):
         for field in ("by", "type", "schemaVersion"):
             code, body = self.req("POST", "/api/answer", self.answer(**{field: "agent"}), tok=token())
@@ -225,14 +239,21 @@ class ServerTests(unittest.TestCase):
         code, _ = self.req("POST", "/api/answer", big, tok=token())
         self.assertEqual(code, 413)
 
-    def raw_post(self, content_length: str, body: bytes) -> int:
+    def raw_post(self, content_length: str) -> int:
+        """Send only the headers, keep the socket open, and read the reply.
+
+        No body is sent. A server that believed the header and tried to read the
+        body (for -1, "to the end of the stream") would wait for bytes that never
+        come, and the 10 s timeout fails the test. Sending a large body instead
+        raced the server's close against unread bytes: the kernel answered with a
+        reset, and the test failed about 1 run in 4 (PR #168 review, ENOTCONN).
+        """
         import socket as so
         s = so.create_connection(("127.0.0.1", self.port), timeout=10)
         head = (f"POST /api/answer HTTP/1.1\r\nHost: x\r\nOrigin: https://{HOSTNAME}\r\n"
                 f"Cf-Access-Jwt-Assertion: {token()}\r\nContent-Type: application/json\r\n"
                 f"Content-Length: {content_length}\r\nConnection: close\r\n\r\n").encode()
-        s.sendall(head + body)
-        s.shutdown(so.SHUT_WR)
+        s.sendall(head)
         data = b""
         while chunk := s.recv(4096):
             data += chunk
@@ -241,10 +262,9 @@ class ServerTests(unittest.TestCase):
 
     def test_a_negative_or_malformed_content_length_is_refused(self):
         # Catches: int("-1") accepted, so read(-1) reads to end of stream past the cap
-        # (#165 security review, HIGH, proved with a 262 KB body).
-        big = json.dumps(self.answer(own_text="x" * (4 * SV.MAX_BODY))).encode()
+        # (#165 security review, HIGH). Answered without reading any body, or it times out.
         for cl in ("-1", "+5", "1e3", " -0", "²", "9" * 40):
-            self.assertEqual(self.raw_post(cl, big), 400, cl)
+            self.assertEqual(self.raw_post(cl), 400, cl)
         self.assertEqual(self.doorbell(), [])
 
     def test_an_existing_loose_state_dir_is_tightened(self):

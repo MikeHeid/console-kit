@@ -33,6 +33,11 @@ from typing import Callable, Iterable
 from . import schema as S
 
 
+# At most this many questions come out of one fork (spec §6.6, an architect
+# default the owner may veto).
+MAX_FORK_QUESTIONS = 5
+
+
 class StoreError(Exception):
     """Raised for a record the store refuses, or a file it cannot read. The message says why."""
 
@@ -133,6 +138,8 @@ class Store:
         if kind == "question":
             if self.question(rec["qid"]):
                 raise StoreError(f"qid {rec['qid']} already exists; a qid is minted once. Ask a new Q<n>")
+            if "forked_from" in rec:
+                self._check_forked(rec)
         elif kind == "message":
             if "reply_to" in rec and rec["reply_to"] not in self._by_id:
                 raise StoreError(f"reply_to {rec['reply_to']!r} names no record")
@@ -157,6 +164,17 @@ class Store:
         if head is not None and self.lock_of(head["id"]) and "supersedes" not in rec:
             raise StoreError(f"{rec['qid']} is locked. A new answer supersedes the lock: "
                              f"name it (supersedes={head['id']}) and give a reason. A lock is never undone")
+
+    def _check_forked(self, rec: dict) -> None:
+        """A forked question names an owner fork message, and a fork writes at most MAX_FORK_QUESTIONS (§6.3, §6.6)."""
+        fork = self._by_id.get(rec["forked_from"])
+        # "Owner" needs no check here: the schema refuses intent 'fork' from any
+        # other writer, on append and on load, so no agent fork can be in the file.
+        if fork is None or fork["type"] != "message" or fork.get("intent") != "fork":
+            raise StoreError(f"forked_from {rec['forked_from']!r} is not an owner fork message")
+        n = sum(1 for r in self._records if r["type"] == "question" and r.get("forked_from") == fork["id"])
+        if n >= MAX_FORK_QUESTIONS:
+            raise StoreError(f"fork {fork['id']} already has {n} questions; the limit is {MAX_FORK_QUESTIONS}")
 
     def _check_lock(self, rec: dict) -> None:
         a = self._by_id.get(rec["answer"])

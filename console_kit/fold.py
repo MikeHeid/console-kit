@@ -49,7 +49,11 @@ class FoldError(Exception):
     pass
 
 
-RECORD_ID = re.compile(r"^[0-9a-f]{24}$")
+RECORD_ID = S.RECORD_ID
+# An answer changed this many times before locking is carried whole; past it the
+# file is refused rather than bloating the record. Generous on purpose.
+MAX_EARLIER = 100
+MAX_FORK_QUESTIONS = 5  # the store's cap, re-checked across committed files (§6.6)
 TS = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 
 
@@ -67,7 +71,11 @@ def export(store: Store) -> dict[str, dict]:
         if not locked or locked[-1][0]["id"] != answers[-1]["id"]:
             continue
         history = [_entry_answer(q, a, lk) for a, lk in locked]
-        out[locked_filename(q["qid"])] = {
+        # An answer changed before it was locked is still what the owner said.
+        # Dropping it lost the owner's own words from the record (2026-09-28,
+        # TC-lane/Q1), so every unlocked answer is carried as `earlier`.
+        earlier = [_entry_earlier(q, a) for a, lk in locks if lk is None]
+        entry = {
             "schemaVersion": S.SCHEMA_VERSION,
             "qid": q["qid"],
             "item": q["item"],
@@ -81,8 +89,29 @@ def export(store: Store) -> dict[str, dict]:
             "valid_if": q["valid_if"],
             "locked": history[-1],
             "history": history[:-1],
+            "earlier": earlier,
+            # Every answer id in store order, so fold can replay the store's rule.
+            "order": [a["id"] for a in answers],
         }
+        entry.update({k: q[k] for k in ("forked_from", "star_by") if k in q})
+        if "forked_from" in q:
+            # The fork message travels with the file, so `fold`, which never reads
+            # the store (R1), can still check the id against the message it names.
+            entry["fork"] = next(r for r in store.records() if r["id"] == q["forked_from"])
+        out[locked_filename(q["qid"])] = entry
     return out
+
+
+def _entry_earlier(q: dict, a: dict) -> dict:
+    labels = {o["id"]: o["label"] for o in q["options"]}
+    e = {"answer_id": a["id"], "picks": a["picks"],
+         "picked_labels": [labels[p] for p in a["picks"] if p in labels],
+         "own_text": a["own_text"], "by": a["by"], "answered_at": a["ts"]}
+    # An answer that superseded a lock and was then changed before its own lock
+    # still said why it superseded; that reason is the owner's words too.
+    if "supersedes" in a:
+        e["supersedes"], e["reason"] = a["supersedes"], a["reason"]
+    return e
 
 
 def _entry_answer(q: dict, a: dict, lk: dict) -> dict:
@@ -142,6 +171,7 @@ def check_entry(name: str, e: object, items: dict[str, dict]) -> list[str]:
                  "text": e.get("question"), "kind": e.get("kind"), "options": e.get("options"),
                  "star": e.get("star"), "valid_if": e.get("valid_if"), "source": e.get("source"),
                  "by": e.get("asked_by"), "nonce": "export-check"}
+    as_record.update({k: e[k] for k in ("forked_from", "star_by") if k in e})
     errs += [f"{name}: {m}" for m in S.validate(as_record)]
     if not isinstance(e.get("asked_at"), str) or not TS.match(e["asked_at"]):
         errs.append(f"{name}: asked_at {e.get('asked_at')!r} is not a store timestamp")
@@ -155,10 +185,110 @@ def check_entry(name: str, e: object, items: dict[str, dict]) -> list[str]:
         return errs + [f"{name}: not locked: no `locked` answer"]
     for a in chain:
         errs += _check_locked_answer(name, a, ids, labels, e.get("star"))
-    for prev, nxt in zip(chain, chain[1:]):
-        if nxt.get("supersedes") != prev.get("answer_id"):
-            errs.append(f"{name}: answer {nxt.get('answer_id')} does not supersede {prev.get('answer_id')}; "
+    # `earlier` is absent from files exported before it existed; they were
+    # folded then, and read as having no earlier answers.
+    earlier = e.get("earlier", [])
+    if not isinstance(earlier, list) or len(earlier) > MAX_EARLIER:
+        errs.append(f"{name}: earlier must be a list of at most {MAX_EARLIER} answers")
+    else:
+        for a in earlier:
+            errs += _check_earlier_answer(name, a, ids, labels)
+    errs += _check_fork(name, e)
+    errs += _check_sequence(name, e, chain, earlier if isinstance(earlier, list) else [])
+    return errs
+
+
+def _check_sequence(name: str, e: dict, chain: list, earlier: list) -> list[str]:
+    """Replay the store's answer rule (`Store._check_answer`) over the question's answers in order.
+
+    The rule, answer by answer: the first supersedes nothing; one that follows a
+    LOCKED answer must name it in `supersedes` (a lock is superseded, never undone,
+    D3); one that follows an unlocked answer may name only that answer. Checking
+    anything looser, such as "some answer supersedes each lock", let a decoy
+    earlier answer carry the real link while the locked answer printed a made-up
+    supersession (PR #168 security review, HIGH).
+
+    `order` lists every answer id in store order. A file exported before it
+    existed has no `earlier` either, so its answers are exactly the locked chain,
+    in order, and each lock after the first must name the one before it.
+    """
+    if not all(isinstance(a, dict) for a in chain + earlier):
+        return []  # already reported by the per-answer checks
+    order = e.get("order")
+    if order is None:
+        if earlier:
+            return [f"{name}: a file with earlier answers must carry their order"]
+        order = [a.get("answer_id") for a in chain]
+    by_id = {a.get("answer_id"): a for a in chain + earlier}
+    if (not isinstance(order, list) or len(order) != len(chain) + len(earlier)
+            or len(by_id) != len(order) or set(order) != set(by_id)):
+        return [f"{name}: order must list every answer exactly once"]
+    locked_ids = [a.get("answer_id") for a in chain]
+    if [i for i in order if i in set(locked_ids)] != locked_ids or order[-1] != locked_ids[-1]:
+        return [f"{name}: order puts the locks out of sequence, or ends on an unlocked answer"]
+    errs = []
+    prev = None
+    for aid in order:
+        a = by_id[aid]
+        sup = a.get("supersedes")
+        if prev is None:
+            if sup is not None:
+                errs.append(f"{name}: the first answer {aid} supersedes {sup}, but nothing came before it")
+        elif prev in locked_ids and sup != prev:
+            errs.append(f"{name}: answer {aid} follows lock {prev} without superseding it; "
                         f"a lock is superseded, never replaced silently (D3)")
+        elif prev not in locked_ids and sup is not None and sup != prev:
+            errs.append(f"{name}: answer {aid} claims to supersede {sup}, but the answer before it was {prev}")
+        prev = aid
+    return errs
+
+
+def _check_fork(name: str, e: dict) -> list[str]:
+    """A forked question's file carries the fork message it names, checked as a stored record.
+
+    What this proves: `forked_from` is the content hash of a well-formed owner
+    fork message that the file shows in full. What it cannot prove, because
+    `fold` never reads the store (R1): that the message is in the store. That
+    is the PR reviewer's to see, as it is for every answer and lock id here.
+    """
+    if "forked_from" not in e:
+        return [f"{name}: a fork message without forked_from"] if "fork" in e else []
+    f = e.get("fork")
+    if not isinstance(f, dict):
+        return [f"{name}: forked_from names a fork, but the file does not carry the fork message"]
+    errs = [f"{name}: fork message: {m}" for m in S.validate(f)]
+    if errs:
+        return errs
+    if f.get("intent") != "fork":
+        errs.append(f"{name}: the message forked_from names is not a fork")
+    if f.get("id") != S.record_id(f) or f["id"] != e["forked_from"]:
+        errs.append(f"{name}: forked_from does not match the fork message's own id")
+    return errs
+
+
+def _check_earlier_answer(name: str, a: object, option_ids: list, labels: dict) -> list[str]:
+    """An earlier (never locked) answer prints the owner's words too, so it is checked as strictly."""
+    base = {"answer_id", "picks", "picked_labels", "own_text", "by", "answered_at"}
+    if not isinstance(a, dict) or set(a) not in (base, base | {"supersedes", "reason"}):
+        return [f"{name}: an earlier answer carries exactly {sorted(base)}, plus supersedes and reason together"]
+    errs = []
+    if "supersedes" in a:
+        if not isinstance(a["supersedes"], str) or not RECORD_ID.match(a["supersedes"]):
+            errs.append(f"{name}: earlier supersedes {a['supersedes']!r} is not a store record id")
+        if not isinstance(a["reason"], str) or not a["reason"].strip() or len(a["reason"]) > S.MAX_TEXT:
+            errs.append(f"{name}: earlier reason must be non-empty text of at most {S.MAX_TEXT} characters")
+    if not isinstance(a["answer_id"], str) or not RECORD_ID.match(a["answer_id"]):
+        errs.append(f"{name}: earlier answer_id {a['answer_id']!r} is not a store record id")
+    if not isinstance(a["answered_at"], str) or not TS.match(a["answered_at"]):
+        errs.append(f"{name}: earlier answered_at {a['answered_at']!r} is not a store timestamp")
+    if a["by"] != "owner":
+        errs.append(f"{name}: earlier answer {a['answer_id']} has by={a['by']!r}; only the owner answers")
+    if not isinstance(a["own_text"], str) or len(a["own_text"]) > S.MAX_TEXT:
+        errs.append(f"{name}: earlier own_text must be a string of at most {S.MAX_TEXT} characters")
+    if not isinstance(a["picks"], list) or not all(p in option_ids for p in a["picks"]):
+        errs.append(f"{name}: earlier answer {a['answer_id']} picks something that is not an option")
+    elif a["picked_labels"] != [labels[p] for p in a["picks"]]:
+        errs.append(f"{name}: earlier picked_labels does not match the options and picks")
     return errs
 
 
@@ -215,6 +345,7 @@ def fold(locked_dir: Path, ledger: Path, adapter: ProjectAdapter, *, dry_run: bo
     items = adapter.items()
     done = read_ledger(ledger)
     todo, skipped, refusals = [], [], []
+    forks: dict[str | None, list[str]] = {}
     for p in sorted(locked_dir.glob("*.json")):
         try:
             e = json.loads(p.read_text(encoding="utf-8"))
@@ -225,10 +356,16 @@ def fold(locked_dir: Path, ledger: Path, adapter: ProjectAdapter, *, dry_run: bo
         if errs:
             refusals += errs
             continue
+        # Every file counts toward its fork's cap, folded before or not.
+        forks.setdefault(e.get("forked_from"), []).append(p.name)
         if e["locked"]["lock_id"] in done:
             skipped.append(f"{p.name}: lock {e['locked']['lock_id']} already folded")
             continue
         todo.append(e)
+    forks.pop(None, None)
+    for fid, names in sorted(forks.items()):
+        if len(names) > MAX_FORK_QUESTIONS:
+            refusals.append(f"fork {fid}: {len(names)} questions ({', '.join(names)}); the limit is {MAX_FORK_QUESTIONS}")
     if refusals:
         raise FoldError("refused, nothing folded:\n  " + "\n  ".join(refusals))
     written = adapter.record(todo, dry_run) if todo else []
