@@ -119,6 +119,56 @@ class ServerTests(unittest.TestCase):
 
     # -- the Access gate (P3 ACs) ---------------------------------------------
 
+    # -- /api/board: live values (AB-2/Q4) ---------------------------------------
+
+    def with_board(self, fn):
+        """Give the console an adapter whose board() is `fn`, counting its calls."""
+        calls = []
+
+        class BoardAdapter(FakeAdapter):
+            def board(self):
+                calls.append(1)
+                return fn()
+        self.console.adapter = BoardAdapter()
+        return calls
+
+    def test_board_is_behind_the_same_gate(self):
+        # Catches: the new route answered before _gate(), leaking register state
+        # to anyone who can reach the port.
+        calls = self.with_board(lambda: {"shape": "s", "values": {"pct": "5%"}})
+        self.assertEqual(self.req("GET", "/api/board")[0], 403)
+        self.assertEqual(self.req("GET", "/api/board", tok=token(key=OTHER))[0], 403)
+        self.assertEqual(calls, [])  # refused before the register is read at all
+        code, body = self.req("GET", "/api/board", tok=token())
+        self.assertEqual((code, body), (200, {"shape": "s", "values": {"pct": "5%"}}))
+        self.assertEqual(len(calls), 1)
+
+    def test_board_is_404_when_the_adapter_offers_none(self):
+        # The kit is project-neutral: a project without board() keeps its static page.
+        code, body = self.req("GET", "/api/board", tok=token())
+        self.assertEqual(code, 404)
+        self.assertIn("board()", body["error"])
+
+    def test_a_malformed_board_is_refused_not_served(self):
+        # The adapter is project code; the page applies what it gets to the DOM,
+        # so a non-string value must never reach it.
+        for bad in ({"shape": "s", "values": {"pct": 5}}, {"shape": 1, "values": {}},
+                    {"values": {}}, {"shape": "s", "values": ["x"]}, ["s"], None):
+            with self.subTest(bad=bad):
+                self.with_board(lambda bad=bad: bad)
+                code, body = self.req("GET", "/api/board", tok=token())
+                self.assertEqual(code, 503)
+                self.assertNotIn("values", body)
+
+    def test_a_board_that_raises_is_503_and_the_server_lives(self):
+        def boom():
+            raise ValueError("register caught mid-write")
+        self.with_board(boom)
+        code, body = self.req("GET", "/api/board", tok=token())
+        self.assertEqual(code, 503)
+        self.assertNotIn("mid-write", json.dumps(body))  # the reason goes to the log, not the page
+        self.assertEqual(self.req("GET", "/api/view", tok=token())[0], 200)
+
     def test_loopback_request_without_a_token_is_refused(self):
         # AC: refused directly on loopback, not only through the public hostname.
         for path in ("/", "/api/view"):

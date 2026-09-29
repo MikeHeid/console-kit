@@ -1,0 +1,44 @@
+<!doctype html>
+<!-- written by console-kit onboard.py -->
+<!-- A starter page for the owner console. The server injects the console
+     (console.js and console.css) into whatever page it serves, so this can be
+     any HTML you like: a dashboard, a status page, a plain list.
+
+     Give each piece of work a <details id="item-ID"> with a <summary>, where ID
+     is an id from your adapter's items(); the console adds a button to each
+     summary that opens that item's questions. The Inbox button is always
+     there, whatever the page holds. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Owner console</title>
+<style>
+  :root { --c-bg:#f7f7f5; --c-surface:#fff; --c-surface-alt:#f0f0ec; --c-border:#d6d6d0;
+          --c-fg:#1b1b18; --c-fg-muted:#5c5c55; --c-accent:#2458c6; --c-accent-fg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --c-bg:#141413; --c-surface:#1e1e1c; --c-surface-alt:#262623; --c-border:#3a3a36;
+            --c-fg:#ecece6; --c-fg-muted:#a3a39a; --c-accent:#7aa2ff; --c-accent-fg:#101010; }
+  }
+  body { margin:0; padding:24px 16px 80px; background:var(--c-bg); color:var(--c-fg);
+         font:15px/1.55 system-ui, sans-serif; }
+  main { max-width:760px; margin:0 auto; }
+  details { background:var(--c-surface); border:1px solid var(--c-border); border-radius:8px;
+            padding:10px 14px; margin:10px 0; }
+  summary { cursor:pointer; font-weight:600; }
+  .muted { color:var(--c-fg-muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Owner console</h1>
+  <p class="muted">Questions from your agents land in the Inbox. Replace this page with your own;
+     the console is added to it by the server.</p>
+  <details id="item-PROJECT" open>
+    <summary>PROJECT: this project</summary>
+    <p class="muted">The starter adapter's one item. List your real work in
+       <code>.console-kit/items.json</code>, and give each item a block like this one.</p>
+  </details>
+</main>
+</body>
+</html>

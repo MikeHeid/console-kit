@@ -1,0 +1,18 @@
+# systemd USER unit for one project's console tunnel. Rendered by deploy/install.sh.
+# It reads its OWN config file, ~/.cloudflared/config-<tunnel>.yml, and never the
+# default config.yml, so another tunnel on this machine cannot be taken down by it.
+# That file exists only once you have created the tunnel (`cloudflared tunnel
+# create`, then `onboard.py tunnel`); until then this unit fails to start.
+[Unit]
+Description=Cloudflare tunnel for the @NAME@ owner console
+After=network-online.target @NAME@-console.service
+Requires=@NAME@-console.service
+
+[Service]
+Type=simple
+ExecStart=@CLOUDFLARED@ tunnel --no-autoupdate --config %h/.cloudflared/config-@TUNNEL@.yml run
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

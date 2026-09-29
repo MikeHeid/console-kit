@@ -54,6 +54,10 @@ SECURITY_HEADERS = (
 )
 
 
+class BoardError(Exception):
+    pass
+
+
 class AuthError(Exception):
     """A request the Access check refuses. The message is safe to show; it never echoes the token."""
 
@@ -153,6 +157,24 @@ class Console:
         items = self.items()
         holds = V.make_evaluator(self.cfg.root, {k: v.get("status") for k, v in items.items()})
         return {"view": V.build(self.store, items, holds), "items": items, "cursor": self.read_cursor()}
+
+    def board(self) -> dict | None:
+        """The page's live values (AB-2/Q4), or None when the adapter offers none.
+
+        The committed page stays the page; this only lets an open tab catch up.
+        The adapter is project code, so its answer is checked here rather than
+        trusted: a malformed one is an error, never something the page applies.
+        """
+        fn = getattr(self.adapter, "board", None)
+        if not callable(fn):
+            return None
+        got = fn()
+        values = got.get("values") if isinstance(got, dict) else None
+        if (not isinstance(got.get("shape") if isinstance(got, dict) else None, str)
+                or not isinstance(values, dict)
+                or not all(isinstance(k, str) and isinstance(v, str) for k, v in values.items())):
+            raise BoardError("the adapter's board() must return {shape: str, values: {str: str}}")
+        return {"shape": got["shape"], "values": values}
 
     def page(self) -> str:
         block = P.console_block(json.dumps({"api": "/api", "project": self.cfg.project}))
@@ -260,7 +282,19 @@ class OwnerHandler(_Handler):
             return self._send(200, self.console.page(), "text/html; charset=utf-8")
         if self.path == "/api/view":
             return self._send(200, self.console.payload())
+        if self.path == "/api/board":
+            return self._board()
         self._send(404, {"error": "not found"})
+
+    def _board(self) -> None:
+        try:
+            board = self.console.board()
+        except Exception as e:  # a register caught mid-write, or a bad adapter: this poll is skipped, the page stands
+            sys.stderr.write(f"console board: {type(e).__name__}: {e}\n")
+            return self._send(503, {"error": "the board could not be read just now"})
+        if board is None:
+            return self._send(404, {"error": "this project's adapter offers no board()"})
+        self._send(200, board)
 
     def _other_method(self) -> None:
         # Every method a client may send meets the gate first (D5). A method name http.server

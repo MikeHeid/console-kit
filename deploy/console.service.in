@@ -1,0 +1,26 @@
+# systemd USER unit for one project's owner console server. Rendered by
+# deploy/install.sh: @PROJECT@ is the project's root, @KIT@ the installed kit,
+# @PYTHON@ the kit's venv interpreter, @NAME@ the project name.
+[Unit]
+Description=@NAME@ owner console (loopback only; reached through Cloudflare Access)
+After=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=@PROJECT@/.console-kit/console.env
+WorkingDirectory=@PROJECT@
+ExecStart=@PYTHON@ @KIT@/server.py \
+  --root @PROJECT@ \
+  --page @PROJECT@/${CONSOLE_PAGE} \
+  --state %h/.local/state/console-kit/@NAME@ \
+  --adapter @PROJECT@/${CONSOLE_ADAPTER} \
+  --team-domain ${CONSOLE_TEAM_DOMAIN} \
+  --aud ${CONSOLE_AUD} \
+  --hostname ${CONSOLE_HOSTNAME} \
+  --port ${CONSOLE_PORT} \
+  --project @NAME@
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
