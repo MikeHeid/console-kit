@@ -30,12 +30,21 @@ WRITERS = {
     "lock": frozenset({"owner"}),
 }
 QUESTION_KINDS = ("single", "multi", "free")
-# A fork (spec §6): the owner asks the agent to deliberate. Only "fork" exists.
-INTENTS = ("fork",)
+# The owner's two requests to the agent: "fork" asks it to deliberate (§6), and
+# "process" says the answers are in and it should process them (§7.3).
+INTENTS = ("fork", "process")
+OWNER_INTENTS = frozenset(INTENTS)
 FOCUSES = ("code", "design", "ui", "backend", "whole")
 MODES = ("explore", "tighten")
-# Whose recommendation a forked question's ★ is: the whole panel, or one reviewer (§6.3, §6.6).
-STAR_BY = ("panel", "architect", "ux", "security", "determinism")
+# The seats a follow-up round may call (D13), and a typed seat: `other:<role>`,
+# 1-40 characters of letters, digits, spaces and hyphens. It is shown on the
+# page and handed to an agent, so it is held to exactly this shape.
+ROSTER = ("devops", "ux", "adversarial", "security", "architect", "analyst")
+OTHER_ROLE = re.compile(r"^other:[A-Za-z0-9][A-Za-z0-9 \-]{0,39}$")
+MAX_ROLES = 3
+# Whose recommendation a forked question's ★ is: the whole panel, one of the
+# default committee's seats (§6.6), a roster seat (D13), or a typed `other:` seat.
+STAR_BY = ("panel", "architect", "ux", "security", "determinism", "devops", "adversarial", "analyst")
 VALID_IF_KINDS = ("file_sha256", "item_status")
 
 # The fields the WRITER supplies; `id`, `seq` and `ts` belong to the store.
@@ -50,7 +59,7 @@ REQUIRED = {
 # record that carries them BY NAME (`unknown field(s)`) rather than dropping them.
 OPTIONAL = {
     "question": frozenset({"forked_from", "star_by"}),
-    "message": frozenset({"reply_to", "intent", "focus", "mode"}),
+    "message": frozenset({"reply_to", "intent", "focus", "mode", "roles", "follow_up_of"}),
     "answer": frozenset({"supersedes", "reason"}),
     "lock": frozenset(),
 }
@@ -184,8 +193,9 @@ def _check_fork_fields(rec: dict, star: object) -> list[str]:
     if "forked_from" in rec and (not isinstance(rec["forked_from"], str) or not RECORD_ID.match(rec["forked_from"])):
         errs.append("forked_from must be the id of the fork message (24 lowercase hex)")
     if "star_by" in rec:
-        if rec["star_by"] not in STAR_BY:
-            errs.append(f"star_by {rec['star_by']!r} is not one of {', '.join(STAR_BY)}")
+        if not is_star_by(rec["star_by"]):
+            errs.append(f"star_by {rec['star_by']!r} is not one of {', '.join(STAR_BY)}, "
+                        f"or other:<role> (1-40 letters, digits, spaces, hyphens)")
         if star is None:
             errs.append("star_by names whose ★ it is, and this question has no ★")
     if "forked_from" in rec and star is not None and "star_by" not in rec:
@@ -213,18 +223,62 @@ def _check_message(rec: dict) -> list[str]:
     intent = rec.get("intent")
     if "intent" in rec and intent not in INTENTS:
         errs.append(f"intent {intent!r} is not one of {', '.join(INTENTS)}")
+    # isinstance first: JSON can carry a list here, and a list is unhashable in a frozenset test.
+    if isinstance(intent, str) and intent in OWNER_INTENTS and rec["by"] != "owner":
+        # An agent that could write either could start its own deliberation or processing run.
+        errs.append(f"intent {intent!r} is the owner's request; only the owner writes it")
     if intent == "fork":
-        if rec["by"] != "owner":
-            errs.append("a fork is the owner's request; only the owner writes intent 'fork'")
         if "mode" not in rec:
             errs.append("a fork says its mode: explore or tighten")
-    elif "focus" in rec or "mode" in rec:
-        errs.append("focus and mode belong to a fork: set intent 'fork' or leave them out")
+    else:
+        present = [f for f in ("focus", "mode", "roles", "follow_up_of") if f in rec]
+        if present:
+            errs.append(f"{', '.join(present)} belong(s) to a fork: set intent 'fork' or leave them out")
     if "focus" in rec and rec["focus"] not in FOCUSES:
         errs.append(f"focus {rec['focus']!r} is not one of {', '.join(FOCUSES)}")
     if "mode" in rec and rec["mode"] not in MODES:
         errs.append(f"mode {rec['mode']!r} is not one of {', '.join(MODES)}")
+    errs += _check_follow_up(rec)
     return errs
+
+
+def _check_follow_up(rec: dict) -> list[str]:
+    """A follow-up round names the fork it follows and the 1-3 seats it calls (D13, §7.5).
+
+    The first round of a fork runs the default committee and names no seats,
+    so `roles` comes only with `follow_up_of`. That the named fork exists is
+    the STORE's check.
+    """
+    errs = []
+    if "follow_up_of" in rec:
+        if not isinstance(rec["follow_up_of"], str) or not RECORD_ID.match(rec["follow_up_of"]):
+            errs.append("follow_up_of must be the id of the earlier fork message (24 lowercase hex)")
+        if "roles" not in rec:
+            errs.append(f"a follow-up names the seats it calls: roles, 1 to {MAX_ROLES}")
+    elif "roles" in rec:
+        errs.append("roles belong to a follow-up; the first round runs the default committee. Add follow_up_of")
+    if "roles" in rec:
+        roles = rec["roles"]
+        if not isinstance(roles, list) or not 1 <= len(roles) <= MAX_ROLES:
+            errs.append(f"roles must be a list of 1 to {MAX_ROLES} seats")
+        else:
+            bad = [r for r in roles if not is_role(r)]
+            if bad:
+                errs.append(f"role(s) {bad!r} are not one of {', '.join(ROSTER)}, "
+                            f"or other:<role> (1-40 letters, digits, spaces, hyphens)")
+            elif len(roles) != len(set(roles)):
+                errs.append("roles repeat")
+    return errs
+
+
+def is_role(v: object) -> bool:
+    """A seat a follow-up may call: a roster seat, or a typed `other:<role>`."""
+    return isinstance(v, str) and (v in ROSTER or bool(OTHER_ROLE.match(v)))
+
+
+def is_star_by(v: object) -> bool:
+    """Whose ★ a forked question carries: a committee or roster seat, or a typed `other:<role>`."""
+    return isinstance(v, str) and (v in STAR_BY or bool(OTHER_ROLE.match(v)))
 
 
 def _check_answer(rec: dict) -> list[str]:

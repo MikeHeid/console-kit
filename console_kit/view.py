@@ -116,6 +116,119 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
     }
 
 
+def subtree(items: Mapping[str, dict], root: str) -> set[str]:
+    """`root` and every item under it (D14's scope), terminating even when parent links form a cycle."""
+    out = set()
+    for i in items:
+        seen: set[str] = set()
+        node: str | None = i
+        while node is not None and node in items and node not in seen:
+            if node == root:
+                out.add(i)
+                break
+            seen.add(node)
+            node = items[node].get("parent")
+    return out
+
+
+def tree_order(items: Mapping[str, dict]) -> list[str]:
+    """Items depth first from the roots, children in the adapter's order; an item only a cycle reaches comes last."""
+    kids: dict[str | None, list[str]] = {}
+    for i, d in items.items():
+        p = d.get("parent")
+        kids.setdefault(p if p in items else None, []).append(i)
+    out: list[str] = []
+    seen: set[str] = set()
+    stack = list(reversed(kids.get(None, [])))
+    while stack:
+        i = stack.pop()
+        if i in seen:
+            continue
+        seen.add(i)
+        out.append(i)
+        stack.extend(reversed(kids.get(i, [])))
+    return out + [i for i in items if i not in seen]
+
+
+def answers_sheet(view: dict, items: Mapping[str, dict], item: str | None = None,
+                  fork: str | None = None) -> dict:
+    """Every question in a scope with EVERY answer it got, in tree order (spec §7.6).
+
+    `item` narrows to that item and all under it; `fork` narrows to one round's
+    questions. Unanswered and stale questions stay in, because leaving them out
+    would make a round look finished when it is not. With no `item`, a question
+    whose item left the register is listed last, named `orphaned`.
+    """
+    order = {i: n for n, i in enumerate(tree_order(items))}
+    scope = subtree(items, item) if item is not None else None
+    wanted = set(view["forks"].get(fork, {}).get("questions", [])) if fork is not None else None
+    rows = []
+    for qid, q in view["questions"].items():
+        rec = q["question"]
+        known = rec["item"] in items
+        if scope is not None and rec["item"] not in scope:
+            continue
+        if wanted is not None and qid not in wanted:
+            continue
+        rows.append({
+            "qid": qid, "item": rec["item"], "orphaned": not known,
+            "text": rec["text"], "kind": rec["kind"], "state": q["state"], "failing": q["failing"],
+            "star": rec["star"], "options": rec["options"],
+            **{k: rec[k] for k in ("star_by", "forked_from") if k in rec},
+            "answers": q["answers"],
+        })
+    rows.sort(key=lambda r: (r["orphaned"], order.get(r["item"], len(order)), r["item"],
+                             int(r["qid"].rsplit("/Q", 1)[1])))
+    counts = dict.fromkeys(STATES, 0)
+    for r in rows:
+        counts[r["state"]] += 1
+    return {"item": item, "fork": fork, "rows": rows, "counts": counts,
+            "answers": sum(len(r["answers"]) for r in rows)}
+
+
+STATE_WORDS = {"awaiting_you": "unanswered", "unlocked": "answered, not locked",
+               "locked": "locked", "stale": "stale"}
+
+
+def condition_words(c: dict) -> str:
+    """A `valid_if` condition as a reader would say it."""
+    if c["kind"] == "item_status":
+        return f"item `{c['item']}` has status `{c['status']}`"
+    return f"`{c['path']}` is unchanged since the question was asked"
+
+
+def sheet_markdown(sheet: dict) -> str:
+    """The sheet as one Markdown block, for a PR or a chat (§7.6). Every answer appears, oldest first."""
+    c = sheet["counts"]
+    scope = f"`{sheet['item']}` and all under it" if sheet["item"] else "the whole console"
+    if sheet["fork"]:
+        scope += f", fork `{sheet['fork']}`"
+    out = [f"# Answers: {scope}", "",
+           f"{len(sheet['rows'])} questions: {c['awaiting_you']} unanswered, {c['unlocked']} answered, "
+           f"{c['locked']} locked, {c['stale']} stale. {sheet['answers']} answers in all.", ""]
+    for r in sheet["rows"]:
+        labels = {o["id"]: o["label"] for o in r["options"]}
+        out.append(f"## {r['qid']}: {STATE_WORDS[r['state']]}" + (" (item no longer in the register)"
+                                                                     if r["orphaned"] else ""))
+        out += [f"> {line}" for line in r["text"].splitlines()] + [""]
+        if r.get("star"):
+            whose = f", {r['star_by']}'s" if r.get("star_by") else ""
+            out.append(f"★{whose}: {labels.get(r['star'], r['star'])}")
+        for cnd in r["failing"]:
+            out.append(f"Stale because this no longer holds: {condition_words(cnd)}")
+        if not r["answers"]:
+            out.append("No answer yet.")
+        for n, a in enumerate(r["answers"], 1):
+            tag = "current" if n == len(r["answers"]) else "earlier"
+            picks = ", ".join(labels.get(p, p) for p in a["picks"]) or "(no pick)"
+            out.append(f"{n}. {a['ts']} ({tag}{', locked' if a.get('locked') else ''}): {picks}")
+            out += [f"   > {line}" for line in a["own_text"].splitlines() if a["own_text"].strip()]
+            if a.get("reason"):
+                out.append(f"   Replaced the answer before it, because: {a['reason']}")
+        out.append("")
+    return "\n".join(out).rstrip() + "\n"
+
+
 def _roll_up(items: Mapping[str, dict], own: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
     """Add each item's own counts to itself and to each of its ancestors exactly once, even when parent links form a cycle."""
     total = {i: dict.fromkeys(COUNTED, 0) for i in items}

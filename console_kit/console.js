@@ -26,6 +26,124 @@
   let currentMode = null; // 'item' or 'inbox'
   let pendingNonces = {};
   let draftTexts = {};
+  let currentFork = null; // the answers sheet's fork filter (spec §7.6)
+
+  // Mirrors schema.py: the fork fields and the D13 roster. The server refuses
+  // anything else by name, so these only shape the form.
+  const FOCUSES = ['whole', 'code', 'design', 'ui', 'backend'];
+  const MODES = ['explore', 'tighten'];
+  const ROSTER = ['devops', 'ux', 'adversarial', 'security', 'architect', 'analyst'];
+  const ROSTER_LABEL = { devops: 'DevOps', ux: 'UX', adversarial: 'Adversarial (red team)',
+    security: 'Security', architect: 'Architect', analyst: 'Analyst' };
+  const OTHER_ROLE = /^[A-Za-z0-9][A-Za-z0-9 \-]{0,39}$/;
+  const MAX_ROLES = 3;
+  const STATE_WORDS = { awaiting_you: 'unanswered', unlocked: 'answered, not locked',
+    locked: 'locked', stale: 'stale' };
+
+  // The item and every item under it (D14), safe against a parent cycle. Mirrors view.subtree.
+  function subtree(root) {
+    const out = new Set();
+    for (const id of Object.keys(items || {})) {
+      const seen = new Set();
+      let node = id;
+      while (node != null && items[node] && !seen.has(node)) {
+        if (node === root) { out.add(id); break; }
+        seen.add(node);
+        node = items[node].parent;
+      }
+    }
+    return out;
+  }
+
+  // Items depth first from the roots, in the adapter's order. Mirrors view.tree_order.
+  function treeOrder() {
+    const ids = Object.keys(items || {});
+    const kids = new Map();
+    for (const id of ids) {
+      const p = items[id].parent;
+      const key = (p != null && items[p]) ? p : null;
+      if (!kids.has(key)) kids.set(key, []);
+      kids.get(key).push(id);
+    }
+    const out = [];
+    const seen = new Set();
+    const stack = [...(kids.get(null) || [])].reverse();
+    while (stack.length) {
+      const id = stack.pop();
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(id);
+      stack.push(...[...(kids.get(id) || [])].reverse());
+    }
+    for (const id of ids) if (!seen.has(id)) out.push(id);
+    return out;
+  }
+
+  // Every question in a scope with every answer it got (spec §7.6). Mirrors view.answers_sheet.
+  function answersSheet(itemId, forkId) {
+    const order = new Map(treeOrder().map((id, n) => [id, n]));
+    const scope = itemId ? subtree(itemId) : null;
+    const wanted = forkId && view.forks[forkId] ? new Set(view.forks[forkId].questions) : null;
+    const rows = [];
+    for (const qid of Object.keys(view.questions)) {
+      const q = view.questions[qid];
+      const it = q.question.item;
+      if (scope && !scope.has(it)) continue;
+      if (wanted && !wanted.has(qid)) continue;
+      rows.push(q);
+    }
+    const n = qid => parseInt(qid.split('/Q').pop(), 10);
+    rows.sort((a, b) => {
+      const oa = order.has(a.question.item) ? order.get(a.question.item) : order.size;
+      const ob = order.has(b.question.item) ? order.get(b.question.item) : order.size;
+      return (oa - ob) || a.question.item.localeCompare(b.question.item) || (n(a.question.qid) - n(b.question.qid));
+    });
+    const counts = { awaiting_you: 0, unlocked: 0, locked: 0, stale: 0 };
+    let answers = 0;
+    for (const q of rows) { counts[q.state] += 1; answers += q.answers.length; }
+    return { item: itemId, fork: forkId, rows, counts, answers };
+  }
+
+  function conditionWords(c) {
+    return c.kind === 'item_status'
+      ? 'item ' + c.item + ' has status ' + c.status
+      : c.path + ' is unchanged since the question was asked';
+  }
+
+  function optionLabels(qData) {
+    const m = {};
+    for (const o of qData.options || []) m[o.id] = o.label;
+    return m;
+  }
+
+  // The sheet as Markdown, for a PR or a chat. Mirrors view.sheet_markdown.
+  function sheetMarkdown(sheet) {
+    const c = sheet.counts;
+    let scope = sheet.item ? '`' + sheet.item + '` and all under it' : 'the whole console';
+    if (sheet.fork) scope += ', fork `' + sheet.fork + '`';
+    const out = ['# Answers: ' + scope, '',
+      sheet.rows.length + ' questions: ' + c.awaiting_you + ' unanswered, ' + c.unlocked + ' answered, ' +
+      c.locked + ' locked, ' + c.stale + ' stale. ' + sheet.answers + ' answers in all.', ''];
+    for (const q of sheet.rows) {
+      const r = q.question;
+      const labels = optionLabels(r);
+      out.push('## ' + r.qid + ': ' + STATE_WORDS[q.state] + (items[r.item] ? '' : ' (item no longer in the register)'));
+      for (const line of r.text.split('\n')) out.push('> ' + line);
+      out.push('');
+      if (r.star) out.push('★' + (r.star_by ? ', ' + r.star_by + "'s" : '') + ': ' + (labels[r.star] || r.star));
+      for (const cnd of q.failing) out.push('Stale because this no longer holds: ' + conditionWords(cnd));
+      if (!q.answers.length) out.push('No answer yet.');
+      q.answers.forEach((a, i) => {
+        const tag = i === q.answers.length - 1 ? 'current' : 'earlier';
+        const picks = a.picks.map(p => labels[p] || p).join(', ') || '(no pick)';
+        out.push((i + 1) + '. ' + a.ts + ' (' + tag + (a.locked ? ', locked' : '') + '): ' + picks);
+        if (a.own_text.trim()) for (const line of a.own_text.split('\n')) out.push('   > ' + line);
+        if (a.reason) out.push('   Replaced the answer before it, because: ' + a.reason);
+      });
+      out.push('');
+    }
+    return out.join('\n').replace(/\s+$/, '') + '\n';
+  }
 
   // Generate a cryptographically random nonce
   function genNonce() {
@@ -294,6 +412,8 @@
     panelEl.textContent = '';
     if (currentMode === 'inbox') {
       renderInbox();
+    } else if (currentMode === 'sheet') {
+      renderSheet(currentItem, currentFork);
     } else if (currentItem) {
       renderItem(currentItem);
     }
@@ -430,12 +550,16 @@
       const order = ['awaiting_you', 'unlocked', 'stale', 'locked'];
       qs.sort((a, b) => order.indexOf(a.state) - order.indexOf(b.state));
 
+      body.appendChild(renderItemTools(itemId));
+
       if (qs.length > 0) {
         body.appendChild(el('div', { className: 'ck-section-heading' }, ['Questions']));
         for (const q of qs) {
           body.appendChild(renderQuestion(q));
         }
       }
+
+      body.appendChild(renderForks(itemId));
 
       // Thread
       body.appendChild(renderThread(itemId));
@@ -469,6 +593,10 @@
       refreshBtn.disabled = false;
     });
     bar.appendChild(refreshBtn);
+    // Every answer the console holds, from anywhere (§7.6)
+    const allBtn = el('button', { className: 'ck-refresh-btn', type: 'button' }, ['All answers']);
+    allBtn.addEventListener('click', () => showSheet(null, null));
+    bar.appendChild(allBtn);
     // Error
     if (cursor && cursor.last_error) {
       bar.appendChild(el('div', { className: 'ck-error-msg' }, [cursor.last_error]));
@@ -674,7 +802,11 @@
     });
     // Restore draft if any
     const draftKey = qData.qid + (supersedesId || '');
-    if (draftTexts[draftKey]) ownTextEl.value = draftTexts[draftKey];
+    // Re-answering keeps the words already given (§7.5 F2, the page half of the #167
+    // defect): a draft typed since wins, else the current answer's own words.
+    const prior = q.answers && q.answers.length ? q.answers[q.answers.length - 1] : null;
+    if (draftTexts[draftKey] !== undefined) ownTextEl.value = draftTexts[draftKey];
+    else if (prior && prior.own_text) ownTextEl.value = prior.own_text;
     ownTextEl.addEventListener('input', () => { draftTexts[draftKey] = ownTextEl.value; });
     ownWordsArea.appendChild(ownTextEl);
     form.appendChild(ownWordsArea);
@@ -896,6 +1028,319 @@
       wrap.appendChild(msgsEl);
     }
 
+    return wrap;
+  }
+
+  // A panel header: Back, a title, Close.
+  function makeHeader(titleChildren, onBack, backLabel) {
+    const header = el('div', { className: 'ck-header' }, [
+      el('button', { className: 'ck-back-btn', type: 'button', 'aria-label': backLabel }, ['← Back']),
+      el('span', { className: 'ck-title' }, titleChildren),
+      el('button', { className: 'ck-close-btn', type: 'button', 'aria-label': 'Close panel' }, ['×'])
+    ]);
+    header.querySelector('.ck-back-btn').addEventListener('click', onBack);
+    header.querySelector('.ck-close-btn').addEventListener('click', closePanel);
+    return header;
+  }
+
+  // Open the answers sheet for an item and all under it, or (itemId null) the whole console.
+  function showSheet(itemId, forkId) {
+    currentFork = forkId;
+    if (panelEl.getAttribute('data-open') === 'true') {
+      currentItem = itemId;
+      currentMode = 'sheet';
+      renderPanel();
+      const h = panelEl.querySelector('.ck-title');
+      if (h) { h.setAttribute('tabindex', '-1'); h.focus(); }
+    } else {
+      openPanel(itemId, 'sheet');
+    }
+  }
+
+  function countLine(c) {
+    return [GLYPH.awaiting_you + ' ' + c.awaiting_you + ' unanswered',
+      GLYPH.unlocked + ' ' + c.unlocked + ' answered',
+      GLYPH.locked + ' ' + c.locked + ' locked',
+      GLYPH.stale + ' ' + c.stale + ' stale'].join('  ');
+  }
+
+  // The answers sheet (spec §7.6): every question in the scope, every answer it got.
+  function renderSheet(itemId, forkId) {
+    const scopeWords = itemId ? itemId + ' and all under it' : 'the whole console';
+    panelEl.appendChild(makeHeader(['Answers: ' + scopeWords], () => {
+      currentFork = null;
+      currentMode = itemId ? 'item' : 'inbox';
+      renderPanel();
+    }, itemId ? 'Back to ' + itemId : 'Back to inbox'));
+    panelEl.appendChild(renderStatusBar(itemId));
+    const body = el('div', { className: 'ck-body' });
+    panelEl.appendChild(body);
+    if (!view) { body.appendChild(renderOffline()); return; }
+
+    // Narrow to one deliberation round
+    const scope = itemId ? subtree(itemId) : null;
+    const forkIds = Object.keys(view.forks).filter(f => !scope || scope.has(view.forks[f].message.item));
+    if (forkIds.length) {
+      const sel = el('select', { className: 'ck-select', id: 'ck-sheet-fork' });
+      sel.appendChild(el('option', { value: '' }, ['Every question']));
+      for (const f of forkIds) {
+        const m = view.forks[f].message;
+        const o = el('option', { value: f }, ['⑂ ' + m.item + ' · ' + m.mode + ' · ' + relTime(m.ts) +
+          ' (' + view.forks[f].questions.length + ' questions)']);
+        if (f === forkId) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener('change', () => showSheet(itemId, sel.value || null));
+      body.appendChild(el('div', { className: 'ck-field' }, [
+        el('label', { for: 'ck-sheet-fork', className: 'ck-field-label' }, ['Show']), sel]));
+    }
+
+    const sheet = answersSheet(itemId, forkId);
+    body.appendChild(el('p', { className: 'ck-sheet-counts' }, [
+      sheet.rows.length + ' questions, ' + sheet.answers + ' answers. ' + countLine(sheet.counts)]));
+    if (!sheet.rows.length) {
+      body.appendChild(el('p', { className: 'ck-muted' }, ['No questions here yet.']));
+    }
+    for (const q of sheet.rows) body.appendChild(renderSheetRow(q));
+
+    // Footer: the counts, Copy as Markdown, and the ready signal
+    const foot = el('div', { className: 'ck-sheet-foot' }, [
+      el('div', { className: 'ck-sheet-counts' }, [countLine(sheet.counts)])]);
+    const copyBtn = el('button', { className: 'ck-btn', type: 'button' }, ['Copy as Markdown']);
+    copyBtn.addEventListener('click', () => {
+      const md = sheetMarkdown(sheet);
+      const fallback = () => {
+        const ta = el('textarea', { className: 'ck-textarea', rows: '8', readonly: 'true',
+          'aria-label': 'The answers as Markdown; select and copy' });
+        ta.value = md;
+        foot.appendChild(ta);
+        ta.focus();
+        ta.select();
+        announce('Select and copy the Markdown below.');
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(md).then(() => announce('Copied ' + sheet.rows.length + ' questions as Markdown.'), fallback);
+      } else {
+        fallback();
+      }
+    });
+    foot.appendChild(el('div', { className: 'ck-actions' }, [copyBtn]));
+    if (itemId) foot.appendChild(renderReadyButton(itemId, sheet.counts));
+    else foot.appendChild(el('p', { className: 'ck-muted' }, [
+      'The ready signal is sent from an item, so its thread records which round you mean. ' +
+      'The agent processes every newly locked answer either way.']));
+    body.appendChild(foot);
+  }
+
+  function renderSheetRow(q) {
+    const r = q.question;
+    const labels = optionLabels(r);
+    const head = q.answers.length ? q.answers[q.answers.length - 1] : null;
+    const row = el('details', { className: 'ck-sheet-row', dataState: q.state });
+    const current = head ? (head.picks.map(p => labels[p] || p).join(', ') || 'own words') : 'no answer yet';
+    row.appendChild(el('summary', {}, [
+      el('span', { className: 'ck-q-state', dataState: q.state }, [GLYPH[q.state] + ' ' + STATE_WORDS[q.state]]),
+      el('span', { className: 'ck-inbox-item-id' }, [r.qid]),
+      el('span', { className: 'ck-sheet-q' }, [truncateText(r.text, 90)]),
+      el('span', { className: 'ck-sheet-current' }, [current + (q.answers.length > 1 ? ' · ' + q.answers.length + ' answers' : '')])
+    ]));
+    const inner = el('div', { className: 'ck-sheet-body' });
+    const text = el('div', { className: 'ck-q-text' });
+    text.textContent = r.text;
+    inner.appendChild(text);
+    if (!items[r.item]) inner.appendChild(el('p', { className: 'ck-muted' }, ['This item is no longer in the register.']));
+    if (r.star) inner.appendChild(el('div', {}, ['★ ' + (r.star_by ? r.star_by + "'s" : 'recommended') + ': ' + (labels[r.star] || r.star)]));
+    if (r.forked_from) inner.appendChild(el('div', { className: 'ck-muted' }, ['From deliberation ' + r.forked_from.slice(0, 8)]));
+    for (const c of q.failing) inner.appendChild(el('div', { className: 'ck-stale-banner' }, ['Stale: this no longer holds: ' + conditionWords(c)]));
+    if (q.answers.length) {
+      const list = el('ol', { className: 'ck-sheet-answers' });
+      q.answers.forEach((a, i) => {
+        const li = el('li', {});
+        const tag = (i === q.answers.length - 1 ? 'current' : 'earlier') + (a.locked ? ', locked' : '');
+        li.appendChild(el('div', {}, [(a.ts ? new Date(a.ts).toLocaleString() : '') + ' (' + tag + '): ' +
+          (a.picks.map(p => labels[p] || p).join(', ') || 'no pick')]));
+        if (a.own_text) { const w = el('div', { className: 'ck-receipt-own' }); w.textContent = a.own_text; li.appendChild(w); }
+        if (a.reason) { const w = el('div', { className: 'ck-muted' }); w.textContent = 'Replaced the answer before it, because: ' + a.reason; li.appendChild(w); }
+        list.appendChild(li);
+      });
+      inner.appendChild(list);
+    }
+    // Review acts in place, through the existing forms and the store's rules.
+    const reviewBtn = el('button', { className: 'ck-btn', type: 'button', 'aria-label': 'Review ' + r.qid }, ['Review']);
+    reviewBtn.addEventListener('click', () => { reviewBtn.replaceWith(renderQuestion(q)); });
+    inner.appendChild(el('div', { className: 'ck-actions' }, [reviewBtn]));
+    row.appendChild(inner);
+    return row;
+  }
+
+  // The item's tools: its answers sheet, a full-round deliberation, and the ready signal.
+  function renderItemTools(itemId) {
+    const wrap = el('div', { className: 'ck-tools' });
+    const answersBtn = el('button', { className: 'ck-btn', type: 'button' }, ['Answers']);
+    answersBtn.addEventListener('click', () => showSheet(itemId, null));
+    const forkBtn = el('button', { className: 'ck-btn', type: 'button', 'aria-expanded': 'false' }, ['⑂ Deliberate (full round)']);
+    const slot = el('div');
+    forkBtn.addEventListener('click', () => {
+      const open = forkBtn.getAttribute('aria-expanded') === 'true';
+      forkBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
+      slot.textContent = '';
+      if (!open) slot.appendChild(renderForkForm(itemId, null));
+    });
+    wrap.appendChild(el('div', { className: 'ck-actions' }, [answersBtn, forkBtn]));
+    wrap.appendChild(slot);
+    const sheet = answersSheet(itemId, null);
+    wrap.appendChild(renderReadyButton(itemId, sheet.counts));
+    return wrap;
+  }
+
+  // "Answers are in: process them" (§7.3): one owner message, intent 'process'.
+  function renderReadyButton(itemId, counts) {
+    const wrap = el('div', { className: 'ck-ready' });
+    const btn = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' }, ['Answers are in: process them']);
+    const open = counts.awaiting_you;
+    const note = el('p', { className: 'ck-muted' }, [
+      (open ? open + ' question' + (open === 1 ? ' is' : 's are') + ' still unanswered; you can send it anyway. ' : '') +
+      'An open Claude Code session that is watching starts now; otherwise the next session processes these.']);
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; // a double press in flight reuses one nonce, so it writes one signal
+      const result = await apiPost('/message',
+        { item: itemId, text: 'Answers are in: process them.', intent: 'process' }, 'ready-' + itemId);
+      btn.disabled = false;
+      if (result.error) announce('Error: ' + result.error);
+      else { announce('Signal sent: the agent will process these answers.'); renderPanel(); }
+    });
+    wrap.appendChild(btn);
+    wrap.appendChild(note);
+    return wrap;
+  }
+
+  // A deliberation request (§6, D13, D14). followUp is the fork being followed, or null for a first round.
+  function renderForkForm(itemId, followUp) {
+    const key = 'fork-' + itemId + (followUp ? '-' + followUp : '');
+    const form = el('div', { className: 'ck-fork-form' });
+    form.appendChild(el('p', { className: 'ck-muted' }, [followUp
+      ? 'Pick 1 to 3 seats for a second round on this deliberation.'
+      : 'The default committee (architect, UX, security, and the project\'s own audit) deliberates on ' +
+        itemId + ' and everything under it, and brings its questions back here.']));
+
+    const picked = new Set();
+    let otherInput = null;
+    if (followUp) {
+      const fs = el('fieldset', { className: 'ck-roster' }, [el('legend', {}, ['Seats (1 to 3)'])]);
+      const boxes = [];
+      const sync = () => {
+        const full = picked.size + (otherInput.value.trim() ? 1 : 0) >= MAX_ROLES;
+        for (const b of boxes) b.disabled = full && !b.checked;
+      };
+      for (const r of ROSTER) {
+        const b = el('input', { type: 'checkbox', value: r });
+        b.addEventListener('change', () => { if (b.checked) picked.add(r); else picked.delete(r); sync(); });
+        boxes.push(b);
+        fs.appendChild(el('label', { className: 'ck-option' }, [b, ' ' + ROSTER_LABEL[r]]));
+      }
+      otherInput = el('input', { type: 'text', className: 'ck-input', maxlength: '40', id: key + '-other',
+        placeholder: 'e.g. Legal, Lighting designer' });
+      otherInput.addEventListener('input', sync);
+      fs.appendChild(el('label', { for: key + '-other', className: 'ck-field-label' }, ['Other seat (optional)']));
+      fs.appendChild(otherInput);
+      form.appendChild(fs);
+    }
+
+    const focusSel = el('select', { className: 'ck-select', id: key + '-focus' });
+    for (const f of FOCUSES) focusSel.appendChild(el('option', { value: f }, [f === 'whole' ? 'the whole thing' : f]));
+    form.appendChild(el('div', { className: 'ck-field' }, [
+      el('label', { for: key + '-focus', className: 'ck-field-label' }, ['Focus']), focusSel]));
+
+    const modeName = key + '-mode';
+    const modeFs = el('fieldset', { className: 'ck-roster' }, [el('legend', {}, ['Mode'])]);
+    MODES.forEach((m, i) => {
+      const r = el('input', { type: 'radio', name: modeName, value: m });
+      if (i === 0) r.checked = true;
+      modeFs.appendChild(el('label', { className: 'ck-option' }, [r, m === 'explore'
+        ? ' Explore: widen the options' : ' Tighten: narrow to a decision']));
+    });
+    form.appendChild(modeFs);
+
+    const text = el('textarea', { className: 'ck-textarea', rows: '2', 'aria-label': 'What should they look at (optional)',
+      placeholder: 'What should they look at? (optional)' });
+    if (draftTexts[key] !== undefined) text.value = draftTexts[key];
+    text.addEventListener('input', () => { draftTexts[key] = text.value; });
+    form.appendChild(text);
+
+    const send = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' }, [followUp ? 'Start the follow-up' : 'Start the deliberation']);
+    send.addEventListener('click', async () => {
+      const mode = form.querySelector('input[name="' + modeName + '"]:checked').value;
+      const body = { item: itemId, intent: 'fork', mode: mode, focus: focusSel.value };
+      if (followUp) {
+        const roles = [...picked];
+        const other = otherInput.value.trim();
+        if (other) {
+          if (!OTHER_ROLE.test(other)) { announce('The other seat takes letters, digits, spaces and hyphens, up to 40.'); return; }
+          roles.push('other:' + other);
+        }
+        if (roles.length < 1 || roles.length > MAX_ROLES) { announce('Pick 1 to 3 seats.'); return; }
+        body.follow_up_of = followUp;
+        body.roles = roles;
+      }
+      body.text = text.value.trim() || (followUp
+        ? 'Follow-up round with ' + body.roles.map(r => r.replace(/^other:/, '')).join(', ') + '.'
+        : 'Deliberate the full round: ' + itemId + ' and everything under it.');
+      send.disabled = true;
+      const result = await apiPost('/message', body, key);
+      send.disabled = false;
+      if (result.error) announce('Error: ' + result.error);
+      else { delete draftTexts[key]; announce('Deliberation requested.'); renderPanel(); }
+    });
+    form.appendChild(el('div', { className: 'ck-actions' }, [send]));
+    return form;
+  }
+
+  // This item's deliberations, newest first, each with its questions and, once answered, a follow-up box.
+  function renderForks(itemId) {
+    const wrap = el('div');
+    const mine = Object.values(view.forks).filter(f => f.message.item === itemId)
+      .sort((a, b) => b.message.seq - a.message.seq);
+    if (!mine.length) return wrap;
+    wrap.appendChild(el('div', { className: 'ck-section-heading' }, ['Deliberations']));
+    for (const f of mine) {
+      const m = f.message;
+      const card = el('div', { className: 'ck-fork' });
+      const bits = ['⑂ ' + m.mode, m.focus || 'whole'];
+      if (m.roles) bits.push(m.roles.map(r => ROSTER_LABEL[r] || r.replace(/^other:/, '')).join(', '));
+      else bits.push('default committee');
+      card.appendChild(el('div', { className: 'ck-fork-head' }, [bits.join(' · ') + ' · ' + relTime(m.ts)]));
+      const t = el('div', { className: 'ck-message-text' });
+      t.textContent = m.text;
+      card.appendChild(t);
+      if (m.follow_up_of) card.appendChild(el('div', { className: 'ck-muted' }, ['Follow-up of ' + m.follow_up_of.slice(0, 8)]));
+      const qs = f.questions.map(qid => view.questions[qid]).filter(Boolean);
+      if (!qs.length) {
+        card.appendChild(el('p', { className: 'ck-muted' }, ['Waiting for the committee\'s questions.']));
+      } else {
+        const list = el('ul', { className: 'ck-fork-qs' });
+        for (const q of qs) list.appendChild(el('li', {}, [GLYPH[q.state] + ' ' + q.question.qid + ' · ' + STATE_WORDS[q.state]]));
+        card.appendChild(list);
+        const answersBtn = el('button', { className: 'ck-btn', type: 'button' }, ['Answers from this round']);
+        answersBtn.addEventListener('click', () => showSheet(itemId, m.id));
+        const actions = el('div', { className: 'ck-actions' }, [answersBtn]);
+        if (qs.every(q => q.state !== 'awaiting_you')) {
+          const fuBtn = el('button', { className: 'ck-btn', type: 'button', 'aria-expanded': 'false' }, ['Follow up with other seats…']);
+          const slot = el('div');
+          fuBtn.addEventListener('click', () => {
+            const open = fuBtn.getAttribute('aria-expanded') === 'true';
+            fuBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
+            slot.textContent = '';
+            if (!open) slot.appendChild(renderForkForm(itemId, m.id));
+          });
+          actions.appendChild(fuBtn);
+          card.appendChild(actions);
+          card.appendChild(slot);
+        } else {
+          card.appendChild(actions);
+        }
+      }
+      wrap.appendChild(card);
+    }
     return wrap;
   }
 

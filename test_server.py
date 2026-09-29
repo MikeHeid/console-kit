@@ -203,6 +203,24 @@ class ServerTests(unittest.TestCase):
                            tok=token())
         self.assertNotIn("intent", self.doorbell()[-1])
 
+    def test_the_ready_signal_rings_once_per_press_and_only_the_owner_sends_it(self):
+        # §7.3 and §7.5 F2. Catches: a ready signal the agent door accepts (so an agent could
+        # start its own processing run), and a retried press that rings twice.
+        body = {"item": "LANE.1", "text": "Answers are in: process them.", "intent": "process",
+                "nonce": "ownerready01"}
+        code, got = self.req("POST", "/api/message", body, tok=token())
+        self.assertEqual(code, 200, got)
+        code, again = self.req("POST", "/api/message", body, tok=token())
+        self.assertEqual((code, again["record"]["id"]), (200, got["record"]["id"]))
+        bell = [b for b in self.doorbell() if b.get("intent") == "process"]
+        self.assertEqual(len(bell), 1)
+        self.assertEqual(bell[0]["item"], "LANE.1")
+        code, refused = SV.agent_request(self.cfg.socket, "POST", "/message",
+                                         {"item": "LANE.1", "text": "go", "intent": "process",
+                                          "nonce": "agentready01"})
+        self.assertEqual(code, 400, refused)
+        self.assertIn("owner", refused["error"])
+
     def test_the_page_cannot_choose_its_author(self):
         for field in ("by", "type", "schemaVersion"):
             code, body = self.req("POST", "/api/answer", self.answer(**{field: "agent"}), tok=token())

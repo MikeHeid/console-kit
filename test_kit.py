@@ -813,5 +813,194 @@ class EarlierAnswerTests(Tmp):
         self._refused(lambda e: e.__setitem__("earlier", [one] * (F.MAX_EARLIER + 1)), "at most")
 
 
+def follow_up(of, roles=("devops",), item="LANE.1", **kw):
+    return fork(item=item, follow_up_of=of, roles=list(roles), **kw)
+
+
+class RosterSchemaTests(unittest.TestCase):
+    """Spec §7.5 F2: follow-up rounds, the D13 roster, and the ready signal."""
+
+    def test_a_follow_up_names_its_fork_and_one_to_three_seats(self):
+        # AC (§7.5): a follow-up carries 1 to 3 roles; none, or 4, is refused.
+        self.assertEqual(S.validate(follow_up("f" * 24)), [])
+        self.assertEqual(S.validate(follow_up("f" * 24, roles=("ux", "adversarial", "other:Legal review"))), [])
+        r = follow_up("f" * 24)
+        del r["roles"]
+        self.assertTrue(any("roles" in e for e in S.validate(r)))
+        for bad in ([], ["devops", "ux", "security", "analyst"]):
+            self.assertTrue(any("1 to 3" in e for e in S.validate(follow_up("f" * 24, roles=bad))), bad)
+
+    def test_roles_only_come_with_a_follow_up(self):
+        # Catches: roles on a first round, which would replace the default committee (D13) unasked.
+        self.assertTrue(any("follow_up_of" in e for e in S.validate(fork(roles=["devops"]))))
+        # ...and roles or follow_up_of on a message that is not a fork at all.
+        self.assertTrue(S.validate(message(roles=["devops"], follow_up_of="f" * 24)))
+
+    def test_a_seat_is_from_the_roster_or_a_bounded_typed_role(self):
+        # Catches: "any string" as a seat. A seat is printed on the page and handed to
+        # an agent, so a newline or markup in it would forge a heading or an instruction.
+        for bad in ("chaos", "other:", "other: leading space", "other:" + "x" * 41,
+                    "other:a\n## FORGED", "other:<script>", ["devops"]):
+            self.assertTrue(S.validate(follow_up("f" * 24, roles=[bad])), bad)
+        self.assertTrue(any("repeat" in e for e in S.validate(follow_up("f" * 24, roles=("ux", "ux")))))
+        self.assertTrue(S.validate(follow_up("not-a-record-id")))
+
+    def test_star_by_takes_every_roster_seat_and_a_typed_one(self):
+        # AC (§7.5, review H1): a follow-up round staffed by devops, adversarial,
+        # analyst or a typed seat can attribute its ★. Counter-check: a malformed typed
+        # role is refused, so "anything after other:" does not pass.
+        for seat in ("devops", "adversarial", "analyst", "other:Legal review", "panel", "determinism"):
+            self.assertEqual(S.validate(question(forked_from="f" * 24, star_by=seat)), [], seat)
+        for bad in ("other:", "other:x\ny", "Devops"):
+            self.assertTrue(S.validate(question(forked_from="f" * 24, star_by=bad)), bad)
+
+    def test_only_the_owner_signals_that_answers_are_in(self):
+        # AC (§7.5, review H2). Catches: 'process' open to both writers, so an agent
+        # could start its own processing run. Counter-check: the owner's is accepted.
+        self.assertEqual(S.validate(message(intent="process", text="Answers are in")), [])
+        self.assertTrue(any("owner" in e for e in S.validate(message(by="agent", intent="process"))))
+
+    def test_a_non_string_intent_is_a_refusal_not_a_crash(self):
+        # PR #170 review (bot): a JSON list in `intent` raised TypeError in the frozenset
+        # test, so the owner door answered 500 instead of naming the problem.
+        for bad in (["process"], {"a": 1}, 3):
+            errs = S.validate(message(intent=bad))
+            self.assertTrue(any("intent" in e for e in errs), bad)
+
+    def test_a_ready_signal_carries_no_fork_fields(self):
+        for extra in ({"mode": "explore"}, {"focus": "ui"}, {"roles": ["ux"]}, {"follow_up_of": "f" * 24}):
+            self.assertTrue(S.validate(message(intent="process", **extra)), extra)
+
+
+class RosterStoreTests(Tmp):
+    def test_follow_up_of_must_name_an_owner_fork_message_on_the_same_item(self):
+        # Counter-check to the roles AC: a check that counts roles but never resolves
+        # follow_up_of passes it, and must fail every one of these.
+        st = self.store()
+        plain = st.append(message())
+        agent_msg = st.append(message(by="agent", text="noted"))
+        ready = st.append(message(intent="process", text="Answers are in"))
+        st.append(question())
+        for bad in ("0" * 24, plain["id"], agent_msg["id"], ready["id"], st.question("LANE.1/Q1")["id"]):
+            with self.assertRaisesRegex(StoreError, "not an owner fork message"):
+                st.append(follow_up(bad))
+        other = st.append(fork(item="LANE"))
+        with self.assertRaisesRegex(StoreError, "stays on its fork's item"):
+            st.append(follow_up(other["id"]))
+        f = st.append(fork())
+        fu = st.append(follow_up(f["id"], roles=("adversarial", "other:Legal")))
+        self.assertEqual(fu["roles"], ["adversarial", "other:Legal"])
+        # A follow-up is itself a fork, so a later round may follow it in turn.
+        st.append(follow_up(fu["id"], roles=("analyst",)))
+        st.append(question(qid="LANE.1/Q2", forked_from=fu["id"], star_by="other:Legal"))
+
+    def test_a_deliberation_has_at_most_four_rounds(self):
+        # PR #170 security review, LOW: a follow-up is itself a fork, so without a cap the
+        # chain (and the agent runs it starts) had no bound.
+        from console_kit.store import MAX_ROUNDS
+        st = self.store()
+        head = st.append(fork())
+        for _ in range(MAX_ROUNDS - 1):
+            head = st.append(follow_up(head["id"]))
+        with self.assertRaisesRegex(StoreError, f"the limit is {MAX_ROUNDS}"):
+            st.append(follow_up(head["id"], roles=("ux",)))
+        st.append(fork(mode="explore"))  # a new deliberation starts its own count
+
+    def test_a_retried_ready_signal_is_one_record(self):
+        # AC (§7.5): the ready button writes one signal per press, and a retry writes none.
+        # Counter-check: a fresh nonce per retry would make two; the same submit replayed
+        # after a dropped response must leave exactly one 'process' record.
+        st = self.store()
+        press = message(intent="process", text="Answers are in")
+        st.append(press)
+        st.append(dict(press))
+        self.assertEqual(sum(1 for r in st.records() if r.get("intent") == "process"), 1)
+        st.append(message(intent="process", text="Answers are in"))  # a second press is a second signal
+        self.assertEqual(sum(1 for r in st.records() if r.get("intent") == "process"), 2)
+
+
+class AnswersSheetTests(Tmp):
+    """Spec §7.6: every answer the store holds for a scope, and every question without one."""
+
+    def _sheet(self, st, **kw):
+        v = V.build(st, ITEMS, V.make_evaluator(self.dir, {}))
+        return V.answers_sheet(v, ITEMS, **kw)
+
+    def test_every_answer_is_listed_not_only_the_current_one(self):
+        # AC (§7.6) and its counter-check: a sheet showing only each question's current
+        # answer passes a one-answer-per-question test, and fails on this question,
+        # answered twice before it was locked.
+        st = self.store()
+        st.append(question())
+        first = st.append(answer(picks=("a",), own_text="first thoughts"))
+        second = st.append(answer(picks=("b",), own_text="on reflection"))
+        st.append(lock(second))
+        sheet = self._sheet(st)
+        [row] = sheet["rows"]
+        self.assertEqual([a["id"] for a in row["answers"]], [first["id"], second["id"]])
+        self.assertEqual(sheet["answers"], 2)
+        md = V.sheet_markdown(sheet)
+        self.assertIn("first thoughts", md)
+        self.assertIn("on reflection", md)
+        self.assertIn("(earlier)", md)
+        self.assertIn("(current, locked)", md)
+
+    def test_unanswered_and_stale_questions_stay_on_the_sheet(self):
+        # Catches: a sheet built from answers rather than questions, which drops the
+        # unanswered ones and makes a round look finished when it is not.
+        st = self.store()
+        st.append(question(qid="LANE.1/Q1"))
+        st.append(question(qid="LANE.1/Q2", valid_if=[{"kind": "item_status", "item": "LANE", "status": "done"}]))
+        a = st.append(answer(qid="LANE.1/Q2"))
+        st.append(lock(a))
+        sheet = self._sheet(st)
+        self.assertEqual([r["state"] for r in sheet["rows"]], ["awaiting_you", "stale"])
+        self.assertEqual(sheet["counts"], {"awaiting_you": 1, "unlocked": 0, "locked": 0, "stale": 1})
+        md = V.sheet_markdown(sheet)
+        self.assertIn("No answer yet.", md)
+        self.assertIn("item `LANE` has status `done`", md)
+
+    def test_scope_is_the_item_and_all_under_it_in_tree_order(self):
+        # D14. Catches: an item-only filter that misses questions on a child topic, and
+        # store order leaking through instead of tree order.
+        st = self.store()
+        st.append(question(qid="LANE.1.a/Q1"))
+        st.append(question(qid="LANE/Q2"))
+        st.append(question(qid="LANE.1/Q10"))
+        st.append(question(qid="LANE.1/Q2"))
+        self.assertEqual([r["qid"] for r in self._sheet(st)["rows"]],
+                         ["LANE/Q2", "LANE.1/Q2", "LANE.1/Q10", "LANE.1.a/Q1"])
+        self.assertEqual([r["qid"] for r in self._sheet(st, item="LANE.1")["rows"]],
+                         ["LANE.1/Q2", "LANE.1/Q10", "LANE.1.a/Q1"])
+        self.assertEqual([r["qid"] for r in self._sheet(st, item="LANE.1.a")["rows"]], ["LANE.1.a/Q1"])
+
+    def test_tree_order_is_not_alphabetical_order(self):
+        # Mutation check: with LANE, LANE.1, LANE.1.a the tree and the alphabet agree, so a
+        # sheet sorted by item id passed. Here the root sorts last and a child sorts first.
+        items = {"Zeta": {"title": "root", "parent": None}, "Beta": {"title": "b", "parent": "Zeta"},
+                 "Alpha": {"title": "a", "parent": "Beta"}, "Omega": {"title": "o", "parent": None}}
+        st = Store(self.path, known_items=items, clock=self.clock)
+        for qid in ("Alpha/Q1", "Omega/Q1", "Zeta/Q1", "Beta/Q1"):
+            st.append(question(qid=qid))
+        v = V.build(st, items, V.make_evaluator(self.dir, {}))
+        self.assertEqual([r["qid"] for r in V.answers_sheet(v, items)["rows"]],
+                         ["Zeta/Q1", "Beta/Q1", "Alpha/Q1", "Omega/Q1"])
+
+    def test_a_fork_narrows_to_its_own_round(self):
+        st = self.store()
+        f = st.append(fork())
+        st.append(question(qid="LANE.1/Q1", forked_from=f["id"], star_by="other:Legal"))
+        st.append(question(qid="LANE.1/Q2"))
+        sheet = self._sheet(st, fork=f["id"])
+        self.assertEqual([r["qid"] for r in sheet["rows"]], ["LANE.1/Q1"])
+        self.assertIn("other:Legal's", V.sheet_markdown(sheet))
+
+    def test_a_parent_cycle_neither_hangs_nor_drops_items(self):
+        items = {"A": {"title": "a", "parent": "B"}, "B": {"title": "b", "parent": "A"},
+                 "C": {"title": "c", "parent": None}}
+        self.assertEqual(sorted(V.tree_order(items)), ["A", "B", "C"])
+        self.assertEqual(V.subtree(items, "A"), {"A", "B"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
