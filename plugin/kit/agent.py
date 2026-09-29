@@ -11,6 +11,9 @@
     agent.py --state DIR fork-context FORK_ID   the round's bundle for its committee (§6.3, D14)
     agent.py --state DIR reply ITEM TEXT [--reply-to RECORD_ID]
     agent.py --state DIR ask QUESTION.json      append a question (the record without type or by)
+    agent.py --state DIR working ITEM [ITEM ...]
+                                                show the owner "agent active" on these items; the next
+                                                `synced` clears it, and it lapses after an hour
     agent.py --state DIR synced [--through SEQ] [--error MSG]
                                                 record that the agent has processed the doorbell up to SEQ
     agent.py --state DIR register --project DIR
@@ -122,6 +125,8 @@ def main(argv=None) -> int:
     s.add_argument("--reply-to")
     s = sub.add_parser("ask")
     s.add_argument("file", type=Path)
+    s = sub.add_parser("working")
+    s.add_argument("items", nargs="+", help="the item ids this session is now working on")
     s = sub.add_parser("synced")
     s.add_argument("--through", type=int)
     s.add_argument("--error")
@@ -166,6 +171,8 @@ def _run(a, bell: Path) -> int:
         if a.reply_to:
             body["reply_to"] = a.reply_to
         return _call(a.state, "POST", "/message", body)
+    if a.cmd == "working":
+        return _call(a.state, "POST", "/working", {"items": a.items})
     if a.cmd == "ask":
         body = json.loads(a.file.read_text(encoding="utf-8"))
         body.setdefault("nonce", secrets.token_urlsafe(12))

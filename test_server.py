@@ -418,6 +418,40 @@ class ServerTests(unittest.TestCase):
         code, _ = SV.agent_request(self.cfg.socket, "POST", "/cursor", {"stray": 1})
         self.assertEqual(code, 400)
 
+    def test_a_working_mark_reaches_the_page_until_the_agent_syncs(self):
+        # Catches: "agent active" that never clears, so a finished session still looks at work.
+        code, _ = SV.agent_request(self.cfg.socket, "POST", "/working", {"items": ["LANE", "LANE.1"]})
+        self.assertEqual(code, 200)
+        _, body = self.req("GET", "/api/view", tok=token())
+        self.assertEqual(sorted(body["cursor"]["working"]), ["LANE", "LANE.1"])
+        SV.agent_request(self.cfg.socket, "POST", "/cursor", {"last_synced_at": "2026-09-29T10:00:00Z"})
+        _, body = self.req("GET", "/api/view", tok=token())
+        self.assertEqual(body["cursor"]["working"], {})
+
+    def test_a_stale_working_mark_is_not_shown(self):
+        # Catches: a session that died mid-work leaving the owner a standing false "agent active".
+        old = time.strftime(SV.TS_FORMAT, time.gmtime(time.time() - SV.WORKING_TTL - 5))
+        fresh = time.strftime(SV.TS_FORMAT, time.gmtime())
+        (self.cfg.state / "working.json").write_text(json.dumps({"LANE": old, "LANE.1": fresh, "bad id!": fresh}))
+        _, body = self.req("GET", "/api/view", tok=token())
+        self.assertEqual(list(body["cursor"]["working"]), ["LANE.1"])
+
+    def test_working_takes_only_a_short_list_of_item_ids(self):
+        for bad in ({}, {"items": []}, {"items": "LANE"}, {"items": ["LANE"], "extra": 1},
+                    {"items": ["../x"]}, {"items": ["ok"] * (SV.MAX_WORKING + 1)}, {"items": [7]}):
+            with self.subTest(body=bad):
+                code, _ = SV.agent_request(self.cfg.socket, "POST", "/working", bad)
+                self.assertEqual(code, 400)
+        self.assertFalse((self.cfg.state / "working.json").exists())
+
+    def test_the_owner_door_cannot_set_a_working_mark(self):
+        # Catches: the owner's side (or anything reaching the tunnel) claiming an agent is at work.
+        for path in ("/api/working", "/working"):
+            with self.subTest(path=path):
+                code, _ = self.req("POST", path, {"items": ["LANE"]}, tok=token())
+                self.assertIn(code, (403, 404))
+        self.assertFalse((self.cfg.state / "working.json").exists())
+
     def test_a_socket_path_too_long_is_refused_by_name(self):
         # Catches: a --state deep enough that bind() fails with a bare OSError and the owner door never opens.
         deep = SV.Config(**{**self.cfg.__dict__, "state": self.cfg.state / ("d" * 120)})

@@ -52,6 +52,7 @@ to run next. `INSTALL.md` (also in the zip) has the whole guide.
 - **`server.py`** serves one page (yours) with the console injected. It
   refuses every request without a valid Access token, loopback included.
 - **`agent.py`** is the agent's side: `view`, `ask`, `reply`, `inbox`,
+  `working` (shows you "agent active" on the items it has picked up),
   `synced`, `fork-context`, and `register`, which **only you** run.
 - **`fold.py`** writes locked answers into your project through the adapter.
 - **`plugin/`** holds the Claude Code plugin: the hook, the skills and the

@@ -22,6 +22,7 @@ stored (R5).
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import os
 import re
@@ -30,6 +31,7 @@ import socketserver
 import stat
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -121,6 +123,10 @@ class Config:
         return self.state / "cursor.json"
 
     @property
+    def working(self) -> Path:
+        return self.state / "working.json"
+
+    @property
     def socket(self) -> Path:
         return self.state / "agent.sock"
 
@@ -209,7 +215,42 @@ class Console:
             cur = json.loads(self.cfg.cursor.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             cur = {}
-        return {"last_synced_at": cur.get("last_synced_at"), "last_error": cur.get("last_error")}
+        return {"last_synced_at": cur.get("last_synced_at"), "last_error": cur.get("last_error"),
+                "working": self.read_working()}
+
+    # "Agent active" (owner, 2026-09-29): an agent that picks up a request marks
+    # the items it is working on, and its next cursor post (synced, or an error)
+    # clears them. "Awaiting agent" alone only says the owner wrote last, which
+    # is just as true when no session is running, so the console says "active"
+    # only on this mark, and only while it is fresh: a session that dies
+    # mid-work cannot leave the owner a standing false "active".
+    def read_working(self) -> dict:
+        try:
+            raw = json.loads(self.cfg.working.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        now = time.time()
+        out = {}
+        for item, ts in (raw.items() if isinstance(raw, dict) else ()):
+            try:
+                age = now - calendar.timegm(time.strptime(ts, TS_FORMAT))
+            except (TypeError, ValueError):
+                continue
+            if isinstance(item, str) and S.ITEM_ID.match(item) and 0 <= age < WORKING_TTL:
+                out[item] = ts
+        return out
+
+    def set_working(self, body: object) -> dict:
+        items = body.get("items") if isinstance(body, dict) and set(body) == {"items"} else None
+        if not (isinstance(items, list) and 0 < len(items) <= MAX_WORKING
+                and all(isinstance(i, str) and len(i) <= 128 and S.ITEM_ID.match(i) for i in items)):
+            raise RequestError(400, f"working takes {{\"items\": [1 to {MAX_WORKING} item ids]}}")
+        now = time.strftime(TS_FORMAT, time.gmtime())
+        marks = {**self.read_working(), **{i: now for i in items}}
+        tmp = self.cfg.working.with_suffix(".tmp")
+        tmp.write_text(json.dumps(marks, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, self.cfg.working)
+        return marks
 
     def set_cursor(self, body: object) -> dict:
         if not isinstance(body, dict) or set(body) - {"last_synced_at", "last_error"}:
@@ -223,6 +264,7 @@ class Console:
         tmp = self.cfg.cursor.with_suffix(".tmp")
         tmp.write_text(json.dumps(cur, sort_keys=True), encoding="utf-8")
         os.replace(tmp, self.cfg.cursor)
+        self.cfg.working.unlink(missing_ok=True)  # synced or failed, the agent is no longer at work
         return cur
 
 
@@ -333,6 +375,8 @@ class AgentHandler(_Handler):
         try:
             if self.path == "/cursor":
                 return self._send(200, {"cursor": self.console.set_cursor(self._body())})
+            if self.path == "/working":  # the agent socket only: the owner's side cannot set it
+                return self._send(200, {"working": self.console.set_working(self._body())})
             kind = AGENT_ROUTES.get(self.path)
             if kind is None:
                 return self._send(404, {"error": "not found"})
@@ -352,6 +396,9 @@ def owner_server(console: Console, verify: Callable[[str | None], dict], port: i
     return srv
 
 
+WORKING_TTL = 3600         # seconds an "agent active" mark stays true without being renewed
+MAX_WORKING = 32
+TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 SOCKET_PATH_MAX = 107  # sun_path is 108 bytes on Linux, one of them the terminating NUL
 
 

@@ -36,28 +36,34 @@ body{margin:0;font:14px sans-serif}</style></head><body>
 </body></html>"""
 
 
-def _view(owner_message: bool = False) -> dict:
+def _view(owner_message: bool = False, second_lane: bool = False) -> dict:
     """/view exactly as the server builds it (server.py: view.build over a store),
     from two questions made by the kit tests' own fixture, so it cannot drift.
     owner_message adds one owner message on LANE.1 with no agent reply, which
-    puts that item in awaiting_agent."""
+    puts that item in awaiting_agent; second_lane adds LANE.2 with one too."""
     import tempfile
     from console_kit import view as V
     from console_kit.store import Store
     from test_kit import message, question
     items = {"LANE.1": {"title": "first lane", "parent": None}}
+    if second_lane:
+        items["LANE.2"] = {"title": "second lane", "parent": None}
     with tempfile.TemporaryDirectory() as td:
         st = Store(Path(td) / "store.jsonl", known_items=items)
         st.append(question("LANE.1/Q1"))
         st.append(question("LANE.1/Q2"))
         if owner_message:
             st.append(message(item="LANE.1"))
+        if second_lane:
+            st.append(message(item="LANE.2"))
         return {"view": V.build(st, items, lambda c: True), "items": items, "cursor": {}}
 
 
 VIEW = _view()
 VIEW_AGENT = _view(owner_message=True)
+VIEW_AGENT2 = _view(owner_message=True, second_lane=True)
 assert VIEW_AGENT["view"]["awaiting_agent"] == ["LANE.1"], VIEW_AGENT["view"]["awaiting_agent"]
+assert sorted(VIEW_AGENT2["view"]["awaiting_agent"]) == ["LANE.1", "LANE.2"], VIEW_AGENT2["view"]["awaiting_agent"]
 assert VIEW["view"]["awaiting_agent"] == [], VIEW["view"]["awaiting_agent"]
 PAGE = P.inject(HOST, P.console_block('{"api": "/api"}'))
 
@@ -88,6 +94,7 @@ class _Handler(BaseHTTPRequestHandler):
     view_delay = 0.0   # seconds before /view answers (a slow server)
     view_fails = False  # /view answers 503 (a server that is down)
     view_agent = False  # /view carries one thread waiting on the agent
+    view_working = False  # ...and the cursor says an agent is working on it
     board: object = None   # what /api/board answers; None is 404, as a project with no board()
     board_status = 200
     board_hits = 0
@@ -101,7 +108,10 @@ class _Handler(BaseHTTPRequestHandler):
             import time
             time.sleep(_Handler.view_delay)
             status = 503 if _Handler.view_fails else 200
-            body, ctype = json.dumps(VIEW_AGENT if _Handler.view_agent else VIEW), "application/json"
+            payload = dict(VIEW_AGENT2 if _Handler.view_agent == 2 else VIEW_AGENT if _Handler.view_agent else VIEW)
+            if _Handler.view_working:  # an agent has marked this item id as in hand
+                payload["cursor"] = {"working": {_Handler.view_working: "2026-09-29T10:00:00Z"}}
+            body, ctype = json.dumps(payload), "application/json"
         elif self.path.startswith("/api/board"):
             _Handler.board_hits += 1
             status = 404 if _Handler.board is None else _Handler.board_status
@@ -172,7 +182,7 @@ class DockTests(unittest.TestCase):
         cls.server.shutdown()
 
     def setUp(self):
-        _Handler.view_delay, _Handler.view_fails, _Handler.view_agent = 0.0, False, False
+        _Handler.view_delay, _Handler.view_fails, _Handler.view_agent, _Handler.view_working = 0.0, False, False, False
 
     def _page(self, kind: str, width: int, loaded: bool = True):
         browser = getattr(self.pw, kind).launch()
@@ -396,6 +406,88 @@ class DockTests(unittest.TestCase):
                     self.assertTrue(got["agentShown"])
                     self.assertEqual(got["label"], "Open inbox, 2 waiting for you, 1 waiting on an agent")
 
+    # The inbox's "with the agent" row, as the owner reads it.
+    AGENT_ROW = """() => { const s = document.querySelector('.ck-inbox-list .ck-q-state[data-state="agent_active"], .ck-inbox-list .ck-q-state[data-state="awaiting_agent"]');
+      const hs = Array.from(document.querySelectorAll('.ck-section-heading')).map(h => h.textContent);
+      return { chip: s && s.textContent, state: s && s.getAttribute('data-state'), headings: hs }; }"""
+
+    def test_an_item_an_agent_is_working_on_reads_agent_active(self):
+        # Owner, 2026-09-29: "when an agent is working on something, relabel 'awaiting agent' to 'agent active'".
+        # Catches: the relabel applied to every agent thread (it would claim work nobody picked up),
+        # never applied, or applied whenever ANY item is marked (a mark on OTHER.9 must leave
+        # LANE.1 reading "awaiting agent"; review of PR #180). Every state, both presentations.
+        for kind in BROWSERS:
+            for marked, words, heading in (("LANE.1", "agent active", "Agent active"),
+                                           (False, "awaiting agent", "Awaiting agent"),
+                                           ("OTHER.9", "awaiting agent", "Awaiting agent")):
+                working = marked == "LANE.1"
+                for width, sel in ((1400, ".ck-dock-strip"), (800, ".ck-inbox-btn")):
+                    with self.subTest(browser=kind, marked=marked, width=width):
+                        _Handler.view_agent, _Handler.view_working = True, marked
+                        page = self._page(kind, width)
+                        label = page.evaluate(self.AGENT, sel)["label"]
+                        want = "1 with an agent at work" if working else "1 waiting on an agent"
+                        self.assertEqual(label, "Open inbox, 2 waiting for you, " + want)
+                        page.click(sel)
+                        page.wait_for_selector(".ck-inbox-list .ck-q-state[data-state='agent_active'], .ck-inbox-list .ck-q-state[data-state='awaiting_agent']")
+                        got = page.evaluate(self.AGENT_ROW)
+                        self.assertEqual(got["chip"], "● " + words, got)
+                        self.assertEqual(got["state"], "agent_active" if working else "awaiting_agent", got)
+                        self.assertIn(heading, got["headings"], got)
+
+    AGENT_CHIPS = """() => Array.from(document.querySelectorAll(
+        '.ck-inbox-list .ck-q-state[data-state="agent_active"], .ck-inbox-list .ck-q-state[data-state="awaiting_agent"]'))
+        .map(s => s.getAttribute('data-state')).sort()"""
+
+    def test_two_agent_threads_one_in_hand(self):
+        # Review of PR #180: with one agent thread the mark and the thread coincide, so a label
+        # that ignores WHICH item is marked still passes. Two threads, LANE.1 marked: one chip
+        # each way, the heading stays "Awaiting agent" (not every row is in hand), both counts named.
+        for kind in BROWSERS:
+            for width, sel in ((1400, ".ck-dock-strip"), (800, ".ck-inbox-btn")):
+                with self.subTest(browser=kind, width=width):
+                    _Handler.view_agent, _Handler.view_working = 2, "LANE.1"
+                    page = self._page(kind, width)
+                    label = page.evaluate(self.AGENT, sel)["label"]
+                    self.assertEqual(label, "Open inbox, 2 waiting for you, 1 waiting on an agent, "
+                                            "1 with an agent at work")
+                    page.click(sel)
+                    page.wait_for_selector(".ck-inbox-list .ck-q-state[data-state='agent_active']")
+                    self.assertEqual(page.evaluate(self.AGENT_CHIPS), ["agent_active", "awaiting_agent"])
+                    heads = page.evaluate(self.AGENT_ROW)["headings"]
+                    self.assertIn("Awaiting agent", heads)
+                    self.assertNotIn("Agent active", heads)
+
+    # Owner, 2026-09-29: "after hitting 'all answers' there is no way to get back to 'inbox'".
+    TOGGLE = """() => { const b = document.querySelector('.ck-sheet-toggle'), t = document.querySelector('.ck-title');
+      const back = document.querySelector('.ck-back-btn');
+      return { text: b && b.textContent, pressed: b && b.getAttribute('aria-pressed'), title: t && t.textContent,
+               backShown: !!back && getComputedStyle(back).display !== 'none' }; }"""
+
+    def test_all_answers_is_a_toggle_back_to_the_inbox(self):
+        # Catches: a sheet with no way back on a desktop, where the header's Back button is hidden
+        # (the reported bug), or a toggle that goes somewhere other than the inbox.
+        for kind in BROWSERS:
+            for width, opener in ((1400, ".ck-dock-strip"), (800, ".ck-inbox-btn")):
+                with self.subTest(browser=kind, width=width):
+                    page = self._page(kind, width)
+                    page.click(opener)
+                    page.wait_for_selector(".ck-sheet-toggle")
+                    got = page.evaluate(self.TOGGLE)
+                    self.assertEqual((got["text"], got["pressed"], got["title"]), ("All answers", "false", "Inbox"), got)
+                    page.click(".ck-sheet-toggle")
+                    page.wait_for_function("document.querySelector('.ck-title').textContent.startsWith('Answers')")
+                    got = page.evaluate(self.TOGGLE)
+                    self.assertEqual((got["text"], got["pressed"]), ("Inbox", "true"), got)
+                    if width >= 1024:
+                        self.assertFalse(got["backShown"], "the toggle is the only way back here")
+                    page.click(".ck-sheet-toggle")
+                    page.wait_for_function("document.querySelector('.ck-title').textContent === 'Inbox'")
+                    got = page.evaluate(self.TOGGLE)
+                    self.assertEqual((got["text"], got["pressed"]), ("All answers", "false"), got)
+                    focused = page.evaluate("document.activeElement === document.querySelector('.ck-title')")
+                    self.assertTrue(focused, "focus lands on the inbox title, not on a removed button")
+
     def test_no_agent_count_when_nothing_waits_on_the_agent(self):
         for kind in BROWSERS:
             for width, sel in ((1400, ".ck-dock-strip"), (800, ".ck-inbox-btn")):
@@ -430,7 +522,7 @@ class LiveBoardTests(unittest.TestCase):
     tearDownClass = DockTests.__dict__["tearDownClass"]
 
     def setUp(self):
-        _Handler.view_delay, _Handler.view_fails, _Handler.view_agent = 0.0, False, False
+        _Handler.view_delay, _Handler.view_fails, _Handler.view_agent, _Handler.view_working = 0.0, False, False, False
         _Handler.board, _Handler.board_status, _Handler.board_hits = None, 200, 0
 
     def _board_page(self, kind, path, board, width=1280):

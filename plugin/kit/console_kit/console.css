@@ -201,6 +201,10 @@
 .ck-q-state[data-state="unlocked"] { background: var(--c-open-bg); color: var(--c-open); }
 .ck-q-state[data-state="locked"] { background: var(--c-built-bg); color: var(--c-built); }
 .ck-q-state[data-state="stale"] { background: var(--c-blocked-bg); color: var(--c-blocked); }
+/* An agent has marked this item as in hand (cursor.working): the accent, not the owner's colour. */
+.ck-q-state[data-state="agent_active"] {
+  background: color-mix(in srgb, var(--c-accent) 14%, transparent); color: var(--c-accent);
+}
 .ck-q-textcol { align-self: stretch; } /* the full card width; the chip above keeps its own size */
 .ck-q-text {
   flex: 1;

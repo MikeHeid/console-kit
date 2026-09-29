@@ -256,6 +256,16 @@
     }
   }
 
+  // "Agent active" (owner, 2026-09-29) only on a real signal: the agent marks the
+  // items it is working on, the server drops a mark once the agent syncs or an
+  // hour passes, and `cursor.working` carries what is left. Without a mark the
+  // honest word is still "awaiting agent": the owner wrote last, and nothing
+  // says a session has picked it up.
+  function agentActive(itemId) {
+    return !!(cursor && cursor.working && Object.prototype.hasOwnProperty.call(cursor.working, itemId));
+  }
+  function agentWords(itemId) { return agentActive(itemId) ? 'agent active' : 'awaiting agent'; }
+
   // Update inbox button badge — use view.inbox.length to avoid double-counting rolled-up totals
   function updateInboxButton() {
     if (!inboxBtn || !view) return;
@@ -265,8 +275,10 @@
     // owes the answer. Kept apart from the first so "waiting for you" never
     // includes work that is not the owner's to do.
     const agent = (view.awaiting_agent ? view.awaiting_agent.length : 0);
+    const active = agent ? view.awaiting_agent.filter(agentActive).length : 0;
     let label = total ? 'Open inbox, ' + total + ' waiting for you' : 'Open inbox';
-    if (agent) label += ', ' + agent + ' waiting on an agent';
+    if (agent - active) label += ', ' + (agent - active) + ' waiting on an agent';
+    if (active) label += ', ' + active + ' with an agent at work';
     for (const b of [inboxBtn, dockStrip]) {
       if (!b) continue;
       const countEl = b.querySelector('.ck-inbox-count');
@@ -326,7 +338,7 @@
       const t = data.total;
       const parts = [];
       if (t.awaiting_you > 0) parts.push(GLYPH.awaiting_you + ' ' + t.awaiting_you + ' you');
-      if (t.awaiting_agent > 0) parts.push(GLYPH.awaiting_agent + ' ' + t.awaiting_agent + ' agent');
+      if (t.awaiting_agent > 0) parts.push(GLYPH.awaiting_agent + ' ' + t.awaiting_agent + (agentActive(id) ? ' agent active' : ' agent'));
       if (t.unlocked > 0) parts.push(GLYPH.unlocked + ' ' + t.unlocked + ' unlocked');
       if (t.stale > 0) parts.push(GLYPH.stale + ' ' + t.stale + ' stale');
       const hasItems = parts.length > 0;
@@ -571,13 +583,14 @@
 
       // Items awaiting agent
       if (view.awaiting_agent && view.awaiting_agent.length > 0) {
-        body.appendChild(el('div', { className: 'ck-section-heading' }, ['Awaiting agent']));
+        const allActive = view.awaiting_agent.every(agentActive);
+        body.appendChild(el('div', { className: 'ck-section-heading' }, [allActive ? 'Agent active' : 'Awaiting agent']));
         const list = el('div', { className: 'ck-inbox-list' });
         for (const itemId of view.awaiting_agent) {
           const itemData = items[itemId];
           const item = el('div', { className: 'ck-inbox-item', tabindex: '0' }, [
-            el('span', { className: 'ck-q-state', dataState: 'awaiting_agent' }, [
-              GLYPH.awaiting_agent, ' awaiting agent'
+            el('span', { className: 'ck-q-state', dataState: agentActive(itemId) ? 'agent_active' : 'awaiting_agent' }, [
+              GLYPH.awaiting_agent, ' ' + agentWords(itemId)
             ]),
             el('span', { className: 'ck-inbox-item-id' }, [itemId]),
             el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : ''])
@@ -663,7 +676,7 @@
       const t = view.items[itemId].own;
       const counts = el('div', { className: 'ck-counts' });
       if (t.awaiting_you) counts.appendChild(el('span', {}, [GLYPH.awaiting_you + ' ' + t.awaiting_you + ' awaiting you']));
-      if (t.awaiting_agent) counts.appendChild(el('span', {}, [GLYPH.awaiting_agent + ' ' + t.awaiting_agent + ' awaiting agent']));
+      if (t.awaiting_agent) counts.appendChild(el('span', {}, [GLYPH.awaiting_agent + ' ' + t.awaiting_agent + ' ' + agentWords(itemId)]));
       if (t.unlocked) counts.appendChild(el('span', {}, [GLYPH.unlocked + ' ' + t.unlocked + ' unlocked']));
       if (t.stale) counts.appendChild(el('span', {}, [GLYPH.stale + ' ' + t.stale + ' stale']));
       bar.appendChild(counts);
@@ -682,9 +695,21 @@
       refreshBtn.disabled = false;
     });
     bar.appendChild(refreshBtn);
-    // Every answer the console holds, from anywhere (§7.6)
-    const allBtn = el('button', { className: 'ck-refresh-btn', type: 'button' }, ['All answers']);
-    allBtn.addEventListener('click', () => showSheet(null, null));
+    // Every answer the console holds, from anywhere (§7.6). A toggle (owner,
+    // 2026-09-29: "no way to get back to inbox"): on the sheet it reads as the
+    // way back, because the header's Back button shows only on narrow screens.
+    const onSheet = currentMode === 'sheet';
+    const allBtn = el('button', {
+      className: 'ck-refresh-btn ck-sheet-toggle', type: 'button', 'aria-pressed': onSheet ? 'true' : 'false'
+    }, [onSheet ? (itemId ? 'Back to ' + itemId : 'Inbox') : 'All answers']);
+    allBtn.addEventListener('click', () => {
+      if (!onSheet) return showSheet(null, null);
+      currentFork = null;
+      currentMode = itemId ? 'item' : 'inbox';
+      renderPanel();
+      const h = panelEl.querySelector('.ck-title');
+      if (h) { h.setAttribute('tabindex', '-1'); h.focus(); }
+    });
     bar.appendChild(allBtn);
     // Error
     if (cursor && cursor.last_error) {

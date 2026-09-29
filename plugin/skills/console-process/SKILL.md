@@ -38,6 +38,15 @@ Lists every doorbell line after the agent's cursor. Note the **highest seq**
 you are handling; you record it in step 5, and only then. A line you have not
 handled must stay after the cursor so the next session sees it.
 
+Then tell the owner you have picked it up, naming every item those lines are
+on:
+
+    A working ITEM [ITEM ...]
+
+The console shows those items as **agent active** instead of "awaiting agent"
+until step 5's `synced` clears it. A mark lapses after an hour, so if the
+work runs longer, run `working` again.
+
 ## 2. Fold newly locked answers, through a PR
 
 An answer is a ruling only once it is **locked by the owner and folded** (R1).
