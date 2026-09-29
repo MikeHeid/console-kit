@@ -14,11 +14,19 @@ script run, and a short list of commands **the user runs themselves**.
 - **Never open, print or copy** `~/.cloudflared/cert.pem` or any
   `~/.cloudflared/*.json`. They are Cloudflare secrets. The kit only ever
   checks that a credentials file exists.
-- **Never run** `agent.py register`, `cloudflared tunnel create`,
-  `cloudflared tunnel route dns`, or `systemctl --user enable`. Registering
-  tells every Claude session to trust this project's console, and the tunnel
-  and DNS make it reachable from the internet. They are the user's decisions,
-  so you print them and the user runs them.
+- **Never run** `deploy/install.sh` (with or without `--start`),
+  `agent.py register`, `cloudflared tunnel create`,
+  `cloudflared tunnel route dns`, or `systemctl --user enable`/`start`. The
+  installer sets up a service that **imports and runs the project's
+  `.console-kit/adapter.py` as Python**. Registering tells every Claude
+  session to trust this project's console. The tunnel and DNS make it
+  reachable from the internet. They are the user's decisions, so you print
+  them and the user runs them.
+- **Never pass `--force`** unless the user has seen the file it would replace
+  and said to. **Never delete or replace a symbolic link** that `onboard.py`
+  refused; tell the user what it points at instead.
+- **Show every `REVIEW` line** `onboard.py` prints. It means an adapter or
+  page was already in the project, and the server will run it.
 - **Never invent a value.** An AUD tag or team domain you did not get from the
   user is a console nobody can log in to.
 

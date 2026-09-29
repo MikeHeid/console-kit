@@ -39,6 +39,21 @@ UNITS="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/console-kit/$CONSOLE_NAME"
 CLOUDFLARED=$(command -v cloudflared || echo /usr/local/bin/cloudflared)
 
+# Every value rendered into a unit must be a plain path or name. The names are
+# validated by onboard.py; the PATHS come from this machine ($HOME, the project
+# directory, where cloudflared lives) and are checked here. A `|`, `&` or `\`
+# would corrupt the sed below, a newline could add a directive to the unit, and
+# a space or `%` means something to systemd itself. Refused by name, never escaped.
+for pair in "project directory=$PROJECT" "kit=$KIT" "python=$SHARE/venv/bin/python" "cloudflared=$CLOUDFLARED" \
+            "state=$STATE" "units=$UNITS"; do
+  value=${pair#*=}
+  if ! printf '%s' "$value" | LC_ALL=C grep -qxE '/[A-Za-z0-9_./-]*' || [ "$(printf '%s' "$value" | wc -l)" != 0 ]; then
+    echo "install.sh: the ${pair%%=*} path '$value' holds a character a systemd unit cannot take safely;" >&2
+    echo "            only letters, digits and _ . / - are allowed. Move it, or link it from a plain path." >&2
+    exit 2
+  fi
+done
+
 # The kit is COPIED to a fixed place, so the services never run from a plugin
 # cache or a checkout that an update or a branch switch can change underneath
 # them. Re-running this script is how the installed kit is updated.

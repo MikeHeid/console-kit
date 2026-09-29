@@ -8,6 +8,8 @@ import contextlib
 import io
 import json
 import os
+import shutil
+import subprocess
 import socket
 import stat
 import tempfile
@@ -91,7 +93,10 @@ class WriteTests(Base):
         self.write()
         before = {p: p.read_bytes() for p in self.project.rglob("*") if p.is_file()}
         out = self.write()
-        self.assertEqual(out, [f"unchanged {self.project.resolve() / '.console-kit/console.env'}"])
+        self.assertEqual(out[0], f"unchanged {self.project.resolve() / '.console-kit/console.env'}")
+        # The starters exist now, so a rerun names them for review rather than trusting a marker.
+        self.assertEqual([line.split()[1].rsplit("/", 1)[1].rstrip(":") for line in out[1:]], ["adapter.py", "page.html"])
+        self.assertTrue(all(line.startswith("REVIEW") for line in out[1:]), out)
         self.assertEqual(before, {p: p.read_bytes() for p in self.project.rglob("*") if p.is_file()})
 
     def test_a_rerun_with_new_answers_rewrites_its_own_file(self):
@@ -154,6 +159,106 @@ class WriteTests(Base):
         route = next(line for line in steps.splitlines() if "route dns" in line)
         self.assertIn("--config", route)
         self.assertIn("config-acme-console.yml", route)
+
+
+class SymlinkTests(Base):
+    """A cloned repository must not be able to steer a write outside itself (PR #1 security review, CRITICAL)."""
+
+    TARGETS = (".console-kit/console.env", ".console-kit.json", ".console-kit/adapter.py", ".console-kit/page.html")
+
+    def test_a_dangling_link_at_any_target_is_refused_and_nothing_is_written(self):
+        for rel in self.TARGETS:
+            with self.subTest(target=rel):
+                shutil.rmtree(self.project)
+                self.project.mkdir()
+                outside = self.home / f"planted-{rel.replace('/', '_')}"
+                link = self.project / rel
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(outside)                       # dangling: `outside` does not exist
+                for force in (False, True):                    # --force never overrides this
+                    with self.assertRaisesRegex(O.OnboardError, "is a symbolic link"):
+                        O.write(self.project, GOOD, force=force, check_port=False)
+                self.assertFalse(outside.exists(), f"{rel} wrote through the link")
+                self.assertEqual(list(self.home.iterdir()), [], "something landed outside the project")
+                self.assertFalse((self.project / ".console-kit/console.env").exists() and rel != ".console-kit/console.env")
+
+    def test_a_linked_directory_is_refused(self):
+        elsewhere = self.home / "elsewhere"
+        elsewhere.mkdir()
+        (self.project / ".console-kit").symlink_to(elsewhere)
+        with self.assertRaisesRegex(O.OnboardError, "is a symbolic link"):
+            self.write()
+        self.assertEqual(list(elsewhere.iterdir()), [])
+
+    def test_a_link_to_a_real_file_inside_the_project_is_refused_too(self):
+        (self.project / "real.html").write_text("<p>x</p>")
+        (self.project / ".console-kit").mkdir()
+        (self.project / ".console-kit/page.html").symlink_to(self.project / "real.html")
+        with self.assertRaisesRegex(O.OnboardError, "is a symbolic link"):
+            self.write()
+
+    def test_a_link_at_the_tunnel_config_is_refused(self):
+        self.write()
+        cf = self.home / ".cloudflared"
+        cf.mkdir()
+        (cf / f"{TID}.json").write_text("{}")
+        target = self.home / "planted.yml"
+        (cf / "config-acme-console.yml").symlink_to(target)
+        with self.assertRaisesRegex(O.OnboardError, "is a symbolic link"):
+            O.tunnel(self.project, TID, force=True)
+        self.assertFalse(target.exists())
+
+
+class ReviewNoticeTests(Base):
+    def test_an_adapter_or_page_already_there_is_named_for_review(self):
+        (self.project / ".console-kit").mkdir()
+        (self.project / ".console-kit/adapter.py").write_text(f"{O.MARK}\nimport os\n")  # a marker proves nothing
+        out = self.write()
+        review = [line for line in out if line.startswith("REVIEW")]
+        self.assertEqual(len(review), 1, out)
+        self.assertIn("adapter.py", review[0])
+        self.assertIn("install.sh", review[0])
+
+    def test_files_it_just_wrote_are_not_flagged(self):
+        self.assertFalse([line for line in self.write() if line.startswith("REVIEW")])
+
+
+class OsErrorTests(Base):
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root writes anywhere")
+    def test_a_filesystem_error_is_a_named_refusal_not_a_traceback(self):
+        self.project.chmod(0o500)
+        self.addCleanup(self.project.chmod, 0o700)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = O.main(["write", "--project", str(self.project), "--name", "acme", "--team-domain",
+                         GOOD["team_domain"], "--aud", AUD, "--hostname", GOOD["hostname"], "--no-port-check"])
+        self.assertEqual(rc, 2)
+        self.assertTrue(err.getvalue().startswith("onboard: "), err.getvalue())
+        self.assertIn("Permission denied", err.getvalue())
+
+
+@unittest.skipUnless(shutil.which("bash"), "no bash")
+class InstallGuardTests(Base):
+    """install.sh refuses a path systemd or sed cannot take, BEFORE it copies, builds or writes anything."""
+
+    def run_install(self, project):
+        env = {**os.environ, "HOME": str(self.home), "XDG_DATA_HOME": str(self.home / "share"),
+               "XDG_CONFIG_HOME": str(self.home / "cfg"), "XDG_STATE_HOME": str(self.home / "st"),
+               "PATH": os.environ.get("PATH", "")}
+        return subprocess.run(["bash", str(Path(O.__file__).parent / "deploy/install.sh"), "--project", str(project)],
+                              env=env, capture_output=True, text=True, timeout=60)
+
+    def test_unsafe_project_paths_are_refused_before_anything_happens(self):
+        for name in ("pipe|dir", "amp&dir", "sp ace", "pct%dir", "back\\slash"):
+            with self.subTest(name=name):
+                project = self.root / name
+                project.mkdir()
+                O.write(project, GOOD, check_port=False)
+                r = self.run_install(project)
+                self.assertEqual(r.returncode, 2, r.stderr)
+                self.assertIn("holds a character a systemd unit cannot take safely", r.stderr)
+                for d in ("share", "cfg", "st"):
+                    self.assertFalse((self.home / d).exists(), f"{d} was written before the refusal")
 
 
 class ReadEnvTests(Base):

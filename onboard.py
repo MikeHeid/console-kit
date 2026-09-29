@@ -96,7 +96,28 @@ def port_free(port: int) -> bool:
     return True
 
 
+def _target(base: Path, rel: str) -> Path:
+    """`base/rel`, refused when it or any directory on the way is a symbolic link, or it lands outside `base`.
+
+    A cloned repository can ship a DANGLING link at a path onboarding writes
+    (`.console-kit/adapter.py -> ~/.bashrc`): `exists()` follows it, says no,
+    and a plain write would create the link's target wherever it points. So
+    every component is checked with lstat, never followed, and `--force`
+    does not override this.
+    """
+    p = base
+    for part in Path(rel).parts:
+        p = p / part
+        if p.is_symlink():
+            raise OnboardError(f"{p} is a symbolic link; onboarding writes only real files inside {base}")
+    if not p.resolve().is_relative_to(base.resolve()):
+        raise OnboardError(f"{p} resolves outside {base}")
+    return p
+
+
 def _write(path: Path, text: str, force: bool) -> str:
+    if path.is_symlink():  # the last line of defence; _target refuses these first
+        raise OnboardError(f"{path} is a symbolic link; refusing to write through it")
     if path.exists():
         old = path.read_text(encoding="utf-8", errors="replace")
         if old == text:
@@ -159,16 +180,23 @@ def write(project: Path, answers: dict, force: bool = False, check_port: bool = 
     a = check(answers)
     if check_port and not port_free(a["port"]):
         raise OnboardError(f"port: {a['port']} is already in use on 127.0.0.1; pick another with --port")
+    # Every target is checked BEFORE anything is written, so a refusal leaves the project untouched.
+    env, cfg = _target(project, ".console-kit/console.env"), _target(project, ".console-kit.json")
+    starters = [(_target(project, a[k]), t) for k, t in (("adapter", "adapter_template.py"), ("page", "demo/index.html"))]
     new_cfg = config_json(project, a)  # parse the old config BEFORE writing anything
-    out = [_write(project / ".console-kit/console.env", env_text(a), force)]
-    cfg = project / ".console-kit.json"
+    out = [_write(env, env_text(a), force)]
     if not cfg.exists() or cfg.read_text(encoding="utf-8") != new_cfg:
         cfg.write_text(new_cfg, encoding="utf-8")  # a merge: every key already there is kept
         out.append(f"wrote     {cfg}")
-    for rel, template in ((a["adapter"], "adapter_template.py"), (a["page"], "demo/index.html")):
-        target = project / rel
+    for target, template in starters:
         if not target.exists():
             out.append(_write(target, (KIT / template).read_text(encoding="utf-8"), force))
+        else:
+            # The server imports the adapter and runs it as Python, and serves the page with the
+            # console in it. One already here may have come with a checkout, and no marker in it
+            # can prove otherwise (a hostile file would carry the marker too): always say so.
+            out.append(f"REVIEW    {target}: already here, so it was left as it is. The server runs it: "
+                       "know what it holds before you run install.sh.")
     return out
 
 
@@ -227,7 +255,7 @@ def tunnel(project: Path, tunnel_id: str, force: bool = False) -> str:
     for key, value in {"@TUNNEL_ID@": tid, "@CREDENTIALS@": str(creds), "@HOSTNAME@": env["CONSOLE_HOSTNAME"],
                        "@PORT@": env["CONSOLE_PORT"], "@NAME@": env["CONSOLE_NAME"]}.items():
         text = text.replace(key, value)
-    return _write(Path.home() / ".cloudflared" / f"config-{env['CONSOLE_TUNNEL']}.yml", MARK + "\n" + text, force)
+    return _write(_target(Path.home() / ".cloudflared", f"config-{env['CONSOLE_TUNNEL']}.yml"), MARK + "\n" + text, force)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -268,6 +296,9 @@ def main(argv: list[str] | None = None) -> int:
             print(tunnel(a.project, a.id, a.force))
     except OnboardError as e:
         print(f"onboard: {e}", file=sys.stderr)
+        return 2
+    except OSError as e:  # a read-only mount, a full disk, a permission: named, never a traceback
+        print(f"onboard: {e.filename or ''}: {e.strerror or e}", file=sys.stderr)
         return 2
     return 0
 
