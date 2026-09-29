@@ -175,8 +175,12 @@
   margin-bottom: 16px;
   overflow: hidden;
 }
+/* The state chip sits ABOVE the question, not beside it: beside it, the chip
+   took its own column and squeezed the text into a narrow strip (owner,
+   2026-09-29: "hard to navigate as too much text"). */
 .ck-q-header {
   display: flex;
+  flex-direction: column;
   align-items: flex-start;
   gap: 8px;
   padding: 12px 14px;
@@ -197,6 +201,7 @@
 .ck-q-state[data-state="unlocked"] { background: var(--c-open-bg); color: var(--c-open); }
 .ck-q-state[data-state="locked"] { background: var(--c-built-bg); color: var(--c-built); }
 .ck-q-state[data-state="stale"] { background: var(--c-blocked-bg); color: var(--c-blocked); }
+.ck-q-textcol { align-self: stretch; } /* the full card width; the chip above keeps its own size */
 .ck-q-text {
   flex: 1;
   font-size: 14px;
@@ -520,24 +525,41 @@
   color: var(--c-claimed);
 }
 .ck-inbox-btn[data-empty="true"] .ck-inbox-count { display: none; }
+/* The agent's count: nothing for the owner to do, so an outline, not a fill. */
+.ck-agent-count {
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--c-border);
+  color: var(--c-fg-muted);
+  white-space: nowrap;
+}
+[data-agent-empty="true"] > .ck-agent-count,
+:not([data-agent-empty]) > .ck-agent-count { display: none; }
 
 /* --- Docked inbox (AB-2/Q2, owner): 1024px and wider ---
-   The panel becomes a 380px column beside the board instead of an overlay,
-   and starts collapsed to a 44px strip carrying the unread badge. console.js
+   The panel becomes a column beside the board instead of an overlay, and
+   starts collapsed to a 44px strip carrying the unread badge. console.js
    marks <html> with .ck-dock (and .ck-dock-open while the column is open);
    the host page gets its room as a right margin on <body>, so no host CSS is
-   needed. Below 1024px none of this applies and the overlay is unchanged. */
+   needed. Below 1024px none of this applies and the overlay is unchanged.
+   Open, the column takes HALF the screen (owner, 2026-09-29: "on big monitors
+   can you make it 50% of the screen until closed"). It docks only at 1024px
+   and wider, so that is never under 512px. --ck-col is the one width: the
+   column, the page's margin and the Reload bar's inset all read it, so they
+   cannot disagree. */
 .ck-dock-strip { display: none; }
 @media (min-width: 1024px) {
+  :root { --ck-col: 50vw; }
   html.ck-dock body { margin-right: 44px; }
-  html.ck-dock-open body { margin-right: 380px; }
+  html.ck-dock-open body { margin-right: var(--ck-col); }
   html.ck-dock .ck-inbox-btn { display: none; }
   html.ck-dock .ck-backdrop { display: none; }
   /* border-box here, not from the host: a host without a global reset would
      otherwise make the column 381px and the strip 45px. */
   html.ck-dock .ck-panel {
     box-sizing: border-box;
-    width: 380px;
+    width: var(--ck-col);
     box-shadow: none;
     z-index: 997;
   }
@@ -566,6 +588,11 @@
   .ck-dock-strip:hover, .ck-dock-strip:focus-visible { background: var(--c-surface); }
   .ck-dock-strip:focus-visible { outline: 2px solid var(--c-accent); outline-offset: -3px; }
   .ck-dock-strip[data-empty="true"] .ck-inbox-count { display: none; }
+  /* Clear of the docked strip (44px) or open column, plus the gutter. */
+  html.ck-dock .ck-board-stale { right: 60px; }
+  html.ck-dock-open .ck-board-stale { right: calc(var(--ck-col) + 16px); }
+  /* 44px strip: the glyph and number stack instead of sitting side by side. */
+  .ck-dock-strip .ck-agent-count { padding: 2px 3px; white-space: normal; text-align: center; font-size: 12px; }
 }
 @media (min-width: 1024px) and (prefers-reduced-motion: no-preference) {
   html.ck-dock body { transition: margin-right 0.2s ease; }
@@ -700,3 +727,24 @@
 .ck-sheet-answers { padding-left: 20px; margin: 8px 0; }
 .ck-sheet-answers li { margin: 6px 0; }
 .ck-sheet-foot { margin-top: 16px; padding-top: 10px; border-top: 1px solid var(--c-border-light); }
+
+/* AB-2/Q4: the board changed shape under an open tab; offer a reload rather
+   than patch a tree that no longer matches. Polling has stopped by now, so
+   this bar is the only sign the page is stale and must be visible at every
+   scroll position. The kit cannot know what a host page makes sticky (the
+   lane board's header is sticky at top: 0, z-index 100), so the bar is
+   FIXED to the bottom edge, above host content and below the kit's own
+   panel, strip and button (995 < 996-998). */
+.ck-board-stale {
+  position: fixed; left: 16px; right: 16px;
+  bottom: max(16px, env(safe-area-inset-bottom, 0px)); z-index: 995;
+  border-radius: 8px; box-shadow: var(--shadow-md, 0 4px 12px rgba(0,0,0,.25));
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px;
+  padding: 8px 16px;
+  background: var(--c-accent); color: var(--c-accent-fg);
+  font: 14px/1.4 system-ui, sans-serif;
+}
+.ck-board-reload {
+  font: inherit; padding: 4px 12px; border-radius: 6px; cursor: pointer;
+  border: 1px solid currentColor; background: transparent; color: inherit;
+}

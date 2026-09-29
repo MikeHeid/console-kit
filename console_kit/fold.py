@@ -45,6 +45,10 @@ class ProjectAdapter(Protocol):
     def seed_questions(self) -> list[dict]:
         """Return the agent's foreseen questions, as `question` records without the store's fields."""
 
+    # Optional, and so not part of the Protocol a checker enforces: board() -> {"shape": str,
+    # "values": {key: str}}, the page's live values (AB-2/Q4), served at /api/board. Each key
+    # names an element the page marks with data-live*; "shape" fingerprints everything else.
+
 
 class FoldError(Exception):
     pass

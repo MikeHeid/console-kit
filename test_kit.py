@@ -571,7 +571,12 @@ class PublishTests(unittest.TestCase):
         widths = set(re.findall(r"@media \(min-width: (\d+)px\)", css))
         self.assertEqual(widths, {m.group(1)})
         self.assertIn("html.ck-dock body { margin-right: 44px; }", css)
-        self.assertIn("html.ck-dock-open body { margin-right: 380px; }", css)
+        # The open column is half the screen (owner, 2026-09-29), one custom property
+        # read by the column, the page's margin and the Reload bar's inset.
+        self.assertIn(":root { --ck-col: 50vw; }", css)
+        self.assertIn("html.ck-dock-open body { margin-right: var(--ck-col); }", css)
+        self.assertIn("width: var(--ck-col);", css)
+        self.assertIn("html.ck-dock-open .ck-board-stale { right: calc(var(--ck-col) + 16px); }", css)
 
 
 def fork(item="LANE.1", mode="tighten", focus="code", **kw):

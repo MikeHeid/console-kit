@@ -261,12 +261,21 @@
     if (!inboxBtn || !view) return;
     // Fix #1: inbox.length is the true count, not summed totals which double-count children
     const total = (view.inbox ? view.inbox.length : 0);
+    // A second, separate count: threads where the owner wrote last and an agent
+    // owes the answer. Kept apart from the first so "waiting for you" never
+    // includes work that is not the owner's to do.
+    const agent = (view.awaiting_agent ? view.awaiting_agent.length : 0);
+    let label = total ? 'Open inbox, ' + total + ' waiting for you' : 'Open inbox';
+    if (agent) label += ', ' + agent + ' waiting on an agent';
     for (const b of [inboxBtn, dockStrip]) {
       if (!b) continue;
       const countEl = b.querySelector('.ck-inbox-count');
       if (countEl) countEl.textContent = total || '';
+      const agentEl = b.querySelector('.ck-agent-count');
+      if (agentEl) agentEl.textContent = agent ? GLYPH.awaiting_agent + ' ' + agent : '';
       b.setAttribute('data-empty', total === 0 ? 'true' : 'false');
-      b.setAttribute('aria-label', total ? 'Open inbox, ' + total + ' waiting' : 'Open inbox');
+      b.setAttribute('data-agent-empty', agent === 0 ? 'true' : 'false');
+      b.setAttribute('aria-label', label);
     }
   }
 
@@ -286,7 +295,10 @@
     // An overlay is a modal dialog; a docked column stays on screen beside the
     // board, so it is a landmark ("Inbox") a screen reader can jump to.
     panelEl.setAttribute('role', docked ? 'complementary' : 'dialog');
-    panelEl.setAttribute('aria-modal', docked ? 'false' : 'true');
+    // aria-modal is absent, not "false", when docked: "false" is the default
+    // and some readers announce any aria-modal attribute as a dialog.
+    if (docked) panelEl.removeAttribute('aria-modal');
+    else panelEl.setAttribute('aria-modal', 'true');
     // Closed, the panel is only slid off-screen: inert keeps its controls out
     // of the Tab order and away from assistive tech until it opens again.
     panelEl.inert = !open;
@@ -387,7 +399,8 @@
       'aria-label': UNKNOWN
     }, [
       el('span', {}, ['Inbox']),
-      el('span', { className: 'ck-inbox-count' }, ['?'])
+      el('span', { className: 'ck-inbox-count' }, ['?']),
+      el('span', { className: 'ck-agent-count', 'aria-hidden': 'true' }, [''])
     ]);
     inboxBtn.addEventListener('click', () => openPanel(null, 'inbox'));
     document.body.appendChild(inboxBtn);
@@ -401,7 +414,8 @@
       'aria-controls': 'ck-panel'
     }, [
       el('span', { className: 'ck-dock-label' }, ['Inbox']),
-      el('span', { className: 'ck-inbox-count' }, ['?'])
+      el('span', { className: 'ck-inbox-count' }, ['?']),
+      el('span', { className: 'ck-agent-count', 'aria-hidden': 'true' }, [''])
     ]);
     dockStrip.addEventListener('click', () => openPanel(null, 'inbox'));
     document.body.appendChild(dockStrip);
@@ -702,7 +716,7 @@
         GLYPH[state] || '', ' ', state.replace('_', ' ')
       ])
     ]);
-    const textCol = el('div', { style: 'flex: 1;' });
+    const textCol = el('div', { className: 'ck-q-textcol' });
     const textEl = el('div', { className: 'ck-q-text' });
     textEl.textContent = qData.text;
     textCol.appendChild(textEl);
@@ -1431,6 +1445,105 @@
     return wrap;
   }
 
+  // Live values (AB-2/Q4, owner): the committed page stays the page, and an
+  // open tab catches up from /api/board. Only a page that marks values with
+  // data-live* polls at all. An element is touched only when its value
+  // differs, so a load straight after a write changes nothing and moves nothing.
+  // A board whose shape differs from the page's (an item added, moved or
+  // retitled) is never patched: a half-patched tree would be quietly wrong, so
+  // the page says it changed and offers a reload instead.
+  const BOARD_POLL_MS = 60000;
+  let boardTimer = null;
+  let boardBusy = false;
+  let boardDone = false; // stale, or no board() on this project: stop polling
+
+  function stopBoard() {
+    boardDone = true;
+    if (boardTimer !== null) { clearInterval(boardTimer); boardTimer = null; }
+  }
+
+  function boardShapeEl() {
+    return document.querySelector('[data-live-shape]');
+  }
+
+  function applyBoard(data) {
+    const wrap = boardShapeEl();
+    if (!wrap || !data || typeof data.values !== 'object' || data.values === null) return 0;
+    if (data.shape !== wrap.getAttribute('data-live-shape')) {
+      showBoardStale();
+      return 0;
+    }
+    const values = data.values;
+    const get = (e, attr) => {
+      const k = e.getAttribute(attr);
+      const v = Object.prototype.hasOwnProperty.call(values, k) ? values[k] : null;
+      return typeof v === 'string' ? v : null;
+    };
+    let changed = 0;
+    document.querySelectorAll('[data-live]').forEach(e => {
+      const v = get(e, 'data-live');
+      if (v !== null && e.textContent !== v) { e.textContent = v; changed++; }
+    });
+    document.querySelectorAll('[data-live-title]').forEach(e => {
+      const v = get(e, 'data-live-title');
+      if (v !== null && e.title !== v) { e.title = v; changed++; }
+    });
+    document.querySelectorAll('[data-live-width]').forEach(e => {
+      const v = get(e, 'data-live-width');
+      // A percentage, 0-100, digits only: nothing else reaches a style.
+      if (v === null || !/^[0-9]{1,3}$/.test(v) || Number(v) > 100) return;
+      if (e.style.width !== v + '%') { e.style.width = v + '%'; changed++; }
+    });
+    document.querySelectorAll('[data-live-status]').forEach(e => {
+      const v = get(e, 'data-live-status');
+      if (v === null || !/^[a-z][a-z-]*$/.test(v) || e.classList.contains('s-' + v)) return;
+      Array.from(e.classList).filter(c => c.startsWith('s-')).forEach(c => e.classList.remove(c));
+      e.classList.add('s-' + v);
+      changed++;
+    });
+    if (changed) {
+      announce('The lane board has updated.');
+      document.dispatchEvent(new CustomEvent('ck:board-updated', { detail: { changed } }));
+    }
+    return changed;
+  }
+
+  function showBoardStale() {
+    stopBoard();
+    if (document.querySelector('.ck-board-stale')) return;
+    const reload = el('button', { type: 'button', className: 'ck-board-reload' }, ['Reload']);
+    reload.addEventListener('click', () => location.reload());
+    const bar = el('div', { className: 'ck-board-stale', role: 'status' }, [
+      el('span', {}, ['The board has changed since this page loaded. ']), reload
+    ]);
+    document.body.insertBefore(bar, document.body.firstChild);
+  }
+
+  async function fetchBoard() {
+    if (boardDone || boardBusy || !config || !config.api || !boardShapeEl()) return;
+    if (document.visibilityState === 'hidden') return;
+    boardBusy = true;
+    try {
+      const resp = await fetch(config.api + '/board', { credentials: 'same-origin' });
+      if (resp.status === 404) { stopBoard(); return; } // this project offers no live values
+      if (!resp.ok) return; // a transient failure: the page stands, the next poll retries
+      applyBoard(await resp.json());
+    } catch (e) {
+      // Offline or asleep: the page as loaded is still true to its own moment.
+    } finally {
+      boardBusy = false;
+    }
+  }
+
+  function startBoard() {
+    if (!boardShapeEl()) return;
+    fetchBoard();
+    boardTimer = setInterval(fetchBoard, BOARD_POLL_MS);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') fetchBoard();
+    });
+  }
+
   // Initialize
   function init() {
     // Read config from injected script
@@ -1446,12 +1559,16 @@
     injectItemButtons();
     // Initial fetch
     fetchView();
+    startBoard();
   }
 
   // Public API
   window.ConsoleKit = {
     open: function(itemId) {
       openPanel(itemId, 'item');
+    },
+    refreshBoard: function() {
+      return fetchBoard();
     },
     refresh: function() {
       return fetchView().then(() => {
