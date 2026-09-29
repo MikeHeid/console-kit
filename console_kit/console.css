@@ -485,10 +485,11 @@
 .ck-reply-btn:hover { border-color: var(--c-accent); color: var(--c-fg); }
 
 /* --- Inbox button (fixed) --- */
-/* Fixed over the host page's top-right corner. Gradiance's lane board keeps its
-   header clear of it with `body:has(.ck-inbox-btn) .header-controls
-   { margin-inline-end: 120px }` (scripts/register/dashboard.py), sized for this
-   button at ~90px plus right: 12px. Widen the button and widen that too. */
+/* Below 1024px only (see the dock block): fixed over the host page's top-right
+   corner. Gradiance's lane board keeps its header clear of it with
+   `.header-controls { margin-inline-end: 120px }` under the same width
+   (scripts/register/dashboard.py), sized for this button at ~90px plus
+   right: 12px. Widen the button and widen that too. */
 .ck-inbox-btn {
   position: fixed;
   top: env(safe-area-inset-top, 12px);
@@ -519,6 +520,56 @@
   color: var(--c-claimed);
 }
 .ck-inbox-btn[data-empty="true"] .ck-inbox-count { display: none; }
+
+/* --- Docked inbox (AB-2/Q2, owner): 1024px and wider ---
+   The panel becomes a 380px column beside the board instead of an overlay,
+   and starts collapsed to a 44px strip carrying the unread badge. console.js
+   marks <html> with .ck-dock (and .ck-dock-open while the column is open);
+   the host page gets its room as a right margin on <body>, so no host CSS is
+   needed. Below 1024px none of this applies and the overlay is unchanged. */
+.ck-dock-strip { display: none; }
+@media (min-width: 1024px) {
+  html.ck-dock body { margin-right: 44px; }
+  html.ck-dock-open body { margin-right: 380px; }
+  html.ck-dock .ck-inbox-btn { display: none; }
+  html.ck-dock .ck-backdrop { display: none; }
+  /* border-box here, not from the host: a host without a global reset would
+     otherwise make the column 381px and the strip 45px. */
+  html.ck-dock .ck-panel {
+    box-sizing: border-box;
+    width: 380px;
+    box-shadow: none;
+    z-index: 997;
+  }
+  html.ck-dock .ck-dock-strip {
+    box-sizing: border-box;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 44px;
+    z-index: 996;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 16px 0 0;
+    border: 0;
+    border-left: 1px solid var(--c-border);
+    background: var(--c-surface-alt);
+    color: var(--c-fg);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  html.ck-dock-open .ck-dock-strip { display: none; }
+  .ck-dock-label { writing-mode: vertical-rl; letter-spacing: 0.04em; }
+  .ck-dock-strip:hover, .ck-dock-strip:focus-visible { background: var(--c-surface); }
+  .ck-dock-strip:focus-visible { outline: 2px solid var(--c-accent); outline-offset: -3px; }
+  .ck-dock-strip[data-empty="true"] .ck-inbox-count { display: none; }
+}
+@media (min-width: 1024px) and (prefers-reduced-motion: no-preference) {
+  html.ck-dock body { transition: margin-right 0.2s ease; }
+}
 
 /* --- Item indicator buttons (on summaries) --- */
 .ck-item-btn {

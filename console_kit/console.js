@@ -21,6 +21,11 @@
   let backdropEl = null;
   let liveRegion = null;
   let inboxBtn = null;
+  let dockStrip = null;
+  // AB-2/Q2 (owner): at 1024px and wider the panel is a column docked on the
+  // right, not an overlay; it starts collapsed to a strip with an unread badge.
+  const DOCK_QUERY = '(min-width: 1024px)';
+  let dockMedia = null;
   let lastFocused = null;
   let currentItem = null;
   let currentMode = null; // 'item' or 'inbox'
@@ -256,9 +261,45 @@
     if (!inboxBtn || !view) return;
     // Fix #1: inbox.length is the true count, not summed totals which double-count children
     const total = (view.inbox ? view.inbox.length : 0);
-    const countEl = inboxBtn.querySelector('.ck-inbox-count');
-    if (countEl) countEl.textContent = total || '';
-    inboxBtn.setAttribute('data-empty', total === 0 ? 'true' : 'false');
+    for (const b of [inboxBtn, dockStrip]) {
+      if (!b) continue;
+      const countEl = b.querySelector('.ck-inbox-count');
+      if (countEl) countEl.textContent = total || '';
+      b.setAttribute('data-empty', total === 0 ? 'true' : 'false');
+      b.setAttribute('aria-label', total ? 'Open inbox, ' + total + ' waiting' : 'Open inbox');
+    }
+  }
+
+  // Docked (desktop) or overlay (narrower): one panel, two presentations.
+  function isDocked() { return !!(dockMedia && dockMedia.matches); }
+
+  // Put the panel's attributes and the page's reserved space in step with the
+  // current width and open state. The page keeps the room through classes on
+  // <html>; console.css turns them into a right margin on <body>.
+  function applyDock() {
+    const docked = isDocked();
+    const open = panelEl.getAttribute('data-open') === 'true';
+    const root = document.documentElement;
+    root.classList.toggle('ck-dock', docked);
+    root.classList.toggle('ck-dock-open', docked && open);
+    // A docked column sits beside the board: not modal, no backdrop, no trap.
+    // An overlay is a modal dialog; a docked column stays on screen beside the
+    // board, so it is a landmark ("Inbox") a screen reader can jump to.
+    panelEl.setAttribute('role', docked ? 'complementary' : 'dialog');
+    panelEl.setAttribute('aria-modal', docked ? 'false' : 'true');
+    // Closed, the panel is only slid off-screen: inert keeps its controls out
+    // of the Tab order and away from assistive tech until it opens again.
+    panelEl.inert = !open;
+    backdropEl.setAttribute('data-open', open && !docked ? 'true' : 'false');
+    if (open && !docked) panelEl.addEventListener('keydown', trapFocus);
+    else panelEl.removeEventListener('keydown', trapFocus);
+    if (dockStrip) dockStrip.setAttribute('aria-expanded', open ? 'true' : 'false');
+    // Narrowing the window turns an open column into a modal overlay: focus
+    // left out on the board would sit behind the backdrop, so bring it in.
+    if (open && !docked && !panelEl.contains(document.activeElement)) {
+      const closeBtn = panelEl.querySelector('.ck-close-btn');
+      if (closeBtn) closeBtn.focus();
+    }
   }
 
   // Update item indicator buttons in the dashboard
@@ -319,6 +360,7 @@
     // Panel
     panelEl = el('div', {
       className: 'ck-panel',
+      id: 'ck-panel',
       role: 'dialog',
       'aria-modal': 'true',
       'aria-label': 'Console panel'
@@ -334,32 +376,62 @@
     });
     document.body.appendChild(liveRegion);
 
+    // Until /view has loaded once the count is unknown: "?" says so, where "0"
+    // would read as "nothing waiting". updateInboxButton replaces it.
+    const UNKNOWN = 'Open inbox (not loaded yet)';
+
     // Inbox button
     inboxBtn = el('button', {
       className: 'ck-inbox-btn',
       type: 'button',
-      'aria-label': 'Open inbox'
+      'aria-label': UNKNOWN
     }, [
       el('span', {}, ['Inbox']),
-      el('span', { className: 'ck-inbox-count' }, ['0'])
+      el('span', { className: 'ck-inbox-count' }, ['?'])
     ]);
     inboxBtn.addEventListener('click', () => openPanel(null, 'inbox'));
     document.body.appendChild(inboxBtn);
 
-    // Escape key handler
+    // Docked strip (1024px and wider): the collapsed form of the inbox column
+    dockStrip = el('button', {
+      className: 'ck-dock-strip',
+      type: 'button',
+      'aria-label': UNKNOWN,
+      'aria-expanded': 'false',
+      'aria-controls': 'ck-panel'
+    }, [
+      el('span', { className: 'ck-dock-label' }, ['Inbox']),
+      el('span', { className: 'ck-inbox-count' }, ['?'])
+    ]);
+    dockStrip.addEventListener('click', () => openPanel(null, 'inbox'));
+    document.body.appendChild(dockStrip);
+
+    dockMedia = window.matchMedia ? window.matchMedia(DOCK_QUERY) : null;
+    if (dockMedia) {
+      const onChange = () => applyDock();
+      if (dockMedia.addEventListener) dockMedia.addEventListener('change', onChange);
+      else if (dockMedia.addListener) dockMedia.addListener(onChange);
+    }
+    applyDock();
+
+    // Escape key handler. An overlay closes from anywhere; a docked column sits
+    // beside the board, so Escape collapses it only when focus is inside it.
     document.addEventListener('keydown', e => {
-      if (e.key === 'Escape' && panelEl.getAttribute('data-open') === 'true') {
-        closePanel();
-      }
+      if (e.key !== 'Escape' || panelEl.getAttribute('data-open') !== 'true') return;
+      if (isDocked() && !panelEl.contains(document.activeElement)) return;
+      closePanel();
     });
   }
 
   // Focus trapping inside panel
   function trapFocus(e) {
     if (panelEl.getAttribute('data-open') !== 'true') return;
-    const focusable = panelEl.querySelectorAll(
+    // Only controls that are rendered: the ← Back button is display:none above
+    // 399px, and counting it as `first` let Shift+Tab out of the modal and left
+    // Tab from the last control focusing nothing.
+    const focusable = Array.from(panelEl.querySelectorAll(
       'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-    );
+    )).filter(e => e.getClientRects().length > 0 && !e.disabled);
     if (focusable.length === 0) return;
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
@@ -377,22 +449,24 @@
     lastFocused = document.activeElement;
     currentItem = itemId;
     currentMode = mode;
-    backdropEl.setAttribute('data-open', 'true');
     panelEl.setAttribute('data-open', 'true');
     panelEl.setAttribute('aria-label', mode === 'inbox' ? 'Inbox' : 'Console: ' + (itemId || ''));
+    applyDock();
     renderPanel();
     // Fix #2: Focus the close button reliably after render
     requestAnimationFrame(() => {
       const closeBtn = panelEl.querySelector('.ck-close-btn');
       if (closeBtn) closeBtn.focus();
     });
-    panelEl.addEventListener('keydown', trapFocus);
     // Fetch fresh view
     fetchView().then(() => {
       renderPanel();
       // Re-focus after re-render if panel still open
       requestAnimationFrame(() => {
-        if (panelEl.getAttribute('data-open') === 'true' && !panelEl.contains(document.activeElement)) {
+        // Docked, the owner may already be back on the board: only recover focus
+        // the re-render dropped (onto <body>), never pull it out of the page.
+        const lost = !isDocked() || document.activeElement === document.body;
+        if (panelEl.getAttribute('data-open') === 'true' && lost && !panelEl.contains(document.activeElement)) {
           const closeBtn = panelEl.querySelector('.ck-close-btn');
           if (closeBtn) closeBtn.focus();
         }
@@ -403,9 +477,9 @@
   // Close panel
   function closePanel() {
     panelEl.setAttribute('data-open', 'false');
-    backdropEl.setAttribute('data-open', 'false');
-    panelEl.removeEventListener('keydown', trapFocus);
-    if (lastFocused && lastFocused.focus) lastFocused.focus();
+    applyDock();
+    // Back to what opened it; when that was the strip, it is the strip again.
+    if (lastFocused && lastFocused.focus && document.contains(lastFocused)) lastFocused.focus();
   }
 
   // Render panel content

@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -558,6 +559,19 @@ class PublishTests(unittest.TestCase):
         if not (HERE / "console_kit" / "console.js").exists():
             self.skipTest("console.js not written yet")
         P.console_block("{}")  # raises PublishError if either file contains a closing tag or a marker
+
+    def test_dock_breakpoint_is_one_number_in_js_and_css(self):
+        # AB-2/Q2: console.js decides docked-or-overlay from DOCK_QUERY and
+        # console.css styles the dock under its own @media. If they drift, a
+        # width between them gets the strip with no room, or neither form.
+        js = (HERE / "console_kit" / "console.js").read_text()
+        css = (HERE / "console_kit" / "console.css").read_text()
+        m = re.search(r"DOCK_QUERY = '\(min-width: (\d+)px\)'", js)
+        self.assertIsNotNone(m, "console.js no longer declares DOCK_QUERY")
+        widths = set(re.findall(r"@media \(min-width: (\d+)px\)", css))
+        self.assertEqual(widths, {m.group(1)})
+        self.assertIn("html.ck-dock body { margin-right: 44px; }", css)
+        self.assertIn("html.ck-dock-open body { margin-right: 380px; }", css)
 
 
 def fork(item="LANE.1", mode="tighten", focus="code", **kw):
