@@ -60,7 +60,9 @@ these defaults, and let the user change every one:
   "Access application", first. Onboarding can be re-run later with the real
   tag.
 - Optional: an **audit seat**, the project's own review, which joins the
-  deliberation committee (see `KIT/README.md`). Skip it unless the user has one.
+  deliberation committee as a fourth seat (the console-fork skill says how).
+  Pass it as `--audit-seat NAME --audit-brief "what it checks"`. Skip it
+  unless the user has one.
 
 ## 3. Write the config
 
