@@ -31,6 +31,15 @@ Claude installs plugins from a **marketplace**, and the unzipped folder is one.
    `/plugin configure console-kit@console-kit-local`.
 4. Restart the session so the SessionStart hook loads.
 
+**Or straight from GitHub**, with no zip, if your git can reach the repository:
+
+    /plugin marketplace add MikeHeid/console-kit
+    /plugin install console-kit@console-kit
+
+Both routes install the same plugin folder, and the kit is inside it at
+`kit/`. Use this plugin in a **local** session: remote/cloud sessions do not
+load plugins ("Plugins aren't available in this environment").
+
 ## 2. Onboard a project
 
 Open a session in the project's folder and run:
@@ -43,7 +52,7 @@ It asks for:
 |---|---|---|
 | Project name | `acme` | you; it names the services and the state folder |
 | Team domain | `acme.cloudflareaccess.com` | Zero Trust settings (step 1's default, if set) |
-| AUD tag | 64 hex characters | the Access application's Overview (`docs/CLOUDFLARE.md`) |
+| AUD tag | 64 hex characters | the Access application's Overview (`kit/docs/CLOUDFLARE.md`) |
 | Hostname | `acme-console.example.com` | a name in a zone on your Cloudflare account |
 | Port | `4793` | any free port on 127.0.0.1 |
 
@@ -75,8 +84,8 @@ The same steps without Claude:
    without an Access token. Then the hostname shows the Access login, then the
    page.
 
-`docs/CLOUDFLARE.md` walks through the Cloudflare screens and lists the usual
-failures. `docs/ADAPTER.md` explains how to connect the console to your
+`kit/docs/CLOUDFLARE.md` walks through the Cloudflare screens and lists the usual
+failures. `kit/docs/ADAPTER.md` explains how to connect the console to your
 project's own task list.
 
 ## Updating

@@ -4,13 +4,14 @@
     "name": "MikeHeid"
   },
   "metadata": {
-    "description": "The owner console's agent half, as a Claude Code plugin."
+    "description": "The owner console as a Claude Code plugin: skills, committee agents, the SessionStart hook and the server kit."
   },
   "plugins": [
     {
       "name": "console-kit",
       "source": "./plugin",
-      "description": "The agent half of the owner console (spec owner-console.md §7.4)."
+      "description": "Answer your agents' questions from a web page behind Cloudflare Access; onboarding, server kit and skills included.",
+      "version": "0.2.0"
     }
   ]
 }

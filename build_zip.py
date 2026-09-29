@@ -31,9 +31,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 MARKET = "console-kit-local"
 # What the installed kit needs at run time. Tests, dist/ and git metadata stay out.
-KIT_PARTS = ["console_kit", "deploy", "demo", "docs", "agent.py", "fold.py", "onboard.py", "publish.py",
-             "server.py", "adapter_template.py", "requirements.txt", "README.md", "INSTALL.md", "VERSION"]
-PLUGIN_PARTS = [".claude-plugin", "hooks", "skills", "agents"]
+# The plugin folder is the whole product: the kit lives in plugin/kit, so an install
+# from this zip and one straight from the repository carry the same files.
+PLUGIN_PARTS = [".claude-plugin", "hooks", "skills", "agents", "kit"]
 SKIP = re.compile(r"(^|/)(__pycache__|\.pytest_cache|\.DS_Store)(/|$)|\.pyc$")
 SECRET = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----|\"TunnelSecret\"|\"AccountTag\"|"
                     r"\bghp_[A-Za-z0-9]{30,}|\bsk-ant-[A-Za-z0-9_-]{20,}|\bAKIA[0-9A-Z]{16}\b")
@@ -72,10 +72,6 @@ def stage(tmp: Path) -> Path:
     plugin = top / "plugins/console-kit"
     for f in files(ROOT / "plugin", [p for p in PLUGIN_PARTS if (ROOT / "plugin" / p).exists()]):
         dst = plugin / f.relative_to(ROOT / "plugin")
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(f, dst)
-    for f in files(ROOT, KIT_PARTS):
-        dst = plugin / "kit" / f.relative_to(ROOT)
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(f, dst)
     manifest = json.loads((plugin / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))
