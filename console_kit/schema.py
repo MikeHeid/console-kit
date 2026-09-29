@@ -104,7 +104,7 @@ def validate(rec: object) -> list[str]:
         errs.append(f"{kind}: unknown field(s) {', '.join(unknown)}")
     if missing:
         return errs
-    if rec["by"] not in WRITERS[kind]:
+    if not isinstance(rec["by"], str) or rec["by"] not in WRITERS[kind]:  # a JSON list is unhashable
         errs.append(f"{kind}: written by {rec['by']!r}, but only {sorted(WRITERS[kind])} may write one")
     if not isinstance(rec["nonce"], str) or not NONCE.match(rec["nonce"]):
         errs.append(f"{kind}: nonce must be 8-64 of [A-Za-z0-9_-]")

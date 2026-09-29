@@ -221,6 +221,53 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(code, 400, refused)
         self.assertIn("owner", refused["error"])
 
+    def agent_cli(self, *args):
+        import contextlib
+        import io
+        import agent as AG
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = AG.main(["--state", str(self.cfg.state), *args])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_the_agent_cli_end_to_end(self):
+        # §7.5 F3 and the PR #170 review LOW (`answers` had no test of its own). The whole
+        # loop: the owner presses the ready button, `watch` wakes, the agent reads the sheet
+        # and the round's bundle, and `synced --through` stops the same signal waking it again.
+        fork_body = {"item": "LANE.1", "text": "deliberate", "intent": "fork", "mode": "explore",
+                     "nonce": "ownerfork777"}
+        code, f = self.req("POST", "/api/message", fork_body, tok=token())
+        self.assertEqual(code, 200, f)
+        rc, out, _ = self.agent_cli("watch", "--timeout", "0")
+        self.assertEqual(rc, 0)
+        [line] = [json.loads(x) for x in out.splitlines()]
+        self.assertEqual(line["intent"], "fork")
+
+        rc, out, _ = self.agent_cli("fork-context", f["record"]["id"])
+        self.assertEqual(rc, 0)
+        self.assertIn("LANE.1/Q1", out)
+        rc, _, err = self.agent_cli("fork-context", "0" * 24)
+        self.assertEqual(rc, 1)
+        self.assertIn("no fork", err)
+
+        self.assertEqual(self.req("POST", "/api/answer", self.answer(), tok=token())[0], 200)
+        rc, out, _ = self.agent_cli("answers", "--item", "LANE")
+        self.assertEqual(rc, 0)
+        self.assertIn("## LANE.1/Q1: answered, not locked", out)
+        self.assertIn("1 answer in all", out)
+        self.assertEqual(self.agent_cli("answers", "--item", "NOPE")[0], 1)
+
+        rc, _, _ = self.agent_cli("synced", "--through", str(line["seq"]))
+        self.assertEqual(rc, 0)
+        rc, _, err = self.agent_cli("watch", "--timeout", "0")
+        self.assertEqual(rc, 3)  # the answer rang the doorbell but does not wake; the fork is processed
+        code, _ = self.req("POST", "/api/message", {"item": "LANE.1", "text": "Answers are in.",
+                                                    "intent": "process", "nonce": "ownerready77"}, tok=token())
+        rc, out, _ = self.agent_cli("watch", "--timeout", "0")
+        self.assertEqual((rc, json.loads(out)["intent"]), (0, "process"))
+        rc, out, _ = self.agent_cli("inbox")  # after the cursor: the answer and the process signal
+        self.assertEqual([json.loads(x)["type"] for x in out.splitlines()], ["answer", "message"])
+
     def test_the_page_cannot_choose_its_author(self):
         for field in ("by", "type", "schemaVersion"):
             code, body = self.req("POST", "/api/answer", self.answer(**{field: "agent"}), tok=token())

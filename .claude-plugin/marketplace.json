@@ -1,0 +1,16 @@
+{
+  "name": "console-kit",
+  "owner": {
+    "name": "MikeHeid"
+  },
+  "metadata": {
+    "description": "The owner console's agent half, as a Claude Code plugin."
+  },
+  "plugins": [
+    {
+      "name": "console-kit",
+      "source": "./plugin",
+      "description": "The agent half of the owner console (spec owner-console.md §7.4)."
+    }
+  ]
+}

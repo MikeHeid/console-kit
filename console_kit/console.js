@@ -27,6 +27,7 @@
   let pendingNonces = {};
   let draftTexts = {};
   let currentFork = null; // the answers sheet's fork filter (spec §7.6)
+  const openForms = new Set(); // disclosure keys the owner left open
 
   // Mirrors schema.py: the fork fields and the D13 roster. The server refuses
   // anything else by name, so these only shape the form.
@@ -123,7 +124,7 @@
     if (sheet.fork) scope += ', fork `' + sheet.fork + '`';
     const out = ['# Answers: ' + scope, '',
       sheet.rows.length + ' questions: ' + c.awaiting_you + ' unanswered, ' + c.unlocked + ' answered, ' +
-      c.locked + ' locked, ' + c.stale + ' stale. ' + sheet.answers + ' answers in all.', ''];
+      c.locked + ' locked, ' + c.stale + ' stale. ' + sheet.answers + ' answer' + (sheet.answers === 1 ? '' : 's') + ' in all.', ''];
     for (const q of sheet.rows) {
       const r = q.question;
       const labels = optionLabels(r);
@@ -1174,18 +1175,31 @@
   }
 
   // The item's tools: its answers sheet, a full-round deliberation, and the ready signal.
+  // A button that shows and hides a form. Which ones are open is remembered by key,
+  // so a re-render (Refresh, a send) redraws them open (PR #170 review, LOW).
+  function disclosure(label, key, build) {
+    const btn = el('button', { className: 'ck-btn', type: 'button', 'aria-expanded': 'false' }, [label]);
+    const slot = el('div');
+    const show = open => {
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      slot.textContent = '';
+      if (open) slot.appendChild(build());
+    };
+    btn.addEventListener('click', () => {
+      const open = !openForms.has(key);
+      if (open) openForms.add(key); else openForms.delete(key);
+      show(open);
+    });
+    if (openForms.has(key)) show(true);
+    return [btn, slot];
+  }
+
   function renderItemTools(itemId) {
     const wrap = el('div', { className: 'ck-tools' });
     const answersBtn = el('button', { className: 'ck-btn', type: 'button' }, ['Answers']);
     answersBtn.addEventListener('click', () => showSheet(itemId, null));
-    const forkBtn = el('button', { className: 'ck-btn', type: 'button', 'aria-expanded': 'false' }, ['⑂ Deliberate (full round)']);
-    const slot = el('div');
-    forkBtn.addEventListener('click', () => {
-      const open = forkBtn.getAttribute('aria-expanded') === 'true';
-      forkBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
-      slot.textContent = '';
-      if (!open) slot.appendChild(renderForkForm(itemId, null));
-    });
+    const [forkBtn, slot] = disclosure('⑂ Deliberate (full round)', 'fork-' + itemId,
+      () => renderForkForm(itemId, null));
     wrap.appendChild(el('div', { className: 'ck-actions' }, [answersBtn, forkBtn]));
     wrap.appendChild(slot);
     const sheet = answersSheet(itemId, null);
@@ -1289,7 +1303,12 @@
       const result = await apiPost('/message', body, key);
       send.disabled = false;
       if (result.error) announce('Error: ' + result.error);
-      else { delete draftTexts[key]; announce('Deliberation requested.'); renderPanel(); }
+      else {
+        delete draftTexts[key];
+        openForms.delete(followUp ? 'fu-' + followUp : 'fork-' + itemId);  // sent, so the form closes
+        announce('Deliberation requested.');
+        renderPanel();
+      }
     });
     form.appendChild(el('div', { className: 'ck-actions' }, [send]));
     return form;
@@ -1324,14 +1343,8 @@
         answersBtn.addEventListener('click', () => showSheet(itemId, m.id));
         const actions = el('div', { className: 'ck-actions' }, [answersBtn]);
         if (qs.every(q => q.state !== 'awaiting_you')) {
-          const fuBtn = el('button', { className: 'ck-btn', type: 'button', 'aria-expanded': 'false' }, ['Follow up with other seats…']);
-          const slot = el('div');
-          fuBtn.addEventListener('click', () => {
-            const open = fuBtn.getAttribute('aria-expanded') === 'true';
-            fuBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
-            slot.textContent = '';
-            if (!open) slot.appendChild(renderForkForm(itemId, m.id));
-          });
+          const [fuBtn, slot] = disclosure('Follow up with other seats…', 'fu-' + m.id,
+            () => renderForkForm(itemId, m.id));
           actions.appendChild(fuBtn);
           card.appendChild(actions);
           card.appendChild(slot);

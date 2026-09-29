@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -388,19 +389,43 @@ def load_adapter(path: Path) -> ProjectAdapter:
     return mod  # type: ignore[return-value]
 
 
+def inside(root: Path, raw: str, what: str) -> Path:
+    """A project-relative path that stays inside `root`, or FoldError naming why not (spec §7.7).
+
+    These paths reach the command line from the repository's `.console-kit.json`,
+    and `--adapter` is imported and run, so the boundary is enforced here, in the
+    code that acts on it, and not only in the skill that builds the command.
+    """
+    if not raw or raw.startswith(("/", "~")) or "\\" in raw or ".." in Path(raw).parts:
+        raise FoldError(f"{what} {raw!r} must be a relative path inside the project (no leading / or ~, no ..)")
+    base = os.path.realpath(root)
+    full = os.path.realpath(os.path.join(base, raw))
+    if os.path.commonpath([base, full]) != base:
+        raise FoldError(f"{what} {raw!r} resolves outside the project, to {full}")
+    return Path(full)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--root", type=Path, default=Path("."),
+                    help="the project root every other path must stay inside (default: the current directory)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     ex = sub.add_parser("export", help="write committed locked files from the store")
     ex.add_argument("--store", type=Path, required=True)
-    ex.add_argument("--out", type=Path, required=True)
+    ex.add_argument("--out", required=True)
     fo = sub.add_parser("fold", help="fold committed locked files into the project's record")
-    fo.add_argument("--locked", type=Path, required=True)
-    fo.add_argument("--ledger", type=Path, required=True)
-    fo.add_argument("--adapter", type=Path, required=True)
+    fo.add_argument("--locked", required=True)
+    fo.add_argument("--ledger", required=True)
+    fo.add_argument("--adapter", required=True)
     fo.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
     try:
+        if a.cmd == "export":
+            a.out = inside(a.root, a.out, "--out")
+        else:  # checked before anything is imported: the adapter is code
+            a.locked, a.ledger, a.adapter = (inside(a.root, a.locked, "--locked"),
+                                             inside(a.root, a.ledger, "--ledger"),
+                                             inside(a.root, a.adapter, "--adapter"))
         if a.cmd == "export":
             for name in write_export(export(Store(a.store)), a.out):
                 print(f"wrote {a.out / name}")

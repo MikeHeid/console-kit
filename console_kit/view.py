@@ -205,7 +205,8 @@ def sheet_markdown(sheet: dict) -> str:
         scope += f", fork `{sheet['fork']}`"
     out = [f"# Answers: {scope}", "",
            f"{len(sheet['rows'])} questions: {c['awaiting_you']} unanswered, {c['unlocked']} answered, "
-           f"{c['locked']} locked, {c['stale']} stale. {sheet['answers']} answers in all.", ""]
+           f"{c['locked']} locked, {c['stale']} stale. {sheet['answers']} "
+           f"answer{'' if sheet['answers'] == 1 else 's'} in all.", ""]
     for r in sheet["rows"]:
         labels = {o["id"]: o["label"] for o in r["options"]}
         out.append(f"## {r['qid']}: {STATE_WORDS[r['state']]}" + (" (item no longer in the register)"

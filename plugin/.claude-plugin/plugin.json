@@ -1,0 +1,7 @@
+{
+  "name": "console-kit",
+  "version": "0.1.0",
+  "description": "The agent half of the owner console: a SessionStart note of what the owner sent, and skills to process answers, run deliberation rounds and fold locked answers into the project's record.",
+  "author": {"name": "MikeHeid"},
+  "keywords": ["owner-console", "deliberation", "decisions"]
+}
