@@ -1152,7 +1152,24 @@ class SessionStartHookTests(Tmp):
         self.assertIn("1 request from", note)
         self.assertNotIn("- seq 2 ", note)
         D.write_cursor(Path(cfg["state"]), 4)
-        self.assertIsNone(self.run_hook())
+        note = self.run_hook()
+        self.assertNotIn("request", note)  # nothing waiting: only the standing ask line
+        self.assertIn("console-ask", note)
+
+    def test_a_registered_project_is_told_to_post_owner_questions(self):
+        # Owner, 2026-09-29: questions written only in a document never reached the inbox.
+        # Catches: the standing line missing when nothing is waiting, missing beside a
+        # request, or naming a kit the user did not register.
+        cfg = self.ring()
+        want = f"`python3 {KIT / 'agent.py'} --state {cfg['state']} ask FILE...`"
+        note = self.run_hook(cfg)
+        self.assertIn("console-ask", note)
+        self.assertIn(want, note)
+        (Path(cfg["state"]) / "inbox.jsonl").write_text(json.dumps(
+            {"seq": 1, "type": "message", "ts": "t", "item": "AB", "intent": "process"}) + "\n")
+        note = self.run_hook()
+        self.assertIn("1 request from", note)
+        self.assertIn(want, note)
 
     def test_a_broken_registry_is_named_not_fatal(self):
         for body in ("{not json", '["a list"]', '{"projects": []}'):

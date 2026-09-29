@@ -281,6 +281,35 @@ class ServerTests(unittest.TestCase):
             rc = AG.main(["--state", str(self.cfg.state), *args])
         return rc, out.getvalue(), err.getvalue()
 
+    def test_ask_posts_a_batch_and_stops_at_the_first_refusal(self):
+        # Owner, 2026-09-29: questions go to the console, several at once (console-ask skill).
+        # Catches: a batch that posts only the first file; one that carries on past a refusal,
+        # so a later question lands while an earlier one is silently missing; and one that
+        # does not name what was left unsent.
+        from test_kit import question
+        files = []
+        for q in ("LANE.1/Q7", "LANE.1/Q8", "LANE.1/Q7", "LANE.1/Q9"):  # the third is a re-ask
+            body = {k: v for k, v in question(q).items() if k not in ("type", "by", "nonce", "schemaVersion")}
+            f = self.cfg.state / f"q{len(files)}.json"
+            f.write_text(json.dumps(body))
+            files.append(f)
+        rc, out, err = self.agent_cli("ask", *map(str, files[:2]))
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("posted 2 questions", err)
+        rc, _, err = self.agent_cli("ask", *map(str, files[2:]))
+        self.assertEqual(rc, 1)
+        self.assertIn(f"posted 0 of 2; not sent: {files[2]} {files[3]}", err)
+        _, body = self.req("GET", "/api/view", tok=token())
+        asked = [q for q in body["view"]["questions"] if q.startswith("LANE.1/Q")]
+        self.assertIn("LANE.1/Q8", asked)
+        self.assertNotIn("LANE.1/Q9", asked)  # never sent past the refusal
+        bad = self.cfg.state / "bad.json"
+        bad.write_text("[1, 2]")
+        rc, _, err = self.agent_cli("ask", str(files[3]), str(bad))
+        self.assertEqual(rc, 1)
+        self.assertIn("not a JSON object", err)
+        self.assertIn("posted 1 of 2", err)
+
     def test_the_agent_cli_end_to_end(self):
         # §7.5 F3 and the PR #170 review LOW (`answers` had no test of its own). The whole
         # loop: the owner presses the ready button, `watch` wakes, the agent reads the sheet

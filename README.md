@@ -46,12 +46,16 @@ to run next. `INSTALL.md` (also in the zip) has the whole guide.
                                               state dir: store + doorbell
                                                      ▲
  Claude session ── SessionStart hook reads the doorbell (registered projects only)
-                └─ skills: console-process / console-fork / console-fold ── agent.py
+                └─ skills: console-process / console-fork / console-fold / console-ask ── agent.py
 ```
+
+In a registered project the hook also tells every session to post the
+questions you must decide to the console (the **console-ask** skill), so a
+question an agent writes in a document still reaches your inbox.
 
 - **`server.py`** serves one page (yours) with the console injected. It
   refuses every request without a valid Access token, loopback included.
-- **`agent.py`** is the agent's side: `view`, `ask`, `reply`, `inbox`,
+- **`agent.py`** is the agent's side: `view`, `ask` (one question or a batch), `reply`, `inbox`,
   `working` (shows you "agent active" on the items it has picked up),
   `synced`, `fork-context`, and `register`, which **only you** run.
 - **`fold.py`** writes locked answers into your project through the adapter.

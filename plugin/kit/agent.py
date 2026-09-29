@@ -10,7 +10,9 @@
                                                 every question in a scope with every answer it got (§7.6)
     agent.py --state DIR fork-context FORK_ID   the round's bundle for its committee (§6.3, D14)
     agent.py --state DIR reply ITEM TEXT [--reply-to RECORD_ID]
-    agent.py --state DIR ask QUESTION.json      append a question (the record without type or by)
+    agent.py --state DIR ask QUESTION.json [...]
+                                                append questions (each the record without type or by), in
+                                                order; stops at the first refusal and names what was not sent
     agent.py --state DIR working ITEM [ITEM ...]
                                                 show the owner "agent active" on these items; the next
                                                 `synced` clears it, and it lapses after an hour
@@ -100,6 +102,15 @@ def _call(state: Path, method: str, path: str, body=None) -> int:
     return 0 if code == 200 else 1
 
 
+def _refused_note(files: list, n: int, why: str | None, rc: int = 1) -> int:
+    """A batch ask stopped at files[n]: say what was posted and what was not, so a re-run sends only the rest."""
+    if why:
+        print(why, file=sys.stderr)
+    if len(files) > 1:
+        print(f"posted {n} of {len(files)}; not sent: {' '.join(str(f) for f in files[n:])}", file=sys.stderr)
+    return rc
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--state", type=Path, required=True)
@@ -124,7 +135,7 @@ def main(argv=None) -> int:
     s.add_argument("text")
     s.add_argument("--reply-to")
     s = sub.add_parser("ask")
-    s.add_argument("file", type=Path)
+    s.add_argument("files", type=Path, nargs="+", metavar="file")
     s = sub.add_parser("working")
     s.add_argument("items", nargs="+", help="the item ids this session is now working on")
     s = sub.add_parser("synced")
@@ -174,9 +185,20 @@ def _run(a, bell: Path) -> int:
     if a.cmd == "working":
         return _call(a.state, "POST", "/working", {"items": a.items})
     if a.cmd == "ask":
-        body = json.loads(a.file.read_text(encoding="utf-8"))
-        body.setdefault("nonce", secrets.token_urlsafe(12))
-        return _call(a.state, "POST", "/question", body)
+        for n, f in enumerate(a.files):
+            try:
+                body = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as e:
+                return _refused_note(a.files, n, f"{f} is not a readable JSON question: {e}")
+            if not isinstance(body, dict):
+                return _refused_note(a.files, n, f"{f} is not a JSON object")
+            body.setdefault("nonce", secrets.token_urlsafe(12))
+            rc = _call(a.state, "POST", "/question", body)
+            if rc:
+                return _refused_note(a.files, n, None, rc)
+        if len(a.files) > 1:
+            print(f"posted {len(a.files)} questions", file=sys.stderr)
+        return 0
     if a.through is not None:
         if a.through < 0:
             print("--through takes a doorbell seq, 0 or more", file=sys.stderr)

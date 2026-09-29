@@ -135,9 +135,14 @@ def context(project: Path) -> str | None:
         wake = _waiting(state / "inbox.jsonl", cursor)
     except (Unsafe, OSError) as err:
         return f"Owner console: not checked, because {err}. See `agent.py register` (spec §7.7)."
-    if not wake:
-        return None
     agent = f"python3 {kit / 'agent.py'} --state {state}"
+    # Standing, in every session of a registered project: a question the owner
+    # must decide is posted to the console, not left in a document (owner, 2026-09-29).
+    ask = ("Owner console: this project is registered. Post every question the owner must decide "
+           f"to the console with the console-ask skill (`{agent} ask FILE...`); a question written "
+           "only in a document never reaches the owner's inbox.")
+    if not wake:
+        return ask
     lines = [f"Owner console: {len(wake)} request{'' if len(wake) == 1 else 's'} from the owner "
              f"waiting after doorbell seq {cursor}:"]
     for r in wake[:MAX_LISTED]:
@@ -148,7 +153,7 @@ def context(project: Path) -> str | None:
     lines += ["",
               "Use the console-process skill for `process` and the console-fork skill for `fork`. "
               f"`{agent} inbox` lists them; after handling one, `{agent} synced --through SEQ` "
-              "records it so it is not offered again."]
+              "records it so it is not offered again.", "", ask]
     return "\n".join(lines)
 
 
