@@ -30,7 +30,6 @@ from console_kit import schema as S  # noqa: E402
 from console_kit import view as V  # noqa: E402
 from console_kit.store import Store, StoreError  # noqa: E402
 
-REPO = HERE.parent.parent
 ITEMS = {
     "LANE": {"title": "a lane", "parent": None, "status": "open"},
     "LANE.1": {"title": "a phase", "parent": "LANE", "status": "open"},
@@ -531,9 +530,9 @@ class FoldTests(Tmp):
 class PublishTests(unittest.TestCase):
     BLOCK = f"{P.BEGIN}\n<script>/* console */</script>\n{P.END}\n"
 
-    def test_inject_then_strip_is_the_identity_on_the_committed_page(self):
+    def test_inject_then_strip_is_the_identity_on_the_starter_page(self):
         # Catches: an injection that edits the gated page outside its markers (R8).
-        page = (REPO / "docs/dashboard/index.html").read_text(encoding="utf-8")
+        page = (HERE / "demo/index.html").read_text(encoding="utf-8")  # the page onboarding installs
         served = P.inject(page, self.BLOCK)
         self.assertNotEqual(served, page)
         self.assertEqual(P.strip(served), page)

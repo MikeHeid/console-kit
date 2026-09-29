@@ -1,7 +1,23 @@
 {
   "name": "console-kit",
-  "version": "0.1.0",
-  "description": "The agent half of the owner console: a SessionStart note of what the owner sent, and skills to process answers, run deliberation rounds and fold locked answers into the project's record.",
+  "version": "0.2.0",
+  "description": "The owner console: answer your agents' questions from a web page behind Cloudflare Access. This plugin carries the agent half (a SessionStart note of what the owner sent; skills to onboard a project, process answers, run deliberation rounds and fold locked answers) and the server kit that /console-kit:console-onboard installs.",
   "author": {"name": "MikeHeid"},
-  "keywords": ["owner-console", "deliberation", "decisions"]
+  "keywords": ["owner-console", "deliberation", "decisions", "cloudflare-access"],
+  "userConfig": {
+    "team_domain": {
+      "type": "string",
+      "title": "Cloudflare Zero Trust team domain",
+      "description": "Your team's Access domain, e.g. yourteam.cloudflareaccess.com (Zero Trust > Settings > Custom Pages shows it). Machine-wide default: each project's onboarding offers it and you can change it there.",
+      "required": false,
+      "sensitive": false
+    },
+    "zone": {
+      "type": "string",
+      "title": "Default domain for console hostnames",
+      "description": "A domain (zone) on your Cloudflare account, e.g. example.com. Onboarding suggests <project>-console.<this domain> as each project's hostname; you can change it per project.",
+      "required": false,
+      "sensitive": false
+    }
+  }
 }

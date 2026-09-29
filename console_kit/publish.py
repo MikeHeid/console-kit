@@ -1,7 +1,7 @@
 """Inject the console into a rendered page, and prove that the injection strips out cleanly (spec R8).
 
-The committed page (for Gradiance, `docs/dashboard/index.html`) stays a pure
-render, gated byte for byte. The console exists only in the page the server
+The host page (a project's committed dashboard, say) stays a pure render,
+which the project may gate byte for byte. The console exists only in the page the server
 serves: `inject` inserts one marked block before `</body>`, and `strip`
 removes exactly that block. `check` proves that `strip(inject(page)) == page`,
 so nothing the console needs can leak into the gated file.

@@ -1,0 +1,24 @@
+# cloudflared config for the @NAME@ owner console. Rendered by `onboard.py tunnel`.
+#
+# SEPARATE FILE ON PURPOSE: the default ~/.cloudflared/config.yml may belong to
+# another service. Route DNS with THIS file, or the record can go to that one:
+#   cloudflared tunnel --config ~/.cloudflared/config-<tunnel>.yml \
+#     route dns --overwrite-dns @TUNNEL_ID@ @HOSTNAME@
+# and read back the tunnel id it prints.
+#
+# ORIGIN IS LOOPBACK. The server refuses any request without a valid Access
+# token, loopback included, so this tunnel is not the only guard: Access at the
+# edge and the token check at the origin must BOTH pass.
+
+tunnel: @TUNNEL_ID@
+credentials-file: @CREDENTIALS@
+
+ingress:
+  - hostname: @HOSTNAME@
+    service: http://127.0.0.1:@PORT@
+    originRequest:
+      connectTimeout: 5s
+      noHappyEyeballs: true
+
+  # cloudflared requires a catch-all, and it must be last.
+  - service: http_status:404

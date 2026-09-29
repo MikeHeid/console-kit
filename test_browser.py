@@ -63,16 +63,24 @@ PAGE = P.inject(HOST, P.console_block('{"api": "/api"}'))
 
 # The lane board (AB-2/Q4): the REAL page, rendered from the real register, so
 # console.js is held to dashboard.apply_live -- the patcher the shape is built on.
-sys.path.insert(0, str(HERE.parent.parent / "scripts/register"))
-import dashboard as D  # noqa: E402
+# It lives in the project that hosts the kit (CONSOLE_KIT_BOARD_DIR, default the
+# layout the kit was born in); without it LiveBoardTests skip, by name.
+BOARD_DIR = Path(os.environ.get("CONSOLE_KIT_BOARD_DIR", HERE.parent.parent / "scripts/register"))
+if (BOARD_DIR / "dashboard.py").is_file():
+    sys.path.insert(0, str(BOARD_DIR))
+    import dashboard as D  # noqa: E402
 
-REGISTER = D.load()
-# open -> proposed moves no "claimed by" line and no "waits on" link: the shape holds.
-FLIPPED = {i: ({**d, "status": "proposed"} if d["status"] == "open" and n % 7 == 0 else d)
-           for n, (i, d) in enumerate(sorted(REGISTER.items()))}
-BOARD_A, BOARD_B = D.board_live(REGISTER), D.board_live(FLIPPED)
-LIVE_PAGES = {"/board-a": P.inject(D.render_html(REGISTER)[0], P.console_block('{"api": "/api"}')),
-              "/board-b": P.inject(D.render_html(FLIPPED)[0], P.console_block('{"api": "/api"}'))}
+    REGISTER = D.load()
+    # open -> proposed moves no "claimed by" line and no "waits on" link: the shape holds.
+    FLIPPED = {i: ({**d, "status": "proposed"} if d["status"] == "open" and n % 7 == 0 else d)
+               for n, (i, d) in enumerate(sorted(REGISTER.items()))}
+    BOARD_A, BOARD_B = D.board_live(REGISTER), D.board_live(FLIPPED)
+    LIVE_PAGES = {"/board-a": P.inject(D.render_html(REGISTER)[0], P.console_block('{"api": "/api"}')),
+                  "/board-b": P.inject(D.render_html(FLIPPED)[0], P.console_block('{"api": "/api"}'))}
+else:
+    D = None
+    BOARD_A = BOARD_B = None
+    LIVE_PAGES = {}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -412,7 +420,12 @@ class LiveBoardTests(unittest.TestCase):
     """AB-2/Q4 in a real browser: the committed page, caught up from /api/board."""
 
     # The same server and Playwright as DockTests, without inheriting its tests.
-    setUpClass = DockTests.__dict__["setUpClass"]
+    @classmethod
+    def setUpClass(cls):
+        if D is None:
+            raise unittest.SkipTest(f"no lane board at {BOARD_DIR} (set CONSOLE_KIT_BOARD_DIR)")
+        DockTests.__dict__["setUpClass"].__func__(cls)
+
     tearDownClass = DockTests.__dict__["tearDownClass"]
 
     def setUp(self):

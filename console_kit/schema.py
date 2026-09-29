@@ -1,6 +1,6 @@
 """Record shapes for the owner console (spec `architect/40-specs/owner-console.md` §4.1).
 
-This module is project-neutral: nothing here knows about Gradiance.
+This module is project-neutral: nothing here knows about any one project.
 
 Every record is one JSON object on one line of the store, and every record
 carries `schemaVersion`. A record from another schema version is refused BY

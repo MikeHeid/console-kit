@@ -491,10 +491,9 @@
 
 /* --- Inbox button (fixed) --- */
 /* Below 1024px only (see the dock block): fixed over the host page's top-right
-   corner. Gradiance's lane board keeps its header clear of it with
-   `.header-controls { margin-inline-end: 120px }` under the same width
-   (scripts/register/dashboard.py), sized for this button at ~90px plus
-   right: 12px. Widen the button and widen that too. */
+   corner. A host page with its own controls there should keep them clear of
+   it under the same width: the button is about 90px wide plus right: 12px,
+   so a 120px end margin is enough. Widen the button and widen that too. */
 .ck-inbox-btn {
   position: fixed;
   top: env(safe-area-inset-top, 12px);
