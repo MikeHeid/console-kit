@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import shutil
 import tempfile
@@ -145,6 +146,11 @@ class InstalledPluginTests(Base):
         for rel in ("onboard.py", "agent.py", "server.py", "deploy/install.sh", "docs/CLOUDFLARE.md",
                     "adapter_template.py", "demo/index.html", "console_kit/console.js", "requirements.txt"):
             self.assertTrue((kit / rel).is_file(), f"installed plugin lacks kit/{rel}")
+        # Every KIT/<path> a skill tells a session to read must be in the installed kit.
+        for skill in (skill_dir / "..").resolve().glob("*/SKILL.md"):
+            # Anywhere: inline code, indented or fenced blocks, quoted arguments.
+            for rel in re.findall(r"KIT/([A-Za-z0-9_./-]*[A-Za-z0-9_])", skill.read_text(encoding="utf-8")):
+                self.assertTrue((kit / rel).exists(), f"{skill.parent.name} cites KIT/{rel}, not in the installed kit")
 
     def test_an_install_from_the_repository_carries_the_kit(self):
         self.assert_complete(self.install(B.ROOT, "console-kit@console-kit"))
