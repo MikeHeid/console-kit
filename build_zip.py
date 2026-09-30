@@ -40,7 +40,7 @@ SECRET = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----|\"TunnelSecret\"|\"Acco
 SECRET_NAMES = re.compile(r"(^|/)(cert\.pem|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json"
                           r"|\.env|console\.env)$")
 FIXED = (1980, 1, 1, 0, 0, 0)
-EXECUTABLE = {"onboard.py", "agent.py", "fold.py", "publish.py", "server.py"}
+EXECUTABLE = {"onboard.py", "agent.py", "fold.py", "publish.py", "server.py", "verify_vendor.py"}
 
 
 class BuildError(Exception):

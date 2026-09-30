@@ -95,6 +95,7 @@ class _Handler(BaseHTTPRequestHandler):
     view_fails = False  # /view answers 503 (a server that is down)
     view_agent = False  # /view carries one thread waiting on the agent
     view_working = False  # ...and the cursor says an agent is working on it
+    view_listening = None  # the cursor's `listening`; None leaves it out, as a pre-0.6.0 server
     board: object = None   # what /api/board answers; None is 404, as a project with no board()
     board_status = 200
     board_hits = 0
@@ -111,6 +112,8 @@ class _Handler(BaseHTTPRequestHandler):
             payload = dict(VIEW_AGENT2 if _Handler.view_agent == 2 else VIEW_AGENT if _Handler.view_agent else VIEW)
             if _Handler.view_working:  # an agent has marked this item id as in hand
                 payload["cursor"] = {"working": {_Handler.view_working: "2026-09-29T10:00:00Z"}}
+            if _Handler.view_listening is not None:  # the watch heartbeat, as the server judged it
+                payload["cursor"] = {**payload.get("cursor", {}), "listening": _Handler.view_listening}
             body, ctype = json.dumps(payload), "application/json"
         elif self.path.startswith("/api/board"):
             _Handler.board_hits += 1
@@ -183,6 +186,7 @@ class DockTests(unittest.TestCase):
 
     def setUp(self):
         _Handler.view_delay, _Handler.view_fails, _Handler.view_agent, _Handler.view_working = 0.0, False, False, False
+        _Handler.view_listening = None
 
     def _page(self, kind: str, width: int, loaded: bool = True):
         browser = getattr(self.pw, kind).launch()
@@ -497,6 +501,42 @@ class DockTests(unittest.TestCase):
                     self.assertEqual((got["owner"], got["agent"], got["agentShown"]), ("2", "", False))
                     self.assertEqual(got["label"], "Open inbox, 2 waiting for you")
 
+    LISTENING = """() => { const s = document.querySelector('.ck-status-bar .ck-listening');
+      const g = s && s.querySelector('.ck-listening-glyph');
+      return s && { text: s.textContent, state: s.getAttribute('data-state'), title: s.title,
+                    anim: getComputedStyle(g).animationName }; }"""
+
+    def test_agent_listening_is_said_in_words(self):
+        # 0.6.0. Catches: a state shown by colour alone (the words must differ per state), an
+        # old server with no `listening` read as listening, and the pulse ignoring reduced motion.
+        cases = (({"state": "listening", "last_seen": "2026-09-29T10:00:00Z"}, "listening", "● Agent listening"),
+                 ({"state": "idle", "last_seen": "2020-01-02T03:04:05Z"}, "idle", "○ Agent idle since "),
+                 ({"state": "never", "last_seen": None}, "never", "○ No agent has listened yet"),
+                 (None, "unknown", "? Agent: not known"))
+        for kind in BROWSERS:
+            for listening, state, words in cases:
+                with self.subTest(browser=kind, state=state):
+                    _Handler.view_listening = listening
+                    page = self._page(kind, 1400)
+                    page.click(".ck-dock-strip")
+                    page.wait_for_selector(".ck-status-bar .ck-listening")
+                    page.wait_for_function("document.querySelector('.ck-listening').getAttribute('data-state') === %r"
+                                           % state)
+                    got = page.evaluate(self.LISTENING)
+                    self.assertTrue(got["text"].startswith(words), got)
+                    self.assertTrue(got["title"], got)
+                    if state == "idle":
+                        self.assertIn("2020", got["text"], "an older day shows its date")
+                    self.assertEqual(got["anim"] != "none", state == "listening", got)
+            with self.subTest(browser=kind, reduced_motion=True):
+                _Handler.view_listening = cases[0][0]
+                page = self._page(kind, 1400)
+                page.emulate_media(reduced_motion="reduce")
+                page.click(".ck-dock-strip")
+                page.wait_for_function("(document.querySelector('.ck-listening') || {}).getAttribute && "
+                                       "document.querySelector('.ck-listening').getAttribute('data-state') === 'listening'")
+                self.assertEqual(page.evaluate(self.LISTENING)["anim"], "none")
+
 
 LIVE_MARKS = "[data-live],[data-live-title],[data-live-width],[data-live-status]"
 # Every live-marked element as the browser now shows it: key, text, title, width, status class.
@@ -523,6 +563,7 @@ class LiveBoardTests(unittest.TestCase):
 
     def setUp(self):
         _Handler.view_delay, _Handler.view_fails, _Handler.view_agent, _Handler.view_working = 0.0, False, False, False
+        _Handler.view_listening = None
         _Handler.board, _Handler.board_status, _Handler.board_hits = None, 200, 0
 
     def _board_page(self, kind, path, board, width=1280):

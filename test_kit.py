@@ -1175,6 +1175,128 @@ class DoorbellTests(Tmp):
         self.assertEqual(D.read_cursor(self.dir), 0)
 
 
+class ListeningTests(Tmp):
+    """0.6.0 "agent listening": the watch's heartbeat and what the owner is told from it."""
+
+    T0 = 1_790_000_000.0  # a fixed wall-clock second, so no test depends on when it runs
+
+    def test_never_idle_and_listening_each_from_the_file(self):
+        # Catches: "listening" from the mere existence of the file (a watch that exited
+        # normally, or one killed without a word, would read as listening for ever).
+        self.assertEqual(D.listening(self.dir, now=self.T0), {"state": "never", "last_seen": None})
+        D.write_watch(self.dir, True, every=10, now=self.T0)
+        got = D.listening(self.dir, now=self.T0 + 5)
+        self.assertEqual(got["state"], "listening")
+        self.assertEqual(got["last_seen"], "2026-09-21T14:13:20Z")
+        # Killed: the promise (every + grace) runs out, and it reads idle, since when.
+        self.assertEqual(D.listening(self.dir, now=self.T0 + 10 + D.BEAT_GRACE + 1),
+                         {"state": "idle", "last_seen": "2026-09-21T14:13:20Z"})
+        # Exited normally: idle at once, not after the promise.
+        D.write_watch(self.dir, False, now=self.T0 + 6)
+        self.assertEqual(D.listening(self.dir, now=self.T0 + 7)["state"], "idle")
+
+    def test_a_bad_file_under_claims(self):
+        # Catches: a malformed or forged file read as "listening". The safe error is "never".
+        p = self.dir / D.WATCH_FILE
+        for text in ("not json", "[]", '{"watching": true}', '{"watching": true, "at": 5, "until": 9}'):
+            with self.subTest(text=text):
+                p.write_text(text)
+                self.assertEqual(D.listening(self.dir, now=self.T0)["state"], "never")
+        # A stamp from the future, or a promise years ahead, is not believed.
+        p.write_text(json.dumps({"watching": True, "at": D._ts(self.T0 + 3600), "until": D._ts(self.T0 + 3700)}))
+        self.assertEqual(D.listening(self.dir, now=self.T0)["state"], "never")
+        p.write_text(json.dumps({"watching": True, "at": D._ts(self.T0), "until": D._ts(self.T0 + 10 * 86400)}))
+        self.assertEqual(D.listening(self.dir, now=self.T0 + 1)["state"], "idle")
+        # "watching" must be exactly true, not truthy.
+        p.write_text(json.dumps({"watching": "yes", "at": D._ts(self.T0), "until": D._ts(self.T0 + 30)}))
+        self.assertEqual(D.listening(self.dir, now=self.T0 + 1)["state"], "idle")
+
+    def test_a_fifo_at_the_watch_file_reads_never_without_blocking(self):
+        os.mkfifo(self.dir / D.WATCH_FILE)
+        self.assertEqual(D.listening(self.dir, now=self.T0)["state"], "never")
+
+    def test_a_symlinked_watch_file_reads_never(self):
+        # Review of PR #8 (LOW a): a link to a genuine, fresh heartbeat elsewhere must not
+        # make this state dir read "listening". Counter-check: the same file, not linked, does.
+        real = self.dir / "elsewhere.json"
+        real.write_text(json.dumps({"watching": True, "at": D._ts(self.T0), "until": D._ts(self.T0 + 30)}))
+        (self.dir / D.WATCH_FILE).symlink_to(real)
+        self.assertEqual(D.listening(self.dir, now=self.T0 + 1)["state"], "never")
+        (self.dir / D.WATCH_FILE).unlink()
+        real.rename(self.dir / D.WATCH_FILE)
+        self.assertEqual(D.listening(self.dir, now=self.T0 + 1)["state"], "listening")
+
+    def test_the_heartbeat_writes_at_most_once_per_interval(self):
+        # Catches: a heartbeat that writes on every 2 s poll (disk churn for nothing), and
+        # one that promises 10 s while a slow --poll only comes back every 60 s, so the owner
+        # would see "idle" flicker in between polls.
+        t = [0.0]
+        beat = D.Heartbeat(self.dir, poll=2.0, clock=lambda: t[0])
+        writes = []
+        real = D.write_watch
+        D.write_watch = lambda state, watching, every: writes.append((t[0], watching, every))
+        try:
+            for t[0] in (0.0, 2.0, 4.0, 9.9, 10.0, 12.0, 20.0):
+                beat()
+            beat.stop()
+            self.assertEqual(writes, [(0.0, True, 10.0), (10.0, True, 10.0), (20.0, True, 10.0), (20.0, False, 10.0)])
+            writes.clear()
+            slow = D.Heartbeat(self.dir, poll=60.0, clock=lambda: t[0])
+            slow()
+            self.assertEqual(writes[0][2], 60.0)
+        finally:
+            D.write_watch = real
+
+    def test_a_failed_heartbeat_warns_once_and_never_stops_the_watch(self):
+        warned = []
+        beat = D.Heartbeat(self.dir / "absent", poll=0, clock=iter(range(0, 1000, 20)).__next__,
+                           warn=warned.append)
+        beat()
+        beat()
+        beat.stop()
+        self.assertEqual(len(warned), 1, warned)
+        self.assertIn("agent listening", warned[0])
+
+    def test_watch_beats_while_it_waits_and_the_cli_says_idle_when_it_ends(self):
+        # Catches: a heartbeat only before the first poll, and an agent.py watch that leaves
+        # "watching": true behind when it times out (the owner would see "listening" for up
+        # to the grace period with nobody there).
+        beats = []
+        clock = iter([0, 1, 2, 3, 99])
+        D.watch(self.dir / "inbox.jsonl", 0, poll=0, sleep=lambda _: None, timeout=5,
+                clock=lambda: next(clock), heartbeat=lambda: beats.append(1))
+        self.assertEqual(len(beats), 3)
+        import contextlib
+        import io
+        import agent as AG
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc = AG.main(["--state", str(self.dir), "watch", "--timeout", "0.05", "--poll", "0.01"])
+        self.assertEqual(rc, 3)
+        rec = json.loads((self.dir / D.WATCH_FILE).read_text())
+        self.assertIs(rec["watching"], False)
+        self.assertEqual(D.listening(self.dir)["state"], "idle")
+        self.assertEqual(oct((self.dir / D.WATCH_FILE).stat().st_mode & 0o777), "0o600")
+
+    def test_a_watch_ended_by_sigterm_or_sighup_says_so_at_once(self):
+        # Catches: a session that ends (its shell gets SIGHUP, its runner SIGTERM) leaving
+        # "listening" up for the whole grace period with nobody there.
+        import signal
+        import time as _t
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(sig=sig.name):
+                p = subprocess.Popen([sys.executable, str(KIT / "agent.py"), "--state", str(self.dir),
+                                      "watch", "--poll", "0.05"], stderr=subprocess.DEVNULL)
+                self.addCleanup(p.kill)
+                deadline = _t.monotonic() + 20
+                while D.listening(self.dir)["state"] != "listening" or \
+                        json.loads((self.dir / D.WATCH_FILE).read_text())["watching"] is not True:
+                    self.assertLess(_t.monotonic(), deadline, "the watch never said it was listening")
+                    _t.sleep(0.05)
+                p.send_signal(sig)
+                self.assertEqual(p.wait(timeout=20), 128 + sig)
+                self.assertEqual(D.listening(self.dir)["state"], "idle")
+
+
 class SessionStartHookTests(Tmp):
     """§6.3, §7.3 and §7.7: a session that was not watching sees the owner's requests first, only where the user said so."""
 

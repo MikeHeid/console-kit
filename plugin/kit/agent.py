@@ -6,6 +6,7 @@
     agent.py --state DIR watch [--since SEQ] [--timeout SECONDS]
                                                 block until the owner sends 'process' or 'fork', print it, exit (§7.3)
     agent.py --state DIR view                   print the current view as JSON
+    agent.py --state DIR health                 the server's health as JSON; exit 0 healthy, 1 not, 2 unreachable
     agent.py --state DIR answers [--item ID] [--fork RECORD_ID] [--json]
                                                 every question in a scope with every answer it got (§7.6)
     agent.py --state DIR fork-context FORK_ID   the round's bundle for its committee (§6.3, D14)
@@ -30,6 +31,9 @@ the project, this state dir, and the kit this agent.py lives in. The plugin
 acts only in registered projects and takes the paths it runs from there, never
 from the repository (§7.7).
 
+While `watch` waits it records so in watch.json beside the doorbell, and the
+owner's console shows "agent listening" until it exits or stops renewing it.
+
 `watch` exits 0 with the waiting lines, or 3 when --timeout runs out. The
 agent's cursor moves only through `synced --through`, and never backwards, so
 a signal that arrives while the agent works is not marked processed.
@@ -41,6 +45,7 @@ import argparse
 import datetime as dt
 import json
 import secrets
+import signal
 import sys
 from pathlib import Path
 
@@ -177,6 +182,7 @@ def main(argv=None) -> int:
     s.add_argument("--timeout", type=float)
     s.add_argument("--poll", type=float, default=2.0)
     sub.add_parser("view")
+    sub.add_parser("health")
     s = sub.add_parser("answers")
     s.add_argument("--item")
     s.add_argument("--fork")
@@ -222,7 +228,17 @@ def _run(a, bell: Path) -> int:
         return 0
     if a.cmd == "watch":
         since = a.since if a.since is not None else D.read_cursor(a.state)
-        found = D.watch(bell, since, poll=a.poll, timeout=a.timeout)
+        beat = D.Heartbeat(a.state, a.poll)  # the owner sees "agent listening" while this waits (0.6.0)
+        # A session that ends kills its watch with SIGTERM or SIGHUP; turn those into an
+        # ordinary exit so `finally` says "stopped" now, rather than the owner seeing
+        # "listening" until the promise lapses. SIGKILL cannot be caught: that is the lapse's job.
+        old = {sig: signal.signal(sig, lambda n, _f: sys.exit(128 + n)) for sig in (signal.SIGTERM, signal.SIGHUP)}
+        try:
+            found = D.watch(bell, since, poll=a.poll, timeout=a.timeout, heartbeat=beat)
+        finally:  # woken, timed out, or interrupted: the owner is told at once, not when the promise lapses
+            beat.stop()
+            for sig, h in old.items():
+                signal.signal(sig, h)
         if not found:
             print(f"no 'process' or 'fork' signal after seq {since} within {a.timeout:g}s", file=sys.stderr)
             return 3
@@ -231,6 +247,8 @@ def _run(a, bell: Path) -> int:
         return 0
     if a.cmd == "view":
         return _call(a.state, "GET", "/view")
+    if a.cmd == "health":
+        return _call(a.state, "GET", "/health")
     if a.cmd == "answers":
         return _answers(a.state, a.item, a.fork, a.json)
     if a.cmd == "fork-context":

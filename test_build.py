@@ -66,6 +66,15 @@ class LayoutTests(Base):
         self.assertEqual(entry["version"], plugin["version"])
         self.assertEqual(plugin["version"], B.version())
 
+    def test_every_place_that_states_the_version_agrees(self):
+        # 0.6.0: /health reports console_kit.__version__, and a vendoring project carries no
+        # VERSION file, so the package must say the same as VERSION and both manifests.
+        init = (B.ROOT / "plugin/kit/console_kit/__init__.py").read_text(encoding="utf-8")
+        [pkg] = re.findall(r'^__version__ = "([^"]+)"', init, re.M)
+        repo_market = json.loads((B.ROOT / ".claude-plugin/marketplace.json").read_text(encoding="utf-8"))
+        plugin = json.loads((B.ROOT / "plugin/.claude-plugin/plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual({pkg, plugin["version"], *(p["version"] for p in repo_market["plugins"])}, {B.version()})
+
     def test_scripts_are_executable_and_the_rest_is_not(self):
         z = zipfile.ZipFile(self.built()[0])
         mode = {i.filename: (i.external_attr >> 16) & 0o777 for i in z.infolist()}

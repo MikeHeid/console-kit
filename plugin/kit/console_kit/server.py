@@ -17,12 +17,18 @@ One process, and the store's only writer (see `store.py`). It has two doors:
 Every owner write also appends one line to the doorbell file (D8), which an
 open agent session watches. The view is computed per request and never
 stored (R5).
+
+`/health` (0.6.0) is answered on the agent's door, and on a third door only
+when `--health-port` asks for one. It is NEVER answered on the owner's door
+without the Access token: that door keeps its rule that no path skips the
+gate. See `HealthHandler` for why the health door is safe to leave ungated.
 """
 
 from __future__ import annotations
 
 import argparse
 import calendar
+import ipaddress
 import json
 import os
 import re
@@ -38,7 +44,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 
+from . import __version__
 from . import anchors as A
+from . import doorbell as D
 from . import publish as P
 from . import schema as S
 from . import view as V
@@ -114,6 +122,7 @@ class Config:
     hostname: str       # the public hostname; a POST from any other browser Origin is refused
     port: int = 4793
     project: str = ""
+    health_port: int = 0  # 0: no health port; /health is still on the agent socket
 
     @property
     def store(self) -> Path:
@@ -335,7 +344,25 @@ class Console:
         except (OSError, ValueError):
             cur = {}
         return {"last_synced_at": cur.get("last_synced_at"), "last_error": cur.get("last_error"),
-                "working": self.read_working()}
+                "working": self.read_working(), "listening": D.listening(self.cfg.state)}
+
+    def health(self) -> tuple[bool, dict]:
+        """Whether the server can do its job, in words that hold no owner content and no secret.
+
+        `ok` needs the register to load, since every page and write goes
+        through it. Its error is logged, never returned: an adapter's message
+        can carry a path or an item's text.
+        """
+        ok = True
+        try:
+            self.adapter.items()
+        except Exception as e:  # a register caught mid-write, or a broken adapter
+            sys.stderr.write(f"console health: register: {type(e).__name__}: {e}\n")
+            ok = False
+        agent = D.listening(self.cfg.state)["state"]
+        return ok, {"ok": ok, "version": __version__, "store_seq": len(self.store.records()),
+                    "register": "ok" if ok else "error", "agent": agent,
+                    "agent_listening": agent == "listening"}
 
     # "Agent active" (owner, 2026-09-29): an agent that picks up a request marks
     # the items it is working on, and its next cursor post (synced, or an error)
@@ -502,6 +529,9 @@ class AgentHandler(_Handler):
             return self._send(200, self.console.payload())
         if self.path == "/check":
             return OwnerHandler._check(self)
+        if self.path == "/health":
+            ok, body = self.console.health()
+            return self._send(200 if ok else 503, body)
         self._send(404, {"error": "not found"})
 
     def do_POST(self) -> None:
@@ -518,6 +548,80 @@ class AgentHandler(_Handler):
             self._send(200, {"record": self.console.write(kind, self._body(), "agent")})
         except RequestError as e:
             self._send(e.code, {"error": str(e)})
+
+
+class HealthHandler(_Handler):
+    """The opt-in health door (`--health-port`): GET /health and nothing else, with no Access token.
+
+    Why this is safe without the gate, when the owner's door is not:
+    - It is its OWN listener. The tunnel's ingress names the owner's port, so
+      the edge cannot route here unless someone re-points the tunnel, and the
+      owner's door keeps its rule that no path skips the gate (D5).
+    - It is bound to 127.0.0.1 (HOST, never configurable), and a peer that is
+      not loopback is refused anyway.
+    - A loopback peer is NOT proof of a local caller: cloudflared itself
+      connects from loopback. So a request carrying any header a proxy or the
+      Cloudflare edge adds (`PROXY_HEADERS`) is refused. The edge sets
+      `Cf-Connecting-Ip` and `Cf-Ray` on every request it forwards, and a
+      visitor cannot strip them, so a tunnel mis-pointed here still meets 403.
+    - `Host` must name loopback, so a web page that re-binds its own hostname
+      to 127.0.0.1 cannot read it from the owner's browser.
+    - Every method meets these checks first (`_dispatch`): a proxied or
+      foreign-Host request is 403 whatever its method, and only a clean local
+      request learns anything else (404 for another path, 405 for another method).
+    - What it says is not secret and holds nothing the owner wrote: a version,
+      a record count, and two words of state.
+    """
+
+    PROXY_HEADERS = ("Cf-Connecting-Ip", "Cf-Ray", "Cf-Visitor", "Cf-Ipcountry", "Cf-Warp-Tag-Id",
+                     "Cf-Access-Jwt-Assertion", "Cf-Access-Authenticated-User-Email", "Cdn-Loop",
+                     "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-Ip", "Forwarded", "Via")
+    # The listener is AF_INET on 127.0.0.1 only, so no IPv6 peer can connect: `[::1]`
+    # is not listed, because no honest client of this port sends it.
+    LOCAL_HOSTS = ("127.0.0.1", "localhost")
+
+    def _refusal(self) -> str | None:
+        if not ipaddress.ip_address(self.client_address[0]).is_loopback:
+            return "health answers loopback callers only"
+        if any(self.headers.get(h) is not None for h in self.PROXY_HEADERS):
+            return "health answers local callers only, never through a proxy or tunnel"
+        m = re.fullmatch(r"(\[[^\]]*\]|[^:\[\]]+)(:[0-9]{1,5})?", (self.headers.get("Host") or "").strip().lower())
+        if m is None or m.group(1) not in self.LOCAL_HOSTS:
+            return "health answers only a Host of 127.0.0.1 or localhost"
+        return None
+
+    def _send(self, code: int, body: object, ctype: str = "application/json") -> None:
+        if self.command != "HEAD":
+            return super()._send(code, body, ctype)
+        # HEAD: the same status and headers, and no body.
+        data = json.dumps(body).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        for k, v in SECURITY_HEADERS:
+            self.send_header(k, v)
+        self.end_headers()
+
+    def _dispatch(self) -> None:
+        why = self._refusal()
+        if why:
+            return self._send(403, {"error": why})
+        if self.command != "GET":
+            return self._send(405, {"error": "method not allowed"})
+        if self.path != "/health":
+            return self._send(404, {"error": "this port answers /health only"})
+        ok, body = self.console.health()
+        self._send(200 if ok else 503, body)
+
+    do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _dispatch
+
+
+def health_server(console: Console, port: int) -> ThreadingHTTPServer:
+    if port == console.cfg.port and port != 0:
+        raise SystemExit("--health-port must differ from --port: the owner's door is never ungated")
+    srv = ThreadingHTTPServer((HOST, port), type("BoundHealthHandler", (HealthHandler,), {"console": console}))
+    srv.daemon_threads = True
+    return srv
 
 
 class UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -561,12 +665,18 @@ def serve(cfg: Config, verify: Callable[[str | None], dict] | None = None) -> No
     sys.stderr.write(f"console: {len(added)} seed question(s) added; store {cfg.store}\n")
     agent = agent_server(console)
     threading.Thread(target=agent.serve_forever, daemon=True).start()
+    health = health_server(console, cfg.health_port) if cfg.health_port else None
+    if health is not None:
+        threading.Thread(target=health.serve_forever, daemon=True).start()
+        sys.stderr.write(f"console: health door http://{HOST}:{cfg.health_port}/health (loopback, no proxy)\n")
     owner = owner_server(console, verify or access_verifier(cfg.team_domain, cfg.aud), cfg.port)
     sys.stderr.write(f"console: owner door http://{HOST}:{cfg.port}, agent door {cfg.socket}\n")
     try:
         owner.serve_forever()
     finally:
         agent.shutdown()
+        if health is not None:
+            health.shutdown()
         cfg.socket.unlink(missing_ok=True)
 
 
@@ -600,7 +710,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--hostname", required=True, help="the public hostname, e.g. console.example.com")
     ap.add_argument("--port", type=int, default=4793)
     ap.add_argument("--project", default="")
+    ap.add_argument("--health-port", type=int, default=0,
+                    help="also answer GET /health on this loopback port, ungated (default: off; "
+                         "/health is always on the agent socket)")
     a = ap.parse_args(argv)
+    if not 0 <= a.health_port <= 65535:
+        ap.error("--health-port takes 0 (off) or a port number")
+    if a.health_port and a.health_port == a.port:
+        ap.error("--health-port must differ from --port: the owner's door is never ungated")
     serve(Config(root=a.root, page=a.page, state=a.state, adapter=a.adapter, team_domain=a.team_domain,
-                 aud=a.aud, hostname=a.hostname, port=a.port, project=a.project))
+                 aud=a.aud, hostname=a.hostname, port=a.port, project=a.project, health_port=a.health_port))
     return 0

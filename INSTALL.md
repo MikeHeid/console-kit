@@ -86,7 +86,8 @@ The same steps without Claude:
 
 `kit/docs/CLOUDFLARE.md` walks through the Cloudflare screens and lists the usual
 failures. `kit/docs/ADAPTER.md` explains how to connect the console to your
-project's own task list.
+project's own task list. `kit/docs/DEPLOY.md` covers upgrades and rollback, and
+`kit/docs/RUNBOOK.md` what to check when something is wrong.
 
 ## Updating
 
@@ -108,6 +109,12 @@ justify, run this in each project, from a session:
     python3 <kit>/agent.py --state <state dir> reanchor
 
 `agent.py check` shows why each answer that is left is still stale.
+
+**Upgrading to 0.6.0.** Nothing to migrate: 0.6.0 adds no store record, so a
+0.5.0 kit still reads a 0.6.0 store. It adds `/health` (on the agent socket,
+and on a loopback port only if you pass `--health-port`), the "agent listening"
+line in the status bar, and `kit/tools/verify_vendor.py`. `kit/docs/DEPLOY.md`
+and `kit/docs/RUNBOOK.md` cover running it.
 
 **Going back to an older kit.** A 0.4.0 kit refuses a store that holds a
 0.5.0 record, and names the line and the field (for example `lock: unknown
