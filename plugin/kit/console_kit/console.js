@@ -29,10 +29,14 @@
   let lastFocused = null;
   let currentItem = null;
   let currentMode = null; // 'item' or 'inbox'
+  // 0.8.5: true while the item on show was opened from the inbox, so its header can lead back there.
+  let fromInbox = false;
   let pendingNonces = {};
   let draftTexts = {};
   let currentFork = null; // the answers sheet's fork filter (spec §7.6), or the round the form walks
   const openForms = new Set(); // disclosure keys the owner left open
+  let lockingAll = null;        // 0.8.5: the item whose answers are being locked in turn, or null
+  const lockAllError = {};      // 0.8.5: item -> why its last 'Lock all' stopped
   // 0.7.0: the inbox's tabs, the round form, and the live loop.
   let currentTab = 'inbox';     // 'inbox' | 'feed' | 'chat', inside inbox mode
   let arrived = new Set();      // qids and message ids that arrived with the latest live update
@@ -635,6 +639,7 @@
     lastFocused = document.activeElement;
     currentItem = itemId;
     currentMode = mode;
+    fromInbox = false;
     if (mode === 'inbox') seenAtOpen = seenSeq() || 0;
     panelEl.setAttribute('data-open', 'true');
     panelEl.setAttribute('aria-label', mode === 'inbox' ? 'Inbox' : 'Console: ' + (itemId || ''));
@@ -784,7 +789,7 @@
           el('span', { className: 'ck-inbox-item-id' }, [q.question.item]),
           el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : ''])
         ]);
-        const go = () => { currentItem = q.question.item; currentMode = 'item'; renderPanel(); };
+        const go = () => openFromInbox(q.question.item);
         item.addEventListener('click', go);
         item.addEventListener('keydown', e => {
           if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
@@ -808,11 +813,7 @@
           el('span', { className: 'ck-inbox-item-id' }, [itemId]),
           el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : ''])
         ]);
-        item.addEventListener('click', () => {
-          currentItem = itemId;
-          currentMode = 'item';
-          renderPanel();
-        });
+        item.addEventListener('click', () => openFromInbox(itemId));
         list.appendChild(item);
       }
       body.appendChild(list);
@@ -835,16 +836,42 @@
     }
   }
 
+  // 0.8.5: the inbox opens an item in its own panel, so the item must offer the way back.
+  function openFromInbox(itemId) {
+    currentItem = itemId;
+    currentMode = 'item';
+    fromInbox = true;
+    renderPanel();
+    const back = panelEl.querySelector('.ck-back-btn');
+    if (back) back.focus();
+  }
+
+  function backToInbox() {
+    const left = currentItem;
+    currentItem = null;
+    currentMode = 'inbox';
+    fromInbox = false;
+    renderPanel();
+    // Back onto the row that was opened, when it is still listed.
+    const rows = Array.from(panelEl.querySelectorAll('.ck-inbox-item'));
+    const row = rows.find(r => {
+      const id = r.querySelector('.ck-inbox-item-id');
+      return id && id.textContent === left;
+    });
+    const target = row || panelEl.querySelector('.ck-close-btn');
+    if (target) target.focus();
+  }
+
   // Render item view
   function renderItem(itemId) {
     const itemData = items ? items[itemId] : null;
 
     const header = el('div', { className: 'ck-header' }, [
       el('button', {
-        className: 'ck-back-btn',
+        className: fromInbox ? 'ck-back-btn ck-back-always' : 'ck-back-btn',
         type: 'button',
-        'aria-label': 'Back to board'
-      }, ['← Back']),
+        'aria-label': fromInbox ? 'Back to inbox' : 'Back to board'
+      }, [fromInbox ? '← Inbox' : '← Back']),
       el('span', { className: 'ck-title' }, [
         el('span', { className: 'ck-title-id' }, [itemId]),
         itemData ? ' — ' + itemData.title : ''
@@ -855,7 +882,7 @@
         'aria-label': 'Close panel'
       }, ['×'])
     ]);
-    header.querySelector('.ck-back-btn').addEventListener('click', closePanel);
+    header.querySelector('.ck-back-btn').addEventListener('click', fromInbox ? backToInbox : closePanel);
     header.querySelector('.ck-close-btn').addEventListener('click', closePanel);
     panelEl.appendChild(header);
 
@@ -878,6 +905,10 @@
 
       if (qs.length > 0) {
         body.appendChild(el('div', { className: 'ck-section-heading' }, ['Questions']));
+        const ready = qs.filter(q => q.state === 'unlocked' && q.answers && q.answers.length > 0);
+        if (ready.length > 1 || lockAllError[itemId] || lockingAll === itemId) {
+          body.appendChild(renderLockAnswered(itemId, ready));
+        }
         for (const q of qs) {
           body.appendChild(renderQuestion(q));
         }
@@ -890,6 +921,76 @@
       body.appendChild(renderThread(itemId));
     }
     panelEl.appendChild(body);
+  }
+
+  // 0.8.5 (owner, 2026-09-30: "there should be a 'lock all items' button rather than one for
+  // each question being answered"): one confirmation locks every answered question on the
+  // item. Each lock is the POST the single button sends, one after another, so the server's
+  // checks are unchanged. A refusal stops there and names its question; what was locked
+  // before it stays locked, because a lock is never undone.
+  function renderLockAnswered(itemId, ready) {
+    const key = 'lockall-' + itemId;
+    const wrap = el('div', { className: 'ck-lock-answered' });
+    if (lockAllError[itemId]) {
+      wrap.appendChild(el('div', { className: 'ck-error-msg', role: 'alert' }, [lockAllError[itemId]]));
+    }
+    if (lockingAll === itemId) {
+      wrap.appendChild(el('p', { className: 'ck-muted' }, ['Locking answers…']));
+      return wrap;
+    }
+    if (ready.length < 2) return wrap;
+    if (!openForms.has(key)) {
+      const open = el('button', { className: 'ck-btn ck-btn-primary ck-lock-answered-open', type: 'button' },
+        ['Lock all ' + ready.length + ' answers…']);
+      open.addEventListener('click', () => {
+        delete lockAllError[itemId];
+        openForms.add(key);
+        renderPanel();
+        const h = panelEl.querySelector('.ck-lock-answered .ck-confirm-heading');
+        if (h) { h.setAttribute('tabindex', '-1'); h.focus(); }
+      });
+      wrap.appendChild(open);
+      return wrap;
+    }
+    const box = el('div', { className: 'ck-confirm' }, [
+      el('div', { className: 'ck-confirm-heading' }, ['Lock these ' + ready.length + ' answers?'])
+    ]);
+    for (const q of ready) {
+      box.appendChild(el('div', { className: 'ck-lock-answered-qid' }, [q.question.qid]));
+      box.appendChild(renderReceipt(q.question, q.answers[q.answers.length - 1]));
+    }
+    const actions = el('div', { className: 'ck-actions', style: 'margin-top: 12px;' });
+    const go = el('button', { className: 'ck-btn ck-btn-primary ck-lock-answered-go', type: 'button' },
+      ['Lock all ' + ready.length + ' answers']);
+    const cancel = el('button', { className: 'ck-btn', type: 'button' }, ['Cancel']);
+    cancel.addEventListener('click', () => { openForms.delete(key); renderPanel(); });
+    go.addEventListener('click', async () => {
+      // The answers shown are the ones locked: taken now, not re-read after each reply.
+      const todo = ready.map(q => ({ qid: q.question.qid, answer: q.answers[q.answers.length - 1].id }));
+      lockingAll = itemId;
+      openForms.delete(key);
+      renderPanel();
+      let done = 0;
+      let failed = null;
+      for (const t of todo) {
+        const r = await apiPost('/lock', { qid: t.qid, answer: t.answer }, 'lock-' + t.qid);
+        if (r.error) { failed = t.qid + ' was not locked: ' + r.error; break; }
+        done += 1;
+      }
+      lockingAll = null;
+      if (failed) {
+        lockAllError[itemId] = 'Locked ' + done + ' of ' + todo.length + '. ' + failed;
+        announce(lockAllError[itemId]);
+      } else {
+        announce('Locked ' + done + ' answers.');
+      }
+      renderPanel();
+    });
+    actions.appendChild(go);
+    actions.appendChild(cancel);
+    box.appendChild(actions);
+    wrap.appendChild(box);
+    return wrap;
   }
 
   // Render status bar
@@ -2786,9 +2887,7 @@
           'aria-label': 'Open ' + (target === 'chat' ? 'the chat' : target) }, ['Open']);
         open.addEventListener('click', () => {
           if (target === 'chat') return selectTab('chat');
-          currentItem = target;
-          currentMode = 'item';
-          renderPanel();
+          openFromInbox(target);
         });
         row.appendChild(open);
       }
