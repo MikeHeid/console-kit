@@ -6,12 +6,14 @@ Every record is one JSON object on one line of the store, and every record
 carries `schemaVersion`. A record from another schema version is refused BY
 NAME, never coerced.
 
-There are four kinds of record, and each has fixed writers (spec R4):
+There are five kinds of record, and each has fixed writers (spec R4):
 
     question  agent   `qid` is `<itemId>/Q<n>`, minted once and never reused
     message   either  a thread entry on an item; a message the owner writes is "author input"
     answer    owner   picks from the question's options, own words, or both
     lock      owner   locks one answer; a later answer SUPERSEDES it, never undoes it (D3)
+    anchor    agent   re-anchors the CURRENT lock's conditions, with evidence (0.5.0, `agent.py reanchor`);
+                      the server computes it, and no route takes one from a writer
 """
 
 from __future__ import annotations
@@ -22,12 +24,13 @@ import re
 
 SCHEMA_VERSION = 1
 
-KINDS = ("question", "message", "answer", "lock")
+KINDS = ("question", "message", "answer", "lock", "anchor")
 WRITERS = {
     "question": frozenset({"agent"}),
     "message": frozenset({"agent", "owner"}),
     "answer": frozenset({"owner"}),
     "lock": frozenset({"owner"}),
+    "anchor": frozenset({"agent"}),
 }
 QUESTION_KINDS = ("single", "multi", "free")
 # The owner's two requests to the agent: "fork" asks it to deliberate (§6), and
@@ -45,7 +48,12 @@ MAX_ROLES = 3
 # Whose recommendation a forked question's ★ is: the whole panel, one of the
 # default committee's seats (§6.6), a roster seat (D13), or a typed `other:` seat.
 STAR_BY = ("panel", "architect", "ux", "security", "determinism", "devops", "adversarial", "analyst")
-VALID_IF_KINDS = ("file_sha256", "item_status")
+VALID_IF_KINDS = ("file_sha256", "item_status", "excerpt")
+# An `excerpt` holds while its text is found anywhere in the file, after
+# whitespace and line endings are normalised (0.5.0). Too short, and it matches
+# by accident; too long, and it is a whole-file hash by another name.
+MIN_EXCERPT = 8        # characters, after normalising
+MAX_EXCERPT = 4000     # characters, as written
 
 # The fields the WRITER supplies; `id`, `seq` and `ts` belong to the store.
 REQUIRED = {
@@ -53,6 +61,7 @@ REQUIRED = {
     "message": ("item", "text", "by", "nonce"),
     "answer": ("qid", "picks", "own_text", "by", "nonce"),
     "lock": ("qid", "answer", "by", "nonce"),
+    "anchor": ("qid", "lock", "anchors", "basis", "by", "nonce"),
 }
 # Fork deliberations (spec §6.4) add optional fields, so SCHEMA_VERSION stays 1:
 # every existing record stays valid, and a kit from before them refuses a
@@ -61,7 +70,11 @@ OPTIONAL = {
     "question": frozenset({"forked_from", "star_by"}),
     "message": frozenset({"reply_to", "intent", "focus", "mode", "roles", "follow_up_of", "about_qid"}),
     "answer": frozenset({"supersedes", "reason"}),
-    "lock": frozenset(),
+    # 0.5.0: the conditions a RE-lock was taken against, computed by the server.
+    # Written only when they differ from the question's `valid_if`, so a store
+    # stays readable by a 0.4.0 kit until the first re-lock that changes one.
+    "lock": frozenset({"anchors"}),
+    "anchor": frozenset(),
 }
 STORE_FIELDS = frozenset({"id", "seq", "ts", "schemaVersion", "type"})
 
@@ -173,15 +186,18 @@ def _check_question(rec: dict) -> list[str]:
     if star is not None and star not in ids:
         errs.append(f"star {star!r} is not one of the options")
     errs += _check_fork_fields(rec, star)
-    vi = rec["valid_if"]
-    if not isinstance(vi, list):
-        errs.append("valid_if must be a list")
-    elif len(vi) > MAX_VALID_IF:
-        errs.append(f"{len(vi)} valid_if conditions; the limit is {MAX_VALID_IF}")
-    else:
-        for c in vi:
-            errs += _check_condition(c)
+    errs += _check_conditions(rec["valid_if"], "valid_if")
     return errs
+
+
+def _check_conditions(vi: object, field: str, *, allow_empty: bool = True) -> list[str]:
+    if not isinstance(vi, list):
+        return [f"{field} must be a list"]
+    if len(vi) > MAX_VALID_IF:
+        return [f"{len(vi)} {field} conditions; the limit is {MAX_VALID_IF}"]
+    if not vi and not allow_empty:
+        return [f"{field} must name at least one condition"]
+    return [e for c in vi for e in _check_condition(c)]
 
 
 def _check_fork_fields(rec: dict, star: object) -> list[str]:
@@ -206,11 +222,21 @@ def _check_fork_fields(rec: dict, star: object) -> list[str]:
 def _check_condition(c: object) -> list[str]:
     if not isinstance(c, dict) or c.get("kind") not in VALID_IF_KINDS:
         return [f"valid_if condition {c!r} needs kind in {', '.join(VALID_IF_KINDS)}"]
-    want = {"file_sha256": {"kind", "path", "sha256"}, "item_status": {"kind", "item", "status"}}[c["kind"]]
+    want = {"file_sha256": {"kind", "path", "sha256"}, "item_status": {"kind", "item", "status"},
+            "excerpt": {"kind", "path", "text"}}[c["kind"]]
     if set(c) != want or not all(isinstance(c[k], str) and c[k] for k in want):
         return [f"valid_if {c['kind']} takes exactly {sorted(want)}, all non-empty strings"]
-    if c["kind"] == "file_sha256" and (c["path"].startswith("/") or ".." in c["path"].split("/")):
-        return [f"valid_if path {c['path']!r} must be relative and stay inside the project"]
+    if c["kind"] in ("file_sha256", "excerpt") and (
+            c["path"].startswith("/") or ".." in c["path"].split("/") or any(ord(ch) < 32 for ch in c["path"])):
+        return [f"valid_if path {c['path']!r} must be relative, on one line, and stay inside the project"]
+    if c["kind"] == "excerpt":
+        n = len(" ".join(c["text"].split()))
+        if n < MIN_EXCERPT:
+            return [f"valid_if excerpt text is {n} characters once whitespace is collapsed; it needs at least "
+                    f"{MIN_EXCERPT}, or it matches by accident"]
+        if len(c["text"]) > MAX_EXCERPT:
+            return [f"valid_if excerpt text is {len(c['text'])} characters; the limit is {MAX_EXCERPT}. "
+                    f"Cite the lines that carry the claim, not the whole section"]
     return []
 
 
@@ -305,11 +331,25 @@ def _check_answer(rec: dict) -> list[str]:
 
 
 def _check_lock(rec: dict) -> list[str]:
-    return [] if isinstance(rec["answer"], str) and rec["answer"] else ["answer must be the id of the answer being locked"]
+    errs = [] if isinstance(rec["answer"], str) and rec["answer"] else ["answer must be the id of the answer being locked"]
+    if "anchors" in rec:
+        errs += _check_conditions(rec["anchors"], "anchors", allow_empty=False)
+    return errs
+
+
+def _check_anchor(rec: dict) -> list[str]:
+    errs = []
+    if not isinstance(rec["qid"], str) or not QID.match(rec["qid"]):
+        errs.append(f"qid {rec['qid']!r} is not <itemId>/Q<n>")
+    if not isinstance(rec["lock"], str) or not RECORD_ID.match(rec["lock"]):
+        errs.append("lock must be the id of the lock being re-anchored (24 lowercase hex)")
+    errs += _check_conditions(rec["anchors"], "anchors", allow_empty=False)
+    errs += _text(rec, "basis")
+    return errs
 
 
 _TYPE_CHECKS = {"question": _check_question, "message": _check_message,
-                "answer": _check_answer, "lock": _check_lock}
+                "answer": _check_answer, "lock": _check_lock, "anchor": _check_anchor}
 
 
 def record_id(rec: dict) -> str:

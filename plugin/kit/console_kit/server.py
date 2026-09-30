@@ -26,6 +26,7 @@ import calendar
 import json
 import os
 import re
+import secrets
 import socket
 import socketserver
 import stat
@@ -37,6 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 
+from . import anchors as A
 from . import publish as P
 from . import schema as S
 from . import view as V
@@ -48,6 +50,9 @@ MAX_BODY = 64 * 1024        # far above any real answer (MAX_TEXT is 20 000 char
 OWNER_ROUTES = {"/api/message": "message", "/api/answer": "answer", "/api/lock": "lock"}
 AGENT_ROUTES = {"/question": "question", "/message": "message"}
 WRITER_FIELDS = ("by", "type", "schemaVersion")
+# Fields only the server computes on a lock (0.5.0): a page that sends one is refused.
+SERVER_LOCK_FIELDS = ("anchors",)
+DEFAULT_RELOCK_REASON = "Re-locked unchanged: the owner checked what changed and the answer still holds."
 SECURITY_HEADERS = (
     ("Cache-Control", "no-store"),
     ("X-Content-Type-Options", "nosniff"),
@@ -161,8 +166,77 @@ class Console:
 
     def payload(self) -> dict:
         items = self.items()
-        holds = V.make_evaluator(self.cfg.root, {k: v.get("status") for k, v in items.items()})
+        holds = A.evaluator(self.cfg.root, self._status(items), snapshot=True)  # one reading per request
         return {"view": V.build(self.store, items, holds), "items": items, "cursor": self.read_cursor()}
+
+    @staticmethod
+    def _status(items: dict[str, dict]) -> dict[str, str | None]:
+        return {k: v.get("status") for k, v in items.items()}
+
+    def check(self) -> dict:
+        """Why each stale answer is stale, condition by condition (0.5.0).
+
+        A read, like `payload`, so it does not hold the write lock: its git
+        calls can take seconds, and the owner's writes must not wait on them.
+        """
+        items = self.items()
+        return {"stale": A.check(self.store, self.cfg.root, self._status(items))}
+
+    def reanchor(self, body: object) -> dict:
+        """Re-anchor every stale lock that git history can justify; with dry_run, only say what would change.
+
+        The anchors are computed here from the tree and its history, never taken
+        from the request, and each goes in as a new `anchor` record: the store is
+        append-only, so nothing already written changes.
+        """
+        if not isinstance(body, dict) or set(body) - {"dry_run"} or not isinstance(body.get("dry_run", True), bool):
+            raise RequestError(400, 'reanchor takes {"dry_run": true|false}')
+        dry = body.get("dry_run", True)
+        # Planned outside the write lock (git can take seconds); a lock that is no
+        # longer current by the time it is written is skipped, never re-anchored.
+        plan = A.plan_reanchor(self.store, self.cfg.root, self._status(self.items()))
+        if dry:
+            return {"dry_run": True, "plan": plan}
+        with self._lock:
+            for p in plan:
+                if not p["changes"]:
+                    continue
+                head = self.store.head(p["qid"])
+                lk = self.store.lock_of(head["id"]) if head is not None else None
+                if (lk is None or lk["id"] != p["lock"]
+                        or A.conditions_for(self.store, self.store.question(p["qid"]))[0] != p["base"]):
+                    p["skipped"] = "the answer or its anchors changed while this ran; run it again"
+                    continue
+                basis = "; ".join(f"{c['from']['path']}: {c['why']}" for c in p["changes"])
+                try:
+                    rec = self.store.append({"type": "anchor", "schemaVersion": S.SCHEMA_VERSION, "by": "agent",
+                                             "qid": p["qid"], "lock": p["lock"], "anchors": p["anchors"],
+                                             "basis": basis, "nonce": secrets.token_urlsafe(12)})
+                except StoreError as e:  # named in the result; the rest of the run goes on
+                    p["error"] = str(e)
+                    continue
+                p["record"] = rec["id"]
+        return {"dry_run": dry, "plan": plan}
+
+    def _lock_anchors(self, body: dict, items: dict[str, dict]) -> None:
+        """Give a RE-lock fresh anchors from the tree as it is now (0.5.0); a first lock takes none.
+
+        A first lock is decided by the question's `valid_if`, exactly as in
+        0.4.0. A lock on a question that was locked before starts from the
+        conditions that decided the previous lock and re-reads each one (see
+        `anchors.fresh_anchors`). They are written only when they differ from
+        the question's `valid_if`.
+        """
+        q = self.store.question(body.get("qid")) if isinstance(body.get("qid"), str) else None
+        before = self.store.locks(q["qid"]) if q is not None else []
+        if not before:
+            return
+        prev = before[-1]
+        a = self.store.anchor_of(prev["id"])
+        base = a["anchors"] if a else prev.get("anchors", q["valid_if"])
+        fresh = A.fresh_anchors(base, A.Tree(self.cfg.root, self._status(items)))
+        if fresh != q["valid_if"]:
+            body["anchors"] = fresh
 
     def board(self) -> dict | None:
         """The page's live values (AB-2/Q4), or None when the adapter offers none.
@@ -186,21 +260,60 @@ class Console:
         block = P.console_block(json.dumps({"api": "/api", "project": self.cfg.project}))
         return P.inject(self.cfg.page.read_text(encoding="utf-8"), block)
 
+    def relock(self, body: object) -> list[dict]:
+        """Re-lock a locked answer as it stands: one answer superseding it, word for word, and its lock.
+
+        This is how the owner clears a stale marker once they have checked what
+        changed. The new lock is re-anchored like any re-lock. Both records go
+        in under one hold of the lock, so no other write lands between them; a
+        retry with the same nonce returns what the first try wrote.
+        """
+        if not isinstance(body, dict) or set(body) - {"qid", "reason", "nonce"}:
+            raise RequestError(400, "relock takes qid, an optional reason, and nonce")
+        qid, nonce = body.get("qid"), body.get("nonce")
+        reason = body.get("reason") or DEFAULT_RELOCK_REASON
+        if not isinstance(nonce, str) or not S.NONCE.match(nonce) or len(nonce) > 60:
+            raise RequestError(400, "nonce must be 8-60 of [A-Za-z0-9_-]")
+        if not isinstance(qid, str):
+            raise RequestError(400, "qid must be <itemId>/Q<n>")
+        with self._lock:
+            items = self.items()
+            head = self.store.head(qid)
+            if head is not None and head.get("nonce") == nonce + "-a":
+                ans = head  # a retry: the answer landed the first time
+            elif head is None or self.store.lock_of(head["id"]) is None:
+                raise RequestError(400, f"{qid} has no locked answer to re-lock")
+            else:
+                ans = self._append("answer", {"qid": qid, "picks": head["picks"], "own_text": head["own_text"],
+                                              "supersedes": head["id"], "reason": reason,
+                                              "nonce": nonce + "-a"}, "owner", items)
+            return [ans, self._append("lock", {"qid": qid, "answer": ans["id"], "nonce": nonce + "-l"},
+                                      "owner", items)]
+
     def write(self, kind: str, body: object, by: str) -> dict:
         if not isinstance(body, dict):
             raise RequestError(400, "the body must be a JSON object")
-        named = [f for f in WRITER_FIELDS if f in body]
+        named = [f for f in WRITER_FIELDS + (SERVER_LOCK_FIELDS if kind == "lock" else ()) if f in body]
         if named:
             raise RequestError(400, f"{', '.join(named)} is the server's to set, not the writer's")
         with self._lock:
-            self.items()
-            before = len(self.store.records())
-            try:
-                rec = self.store.append({**body, "type": kind, "schemaVersion": S.SCHEMA_VERSION, "by": by})
-            except StoreError as e:
-                raise RequestError(400, str(e)) from None
-            if by == "owner" and len(self.store.records()) > before:  # a retried write rings nothing
-                self._ring(rec)
+            return self._append(kind, body, by, self.items())
+
+    def _append(self, kind: str, body: dict, by: str, items: dict[str, dict]) -> dict:
+        """Append one record; the caller holds `self._lock`."""
+        if kind == "lock":
+            done = self.store.lock_of(body.get("answer")) if isinstance(body.get("answer"), str) else None
+            if done is not None and done.get("nonce") == body.get("nonce") and done["qid"] == body.get("qid"):
+                return done  # a retried lock: its anchors were computed the first time
+            body = dict(body)
+            self._lock_anchors(body, items)
+        before = len(self.store.records())
+        try:
+            rec = self.store.append({**body, "type": kind, "schemaVersion": S.SCHEMA_VERSION, "by": by})
+        except StoreError as e:
+            raise RequestError(400, str(e)) from None
+        if by == "owner" and len(self.store.records()) > before:  # a retried write rings nothing
+            self._ring(rec)
         return rec
 
     def _ring(self, rec: dict) -> None:
@@ -326,7 +439,17 @@ class OwnerHandler(_Handler):
             return self._send(200, self.console.payload())
         if self.path == "/api/board":
             return self._board()
+        if self.path == "/api/check":
+            return self._check()
         self._send(404, {"error": "not found"})
+
+    def _check(self) -> None:
+        try:
+            out = self.console.check()
+        except Exception as e:  # a file caught mid-write, or git gone odd: this check is skipped, named
+            sys.stderr.write(f"console check: {type(e).__name__}: {e}\n")
+            return self._send(503, {"error": "the stale check could not run just now"})
+        self._send(200, out)
 
     def _board(self) -> None:
         try:
@@ -350,13 +473,15 @@ class OwnerHandler(_Handler):
         if not self._gate():
             return
         kind = OWNER_ROUTES.get(self.path)
-        if kind is None:
+        if kind is None and self.path != "/api/relock":
             return self._send(404, {"error": "not found"})
         # Browsers send Origin on every POST, same-origin included, so a missing one is refused too:
         # an absent header must not read as "trusted".
         if self.headers.get("Origin") != f"https://{self.console.cfg.hostname}":
             return self._send(403, {"error": "a write from another site, or with no Origin, is refused"})
         try:
+            if kind is None:
+                return self._send(200, {"records": self.console.relock(self._body())})
             self._send(200, {"record": self.console.write(kind, self._body(), "owner")})
         except RequestError as e:
             self._send(e.code, {"error": str(e)})
@@ -369,6 +494,8 @@ class AgentHandler(_Handler):
     def do_GET(self) -> None:
         if self.path == "/view":
             return self._send(200, self.console.payload())
+        if self.path == "/check":
+            return OwnerHandler._check(self)
         self._send(404, {"error": "not found"})
 
     def do_POST(self) -> None:
@@ -377,6 +504,8 @@ class AgentHandler(_Handler):
                 return self._send(200, {"cursor": self.console.set_cursor(self._body())})
             if self.path == "/working":  # the agent socket only: the owner's side cannot set it
                 return self._send(200, {"working": self.console.set_working(self._body())})
+            if self.path == "/reanchor":
+                return self._send(200, self.console.reanchor(self._body()))
             kind = AGENT_ROUTES.get(self.path)
             if kind is None:
                 return self._send(404, {"error": "not found"})

@@ -29,7 +29,8 @@ into the document that owns it.
  "options": [{"id": "a", "label": "Short name", "description": "What it does and costs."},
              {"id": "b", "label": "Another", "description": "..."}],
  "star": "a", "star_by": "architect",
- "source": "path/to/doc.md:120-140", "valid_if": []}
+ "source": "path/to/doc.md:120-140",
+ "valid_if": [{"kind": "excerpt", "path": "path/to/doc.md", "text": "The sentence the decision rests on."}]}
 ```
 
 - `item` is the item the question belongs to; it must already exist on the
@@ -39,6 +40,14 @@ into the document that owns it.
   it costs**. `star` is the recommended option and `star_by` whose
   recommendation it is (the fields and accepted names are as in the
   console-fork skill).
+- `valid_if` says what must stay true for the answer to stand. Prefer an
+  **excerpt** of the lines the question rests on:
+  `{"kind": "excerpt", "path": "path/to/doc.md", "text": "the exact cited sentence(s)"}`
+  (8 to 4000 characters, copied from the file). It holds while that text is
+  anywhere in the file, so moving it is fine and only a real edit makes the
+  answer stale. Do not hash a whole big living file (`file_sha256` of a
+  register, status file or log): every unrelated edit would make the answer
+  stale. The full list is in the console-fork skill.
 - Write in plain words the owner can decide from without opening the
   document. The document's shorthand (`Q-GE5`, `D-206`) goes in the
   description only with its meaning beside it.

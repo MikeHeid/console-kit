@@ -7,7 +7,8 @@ edited or removed. `append` enforces the rules that need the other records:
 - an answer names an existing question and picks only that question's options;
 - a lock locks the question's CURRENT answer, and locks it only once;
 - once an answer is locked, the next answer must name it in `supersedes` and
-  give a `reason`, because a lock is superseded, never undone (D3).
+  give a `reason`, because a lock is superseded, never undone (D3);
+- an `anchor` re-anchors only the question's CURRENT lock (0.5.0).
 
 A retried write (same content, same nonce) returns the stored record and
 writes nothing, so a flaky network cannot duplicate a message.
@@ -118,6 +119,13 @@ class Store:
     def lock_of(self, answer_id: str) -> dict | None:
         return next((r for r in self._records if r["type"] == "lock" and r["answer"] == answer_id), None)
 
+    def locks(self, qid: str) -> list[dict]:
+        return [r for r in self._records if r["type"] == "lock" and r["qid"] == qid]
+
+    def anchor_of(self, lock_id: str) -> dict | None:
+        """The latest `anchor` record for this lock, or None (0.5.0)."""
+        return next((r for r in reversed(self._records) if r["type"] == "anchor" and r["lock"] == lock_id), None)
+
     # -- writing -------------------------------------------------------------
 
     def append(self, rec: dict) -> dict:
@@ -163,6 +171,8 @@ class Store:
             self._check_answer(rec)
         elif kind == "lock":
             self._check_lock(rec)
+        elif kind == "anchor":
+            self._check_anchor(rec)
 
     def _check_answer(self, rec: dict) -> None:
         q = self.question(rec["qid"])
@@ -245,6 +255,15 @@ class Store:
             raise StoreError(f"answer {a['id']} is not the current answer of {rec['qid']}; lock the current one")
         if self.lock_of(a["id"]):
             raise StoreError(f"answer {a['id']} is already locked")
+
+    def _check_anchor(self, rec: dict) -> None:
+        lk = self._by_id.get(rec["lock"])
+        if lk is None or lk["type"] != "lock" or lk["qid"] != rec["qid"]:
+            raise StoreError(f"lock {rec['lock']!r} is not a lock on {rec['qid']}")
+        head = self.head(rec["qid"])
+        if head is None or head["id"] != lk["answer"]:
+            raise StoreError(f"lock {lk['id']} is not on the current answer of {rec['qid']}; "
+                             f"only the current lock is re-anchored")
 
     def _write(self, rec: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

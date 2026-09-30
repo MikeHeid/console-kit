@@ -60,11 +60,45 @@ and bring any follow-up questions back to the same item. The locked answer
 stands; a seat that finds its premise false says so in a question, and only
 you supersede it.
 
+### When a locked answer goes stale
+
+A question says what must stay true for its answer to stand (`valid_if`):
+
+- an **`excerpt`**: the text the question cites, which must still be in the file;
+- a **`file_sha256`**: the whole file, byte for byte;
+- an **`item_status`**: an item's status on your task list.
+
+An `excerpt` is found wherever it sits in the file. Moving it, or re-wrapping
+it, is not a change. Editing or deleting it is. A whole-file hash of a big file
+that keeps changing goes stale after almost any unrelated edit, so questions
+should cite an `excerpt` instead.
+
+On a stale answer, **Why stale?** says which check failed and why, in plain
+words. For cited text, it also shows the closest text now in the file.
+
+**Still holds: re-lock…** keeps your answer word for word and locks it again.
+The new lock is checked against the files as they are now: the server
+re-hashes whole files, and keeps each cited excerpt that is still there. The
+page never supplies these checks. Changing your answer and locking it also
+re-anchors it.
+
+For locks made before 0.5.0, run `agent.py reanchor --dry-run`, then
+`agent.py reanchor`. It turns a stale whole-file hash into an excerpt only
+with evidence:
+
+1. the question names a line range in that file;
+2. git history holds the exact version the answer was locked against;
+3. those lines, as they were then, are still in the file now, exactly once.
+
+Anything else stays stale and is listed with the reason. Each re-anchor is a
+new record in the store, and nothing already written changes.
+
 - **`server.py`** serves one page (yours) with the console injected. It
   refuses every request without a valid Access token, loopback included.
 - **`agent.py`** is the agent's side: `view`, `ask` (one question or a batch), `reply`, `inbox`,
   `working` (shows you "agent active" on the items it has picked up),
-  `synced`, `fork-context`, and `register`, which **only you** run.
+  `synced`, `fork-context`, `check` (why each stale answer is stale), `reanchor`,
+  and `register`, which **only you** run.
 - **`fold.py`** writes locked answers into your project through the adapter.
 - **`plugin/`** holds the Claude Code plugin: the hook, the skills and the
   committee agents.

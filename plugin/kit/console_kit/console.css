@@ -377,6 +377,30 @@
   padding-left: 18px;
   font-size: 12px;
 }
+.ck-stale-banner .ck-actions { margin-top: 8px; }
+/* "Why stale?" (0.5.0): body text on the page's own colours, so it keeps AA contrast */
+.ck-why {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--c-surface);
+  color: var(--c-fg);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+}
+.ck-why-list { margin: 0; padding-left: 18px; }
+.ck-why-list li + li { margin-top: 6px; }
+.ck-why-diff {
+  margin: 4px 0 0 0;
+  padding: 6px 8px;
+  max-height: 16em;
+  overflow: auto;
+  white-space: pre;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--c-surface-alt);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+}
+.ck-stale-banner .ck-confirm { color: var(--c-fg); background: var(--c-surface); }
 
 /* --- Confirmation step --- */
 .ck-confirm {
