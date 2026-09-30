@@ -1394,5 +1394,236 @@ class EvidenceReadLimitTests(_Live, unittest.TestCase):
         self.assertIn("is over 2 MiB, so it is not read", out["error"])
 
 
+# -- 0.8.0: roar, refine/drill, tags, transcripts and visuals through the real server ------
+
+MOCK = ("<!doctype html><html><head><style>h1{color:#123}</style></head><body><h1>Grid mock</h1>"
+        "<script>document.body.setAttribute('data-ran','1')</script></body></html>")
+
+
+class Phase4Tests(_Live, unittest.TestCase):
+    CONFIG = {"specs_dir": "specs/", "visuals_dir": "visuals/", "next_step": {"refine": "refine", "drill": "drill"}}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.root = d
+        (d / "page.html").write_text(PAGE)
+        (d / "specs").mkdir()
+        (d / "specs/owner-console.md").write_text("# Owner console\n\nThe console is a page.\n")
+        os.utime(d / "specs/owner-console.md", (1_600_000_000, 1_600_000_000))
+        (d / ".console-kit.json").write_text(json.dumps(self.CONFIG))
+        self.cfg = SV.Config(root=d, page=d / "page.html", state=d / "state", adapter=d / "unused.py",
+                             team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="test")
+        self.console = SV.Console(self.cfg, FakeAdapter())
+        self.console.seed()
+        verify = SV.access_verifier(TEAM, AUD, key_for=lambda _t: KEY.public_key())
+        self.owner = SV.owner_server(self.console, verify, 0)
+        self.port = self.owner.server_address[1]
+        threading.Thread(target=self.owner.serve_forever, daemon=True).start()
+        self.agent = SV.agent_server(self.console)
+        threading.Thread(target=self.agent.serve_forever, daemon=True).start()
+
+    def raw(self, path, tok=True):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("GET", path, headers={"Cf-Access-Jwt-Assertion": token()} if tok else {})
+        r = conn.getresponse()
+        body = r.read()
+        headers = {k.lower(): v for k, v in r.getheaders()}
+        conn.close()
+        return r.status, headers, body
+
+    def lock_seed(self):
+        code, a = self.req("POST", "/api/answer", self.answer(), tok=token())
+        self.assertEqual(code, 200, a)
+        code, lk = self.req("POST", "/api/lock", {"qid": "LANE.1/Q1", "answer": a["record"]["id"],
+                                                  "nonce": "locknonce01"}, tok=token())
+        self.assertEqual(code, 200, lk)
+
+    def visual_request(self):
+        return self.owner_msg(item="LANE.1", intent="visual", text="The grid at phone width")
+
+    def post_visual(self, req_id, content=MOCK, fmt="html", **over):
+        body = {"request": req_id, "format": fmt, "title": "Grid at 375 px", "content": content,
+                "text": "One column per zone; the session block collapses.", "nonce": "vis" + os.urandom(6).hex()}
+        body.update(over)
+        return self.agent_post("/visual", body)
+
+    # -- roar and the other kinds of fork -------------------------------------------------
+
+    def test_a_second_roar_is_refused_by_the_server_naming_the_first(self):
+        # Catches: a once-per-question rule kept only on the page (a second tab, or a hand-made
+        # POST, would run six more agents).
+        self.lock_seed()
+        first = self.owner_msg(item="LANE.1", intent="fork", mode="tighten", about_qid="LANE.1/Q1", roles=["roar"],
+                               text="roar it")
+        code, out = self.req("POST", "/api/message", {"item": "LANE.1", "intent": "fork", "mode": "tighten",
+                                                      "about_qid": "LANE.1/Q1", "roles": ["roar"], "text": "again",
+                                                      "nonce": "roaragain01"}, tok=token())
+        self.assertEqual(code, 400)
+        self.assertIn(first["id"], out["error"])
+        self.assertIn("at most once per question", out["error"])
+        # The doorbell rang once, for the first roar only.
+        self.assertEqual([b.get("intent") for b in self.doorbell() if b.get("intent") == "fork"], ["fork"])
+
+    def test_a_transcript_is_stored_whole_or_refused_by_name(self):
+        # Catches: an agent door that still caps bodies at 64 KiB (a real transcript could never
+        # arrive) and a server that trims one over the cap instead of refusing it.
+        self.lock_seed()
+        r = self.owner_msg(item="LANE.1", intent="fork", mode="tighten", about_qid="LANE.1/Q1", roles=["roar"],
+                           text="roar it")
+        big = "é" * (SV.S.MAX_TRANSCRIPT // 2)       # 48 KiB of UTF-8, ~290 KiB as escaped JSON
+        self.assertEqual(len(big.encode()), SV.S.MAX_TRANSCRIPT)
+        code, out = self.agent_post("/transcript", {"fork": r["id"], "text": big + "é", "nonce": "transcript01"})
+        self.assertEqual(code, 400)
+        self.assertIn("not truncated", out["error"])
+        code, out = self.agent_post("/transcript", {"fork": r["id"], "text": big, "nonce": "transcript02"})
+        self.assertEqual(code, 200, out)
+        view = self.get("/api/view")[1]["view"]
+        self.assertEqual(view["transcripts"][r["id"]]["text"], big)
+        self.assertEqual(view["forks"][r["id"]]["transcript"], out["record"]["id"])
+
+    def test_refine_and_drill_are_owner_forks_after_a_lock(self):
+        # Catches: a refine requested before the answer is locked ("neither writes before a lock").
+        code, out = self.req("POST", "/api/message", {"item": "LANE.1", "intent": "fork", "mode": "tighten",
+                                                      "step": "refine", "about_qid": "LANE.1/Q1",
+                                                      "text": "refine", "nonce": "refine00001"}, tok=token())
+        self.assertEqual(code, 400)
+        self.assertIn("no locked answer", out["error"])
+        self.lock_seed()
+        rec = self.owner_msg(item="LANE.1", intent="fork", mode="tighten", step="refine", about_qid="LANE.1/Q1",
+                             text="refine")
+        self.assertEqual(rec["step"], "refine")
+        self.assertEqual(self.doorbell()[-1]["intent"], "fork")
+
+    # -- the tags ride on /api/view ----------------------------------------------------------
+
+    def test_the_view_carries_tags_and_the_project_dirs(self):
+        # Catches: tags computed only in a test (never served), or config that never reaches the page.
+        self.lock_seed()          # the seed cites architect/40-specs/..., outside this specs_dir: no refine
+        view = self.get("/api/view")[1]["view"]
+        self.assertEqual(view["config"], {"specs_dir": "specs", "visuals_dir": "visuals"})
+        self.assertIn("questions", view["tags"])
+        # The seed picked "a" against the ★ "b": deliberate, with its reason.
+        [t] = view["tags"]["questions"]["LANE.1/Q1"]
+        self.assertEqual(t["step"], "deliberate")
+        self.assertIn("went against the ★", t["reason"])
+
+    def test_a_bad_project_config_stops_the_server_by_name(self):
+        (self.root / ".console-kit.json").write_text(json.dumps({"visuals_dir": "../out"}))
+        from console_kit import projectcfg as PC
+        with self.assertRaisesRegex(PC.ConfigError, "visuals_dir"):
+            SV.Console(self.cfg, FakeAdapter())
+
+    # -- visuals -----------------------------------------------------------------------------
+
+    def test_a_visual_is_written_indexed_and_served_sandboxed(self):
+        # Catches: a mock served as the console's own HTML (its script would run as the owner),
+        # a policy that lets it load anything, a route that skips the gate, and a file or index
+        # that is not where the doc says.
+        req = self.visual_request()
+        self.assertEqual(self.doorbell()[-1]["intent"], "visual")
+        code, out = self.post_visual(req["id"])
+        self.assertEqual(code, 200, out)
+        rec = out["record"]
+        self.assertTrue(rec["path"].startswith("visuals/LANE.1/") and rec["path"].endswith(".html"))
+        self.assertEqual((self.root / rec["path"]).read_text(), MOCK)
+        doc = (self.root / rec["doc_path"]).read_text()
+        self.assertIn("The grid at phone width", doc)
+        self.assertIn(rec["path"].rsplit("/", 1)[1], doc)
+        index = (self.root / "visuals/INDEX.md").read_text()
+        self.assertIn("Grid at 375 px", index)
+        self.assertIn(rec["path"][len("visuals/"):], index)
+        code, h, body = self.raw(f"/api/visual?id={rec['id']}")
+        self.assertEqual((code, body.decode()), (200, MOCK))
+        self.assertTrue(h["content-type"].startswith("text/html"))
+        csp = h["content-security-policy"]
+        for part in ("sandbox;", "default-src 'none'", "frame-ancestors 'self'", "form-action 'none'"):
+            self.assertIn(part, csp)
+        self.assertNotIn("allow-scripts", csp)
+        self.assertNotIn("allow-same-origin", csp)
+        self.assertEqual(h["x-content-type-options"], "nosniff")
+        self.assertEqual(self.raw(f"/api/visual?id={rec['id']}", tok=False)[0], 403)
+        view = self.get("/api/view")[1]["view"]
+        self.assertEqual(view["visuals"]["LANE.1"][0]["id"], rec["id"])
+        self.assertNotIn("LANE.1", view["awaiting_agent"])     # the visual answered the request
+
+    def test_a_mermaid_visual_is_served_as_plain_text(self):
+        req = self.visual_request()
+        code, out = self.post_visual(req["id"], content="graph TD\n  A-->B\n", fmt="mermaid")
+        self.assertEqual(code, 200, out)
+        self.assertTrue(out["record"]["path"].endswith(".mmd"))
+        code, h, body = self.raw(f"/api/visual?id={out['record']['id']}")
+        self.assertEqual((code, body), (200, b"graph TD\n  A-->B\n"))
+        self.assertTrue(h["content-type"].startswith("text/plain"))
+        self.assertIn("sandbox", h["content-security-policy"])
+
+    def test_a_refused_visual_writes_no_file(self):
+        # Catches: files written before the store's rules run (a refused visual would still land in
+        # the project), and an oversized visual cut to fit.
+        note = self.owner_msg(item="LANE.1", text="just a note")
+        code, out = self.post_visual(note["id"])
+        self.assertEqual(code, 400)
+        self.assertIn("not an owner visual request", out["error"])
+        req = self.visual_request()
+        code, out = self.post_visual(req["id"], title="two\nlines")
+        self.assertEqual(code, 400)
+        self.assertIn("one line", out["error"])
+        code, out = self.post_visual(req["id"], content="x" * (SV.S.MAX_VISUAL + 1))
+        self.assertEqual(code, 413)
+        self.assertIn("refused, not cut", out["error"])
+        self.assertFalse((self.root / "visuals").exists())
+
+    def test_a_changed_or_escaped_file_is_not_served(self):
+        # Catches: serving whatever is at the path now (an edit, or a symlink swapped in that points
+        # outside the project, would reach the owner's page as the agent's visual).
+        req = self.visual_request()
+        rec = self.post_visual(req["id"])[1]["record"]
+        p = self.root / rec["path"]
+        p.write_text(MOCK.replace("Grid", "Evil"))
+        code, out = self.get(f"/api/visual?id={rec['id']}")
+        self.assertEqual(code, 409)
+        self.assertIn("changed since", out["error"])
+        outside = Path(self.tmp.name + "-outside.html")
+        outside.write_text(MOCK)
+        self.addCleanup(outside.unlink)
+        p.unlink()
+        p.symlink_to(outside)
+        code, out = self.get(f"/api/visual?id={rec['id']}")
+        self.assertEqual(code, 409)
+        self.assertIn("symlink", out["error"])
+        self.assertEqual(self.get("/api/visual?id=" + "0" * 24)[0], 404)
+        self.assertEqual(self.get("/api/visual?id=../../etc/passwd")[0], 400)
+
+    def test_without_visuals_dir_a_visual_is_refused_by_name(self):
+        (self.root / ".console-kit.json").write_text(json.dumps({}))
+        self.console.project = __import__("console_kit.projectcfg", fromlist=["load"]).load(self.root)
+        req = self.visual_request()
+        code, out = self.post_visual(req["id"])
+        self.assertEqual(code, 400)
+        self.assertIn("no visuals_dir", out["error"])
+
+    def test_the_agent_cli_posts_a_visual_and_a_transcript(self):
+        # Catches: subcommands that exist in --help but send the wrong shape.
+        import subprocess
+        req = self.visual_request()
+        work = self.root / "work"
+        work.mkdir()
+        (work / "v.mmd").write_text("graph LR\n  A-->B\n")
+        (work / "v.md").write_text("A to B.")
+        agent_py = str(Path(SV.__file__).resolve().parent.parent / "agent.py")
+        r = subprocess.run([sys.executable, agent_py, "--state", str(self.cfg.state), "visual", req["id"],
+                            "--format", "mermaid", "--file", str(work / "v.mmd"), "--doc", str(work / "v.md"),
+                            "--title", "A to B"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn('"format": "mermaid"', r.stdout)
+        self.lock_seed()
+        f = self.owner_msg(item="LANE.1", intent="fork", mode="tighten", about_qid="LANE.1/Q1", roles=["roar"],
+                           text="roar")
+        (work / "t.md").write_text("# Round 1\n...\n")
+        r = subprocess.run([sys.executable, agent_py, "--state", str(self.cfg.state), "transcript", f["id"],
+                            str(work / "t.md")], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

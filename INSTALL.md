@@ -125,7 +125,24 @@ serves the new page and routes (`/api/wait`, `/api/feed`, `/api/evidence`,
 `agent.py watch` now also wakes on a chat message; update the plugin so its
 console-process skill answers them.
 
-**Going back to an older kit.** A 0.6.0 kit refuses a store that holds a
+**Upgrading to 0.8.0.** Nothing to migrate. Two new record kinds, both
+written by the agent (`transcript`, a roar panel's transcript; `visual`, an
+agent-drawn Mermaid block or HTML mock), and three new message shapes (intent
+`visual`, the seat `roar`, and `step: refine|drill`). Add the optional
+`specs_dir`, `visuals_dir` and `next_step` keys to each project's
+`.console-kit.json` (`kit/docs/ADAPTER.md` explains them), then restart the
+server: it reads them at start, and refuses a bad one by name. A session's
+`agent.py watch` now also wakes on a visual request; update the plugin so its
+skills (console-fork's roar, refine and drill sections, and the new
+console-visual skill) answer them.
+
+**Going back to an older kit.** A 0.7.0 kit refuses a store that holds any
+0.8.0 record, and names it (`unknown record type 'transcript'`, `unknown
+record type 'visual'`, `intent 'visual' is not one of fork, process, chat`,
+`role(s) ['roar'] are not one of ...`, `message: unknown field(s) step`). The
+first such record is written when you request a visual or pick Roar, Refine
+or Drill; after that, going back means 0.8.0 or later.
+A 0.6.0 kit refuses a store that holds a
 0.7.0 chat message or a question with evidence, and names what it cannot
 read (`intent 'chat' is not one of fork, process`, `item '@chat' is not an
 item id`, `question: unknown field(s) evidence`). The first such record is

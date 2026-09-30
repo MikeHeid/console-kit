@@ -776,8 +776,13 @@ class AnswerFollowUpTests(unittest.TestCase):
             for width in (1280, 375):
                 with self.subTest(browser=kind, width=width):
                     page, posted = self._open(kind, width)
+                    # 0.8.0: the follow-up is one of three next steps, behind "Next step ▾".
+                    nxt = page.locator("button[aria-label^='Next step for']")
+                    self.assertEqual(nxt.count(), 1)  # Q1 is locked; Q2 is unanswered and offers none
+                    nxt.focus()
+                    page.keyboard.press("Enter")
                     btns = page.locator("button[aria-label^='Follow up with other seats on']")
-                    self.assertEqual(btns.count(), 1)  # Q1 is locked; Q2 is unanswered and offers none
+                    self.assertEqual(btns.count(), 1)
                     btns.focus()
                     page.keyboard.press("Enter")  # keyboard, not a mouse
                     self.assertEqual(btns.get_attribute("aria-expanded"), "true")
@@ -1265,6 +1270,213 @@ class LiveConsoleTests(unittest.TestCase):
                     document.querySelector('.ck-item-btn .ck-ring-arc')].map(e => {
                       const s = getComputedStyle(e); return [s.animationName, s.transitionDuration]; })""")
                 self.assertEqual(names, [["none", "0s"], ["none", "0s"]])
+
+
+# -- 0.8.0: the Next step menu, tag chips, roar, and visuals, against the REAL server ------
+
+# A mock that tries everything a hostile page would: run a script in its own document,
+# reach the console through parent/top, post a message out, fire an inline handler, and
+# submit a form away. In an <iframe sandbox=""> served under a `sandbox` CSP, none may work.
+EVIL_MOCK = ("<!doctype html><html><head><style>h1{font:20px sans-serif}</style></head><body>"
+             "<h1 id='mock'>Grid mock</h1>"
+             "<script>document.body.setAttribute('data-ran','script');"
+             "try{parent.document.body.setAttribute('data-pwned','parent')}catch(e){}"
+             "try{top.document.title='pwned'}catch(e){}"
+             "try{parent.postMessage('pwned','*')}catch(e){}</script>"
+             "<img src='x' onerror=\"document.body.setAttribute('data-ran','img');parent.postMessage('img','*')\">"
+             "<form action='https://example.com/steal'><button>go</button></form></body></html>")
+MERMAID = 'graph TD\n  A["<img src=x onerror=alert(1)>"] --> B[Zone]\n'
+
+
+class NextStepAndVisualTests(unittest.TestCase):
+    """0.8.0: Next step ▾ (follow up / refine / drill), tag chips with reasons, roar once, visuals."""
+
+    setUpClass = classmethod(LiveConsoleTests.setUpClass.__func__)
+    tearDownClass = classmethod(LiveConsoleTests.tearDownClass.__func__)
+    page, agent_post, bell, assert_not_reloaded = (LiveConsoleTests.page, LiveConsoleTests.agent_post,
+                                                   LiveConsoleTests.bell, LiveConsoleTests.assert_not_reloaded)
+
+    def serve(self):
+        """LiveConsoleTests.serve, with a project that sets specs_dir and visuals_dir."""
+        import tempfile
+        from console_kit import server as SV
+        from test_server import AUD, HOSTNAME, KEY, TEAM, token
+        td = tempfile.mkdtemp(prefix="ck-p4-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(td, ignore_errors=True))
+        root = Path(td)
+        (root / "page.html").write_text(LIVE_HOST)
+        (root / "specs").mkdir()
+        (root / "specs/grid.md").write_text("# Grid\n\nA session block holds the cells.\n")
+        os.utime(root / "specs/grid.md", (1_600_000_000, 1_600_000_000))   # long before any lock
+        (root / ".console-kit.json").write_text(json.dumps({"specs_dir": "specs/", "visuals_dir": "visuals/"}))
+        cfg = SV.Config(root=root, page=root / "page.html", state=root / "state", adapter=root / "unused.py",
+                        team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="p4-test")
+        console = SV.Console(cfg, _LiveAdapter())
+        verify = SV.access_verifier(TEAM, AUD, key_for=lambda _t: KEY.public_key())
+        owner = SV.owner_server(console, verify, 0)
+        threading.Thread(target=owner.serve_forever, daemon=True).start()
+        agent = SV.agent_server(console)
+        threading.Thread(target=agent.serve_forever, daemon=True).start()
+        for srv in (owner, agent):
+            self.addCleanup(srv.server_close)
+            self.addCleanup(srv.shutdown)
+        self.tok, self.origin = token(), f"https://{HOSTNAME}"
+        self.SV, self.console, self.cfg = SV, console, cfg
+        return f"http://127.0.0.1:{owner.server_address[1]}/"
+
+    def locked_question(self, own_text="", picks=("leave",)):
+        """LANE.1/Q1 citing the spec, answered against the ★ in the owner's own words, and locked."""
+        self.agent_post("/question", {
+            "qid": "LANE.1/Q1", "item": "LANE.1", "text": "Where does the session block live?", "kind": "single",
+            "options": [{"id": "fix", "label": "Fix now"}, {"id": "record", "label": "Record in findings.md"},
+                        {"id": "leave", "label": "Leave it"}],
+            "star": "fix", "source": "specs/grid.md:3", "valid_if": [], "nonce": "p4question01"})
+        a = self.console.write("answer", {"qid": "LANE.1/Q1", "picks": list(picks), "own_text": own_text,
+                                          "nonce": "p4answer001"}, "owner")
+        self.console.write("lock", {"qid": "LANE.1/Q1", "answer": a["id"], "nonce": "p4lock00001"}, "owner")
+
+    def open_item(self, page):
+        page.click("details[id='item-LANE.1'] .ck-item-btn")
+        page.wait_for_selector(".ck-panel .ck-tools")
+
+    def shot(self, page, name, kind, width):
+        if os.environ.get("CONSOLE_KIT_SHOTS"):
+            page.locator(".ck-panel").screenshot(
+                path=str(Path(os.environ["CONSOLE_KIT_SHOTS"]) / f"{name}-{kind}-{width}.png"))
+
+    def forks(self):
+        return [r for r in self.console.store.records() if r["type"] == "message" and r.get("intent") == "fork"]
+
+    def test_tag_chips_say_why_and_next_step_starts_a_refine(self):
+        # Catches: chips worked out on the page (they would drift from the server's rules), a chip
+        # whose reason a screen reader never hears, a menu that offers the step but sends a plain
+        # follow-up, and a refine that forgets which answer it is about.
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    url = self.serve()
+                    self.locked_question(own_text="Keep the `ZoneMaster` out of the grid.")
+                    page = self.page(kind, width, url)
+                    self.open_item(page)
+                    page.wait_for_selector(".ck-question .ck-tag[data-step='refine']")
+                    chips = page.eval_on_selector_all(".ck-question .ck-tag", """cs => cs.map(c => ({
+                        step: c.dataset.step, title: c.title,
+                        shown: c.querySelector('[aria-hidden=true]').textContent,
+                        said: c.querySelector('.ck-sr-only').textContent }))""")
+                    self.assertEqual([c["step"] for c in chips], ["refine", "drill", "deliberate"])
+                    for c in chips:
+                        self.assertEqual(c["shown"], "→ " + c["step"])
+                        self.assertTrue(c["said"].startswith(f"Suggested next step, {c['step']}: "), c)
+                        self.assertTrue(c["said"].endswith(c["title"]), c)   # the reason, whole, both ways
+                    self.assertIn("cites specs/grid.md, not edited since you locked this", chips[0]["title"])
+                    self.assertIn("`ZoneMaster`", chips[1]["title"])
+                    self.assertIn("went against the ★ (Fix now)", chips[2]["title"])
+                    nxt = page.locator("button[aria-label^='Next step for']")
+                    nxt.click()
+                    self.assertEqual(nxt.get_attribute("aria-expanded"), "true")
+                    self.assertEqual(page.eval_on_selector_all(".ck-next-menu button", "bs => bs.map(b => b.dataset.step)"),
+                                     ["follow", "refine", "drill"])
+                    self.assertTrue(page.evaluate("document.activeElement.dataset.step === 'follow'"))  # focus moved in
+                    page.locator(".ck-next-menu button[data-step='refine']").click()
+                    form = page.locator(".ck-step-form[data-step='refine']")
+                    self.assertIn("It writes nothing before you lock", form.text_content())
+                    form.get_by_label("Note (optional)").fill("The spec still says the block floats.")
+                    self.shot(page, "next-step-refine", kind, width)
+                    self.assertFalse(page.evaluate(OVERFLOW))
+                    form.get_by_role("button", name="Start the refine").click()
+                    page.wait_for_function("document.querySelectorAll('.ck-step-form').length === 0")
+                    [f] = self.forks()
+                    self.assertEqual({k: f.get(k) for k in ("intent", "step", "about_qid", "mode", "roles", "text")},
+                                     {"intent": "fork", "step": "refine", "about_qid": "LANE.1/Q1", "mode": "tighten",
+                                      "roles": None, "text": "The spec still says the block floats."})
+                    page.wait_for_selector(".ck-fork-head:has-text('Refine')")
+                    self.assert_not_reloaded(page)
+
+    def test_a_second_roar_is_refused_on_the_page_naming_the_first(self):
+        # Catches: a roar allowed beside other seats, and a second roar the server lets through
+        # (the page would say "sent" and six agents would run again).
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    url = self.serve()
+                    self.locked_question(picks=("fix",))
+                    page = self.page(kind, width, url)
+                    self.open_item(page)
+
+                    def roar_once():
+                        if page.locator(".ck-next-menu").count() == 0:
+                            page.locator("button[aria-label^='Next step for']").click()
+                        page.locator(".ck-next-menu button[data-step='follow']").click()
+                        form = page.locator(".ck-followup")
+                        roar = form.locator("input[value='roar']")
+                        roar.check()
+                        self.assertTrue(form.get_by_label("DevOps").is_disabled())   # roar is called alone
+                        form.get_by_role("button", name="Send follow-up").click()
+                        return form
+
+                    roar_once()
+                    page.wait_for_function("document.querySelectorAll('.ck-followup').length === 0")
+                    [first] = self.forks()
+                    self.assertEqual(first["roles"], ["roar"])
+                    form = roar_once()
+                    page.wait_for_function("document.querySelector('.ck-followup .ck-error-msg').textContent !== ''")
+                    err = form.locator(".ck-error-msg").text_content()
+                    self.assertIn(first["id"], err)
+                    self.assertIn("at most once per question", err)
+                    self.assertEqual(len(self.forks()), 1)
+                    self.shot(page, "roar-refused", kind, width)
+                    self.assertFalse(page.evaluate(OVERFLOW))
+
+    def test_a_visual_renders_only_in_a_sandbox_and_its_script_cannot_reach_the_page(self):
+        # Catches: a mock injected into the page (its script runs as the owner), an iframe with
+        # allow-scripts or allow-same-origin (it could read the console), a mock whose script runs
+        # when its URL is opened on its own, and Mermaid source parsed as markup.
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    url = self.serve()
+                    page = self.page(kind, width, url)
+                    page.evaluate("window.__msgs = []; addEventListener('message', e => __msgs.push(String(e.data)))")
+                    self.open_item(page)
+                    page.locator("button[aria-label='Request a visual of LANE.1']").click()
+                    form = page.locator(".ck-visual-form")
+                    form.get_by_label("What should it show?").fill("The grid at phone width")
+                    form.get_by_role("button", name="Request the visual").click()
+                    page.wait_for_selector(".ck-visual-request")
+                    [req] = [r for r in self.console.store.records() if r.get("intent") == "visual"]
+                    self.assertEqual(self.bell()[-1]["intent"], "visual")
+                    html = self.agent_post("/visual", {"request": req["id"], "format": "html", "title": "Grid mock",
+                                                       "content": EVIL_MOCK, "text": "One column per zone.",
+                                                       "nonce": "p4visual001"})
+                    self.agent_post("/visual", {"request": req["id"], "format": "mermaid", "title": "Zones",
+                                                "content": MERMAID, "text": "Zones feed the grid.",
+                                                "nonce": "p4visual002"})
+                    frame_el = page.wait_for_selector("iframe.ck-visual-frame", timeout=10000)
+                    self.assertEqual(frame_el.get_attribute("sandbox"), "")          # grants nothing
+                    frame = page.frame_locator("iframe.ck-visual-frame")
+                    self.assertEqual(frame.locator("#mock").text_content(timeout=10000), "Grid mock")  # it rendered
+                    page.wait_for_timeout(500)                                      # time for any script to act
+                    self.assertIsNone(frame.locator("body").get_attribute("data-ran"))
+                    self.assertIsNone(page.evaluate("document.body.getAttribute('data-pwned')"))
+                    self.assertNotEqual(page.title(), "pwned")
+                    self.assertEqual(page.evaluate("window.__msgs"), [])
+                    self.assertEqual(page.locator("#mock").count(), 0)            # nothing of it in the page itself
+                    code = page.locator(".ck-visual[data-format='mermaid'] .ck-visual-code")
+                    page.wait_for_function("document.querySelector(\".ck-visual[data-format='mermaid'] "
+                                           ".ck-visual-code\").textContent.startsWith('graph TD')")
+                    self.assertEqual(code.text_content(), MERMAID)                  # as text, markup and all
+                    self.assertEqual(code.locator("img").count(), 0)
+                    self.shot(page, "visual", kind, width)
+                    self.assertFalse(page.evaluate(OVERFLOW))
+                    # Opened on its own, the mock is still sandboxed by the server's CSP: no script runs.
+                    alone = page.context.new_page()
+                    alone.route("**/*", lambda route: route.continue_(
+                        headers={**route.request.headers, "cf-access-jwt-assertion": self.tok}))
+                    alone.goto(url + "api/visual?id=" + html["id"])
+                    alone.wait_for_selector("#mock")
+                    alone.wait_for_timeout(300)
+                    self.assertIsNone(alone.locator("body").get_attribute("data-ran"))
+                    self.assert_not_reloaded(page)
 
 
 if __name__ == "__main__":

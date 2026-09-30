@@ -63,7 +63,16 @@
   const MODES = ['explore', 'tighten'];
   const ROSTER = ['devops', 'ux', 'adversarial', 'security', 'architect', 'analyst'];
   const ROSTER_LABEL = { devops: 'DevOps', ux: 'UX', adversarial: 'Adversarial (red team)',
-    security: 'Security', architect: 'Architect', analyst: 'Analyst' };
+    security: 'Security', architect: 'Architect', analyst: 'Analyst', roar: 'Roar panel' };
+  // 0.8.0, mirrors schema.py: the roar seat (alone, on one answer, once per question)
+  // and the two other kinds of fork. The server refuses anything else by name.
+  const ROAR = 'roar';
+  const STEP_WORDS = {
+    refine: { title: 'Refine', mode: 'tighten',
+      what: 'revise the spec or document this answer rests on, to match what you decided' },
+    drill: { title: 'Drill', mode: 'explore',
+      what: 'drill into what this leaves unspecified and draft the questions a spec for it needs' }
+  };
   const OTHER_ROLE = /^[A-Za-z0-9][A-Za-z0-9 \-]{0,39}$/;
   const MAX_ROLES = 3;
   const STATE_WORDS = { awaiting_you: 'unanswered', unlocked: 'answered, not locked',
@@ -863,6 +872,7 @@
       }
 
       body.appendChild(renderForks(itemId));
+      body.appendChild(renderVisuals(itemId));
 
       // Thread
       body.appendChild(renderThread(itemId));
@@ -980,6 +990,8 @@
       srcEl.textContent = qData.source;
       textCol.appendChild(srcEl);
     }
+    const chips = tagChips(questionTags(qData.qid));
+    if (chips) textCol.appendChild(chips);
     hdr.appendChild(textCol);
     card.appendChild(hdr);
 
@@ -1034,19 +1046,28 @@
         bodyEl.appendChild(renderAnswerForm(q, true, headAnswer.id));
       });
       actions.appendChild(changeBtn);
-      // Follow up on this locked answer with other seats (0.4.0).
-      const [fuBtn, fuSlot] = disclosure('⑂ Follow up…', 'ask-' + qData.qid, () => renderAnswerFollowUp(q));
-      fuBtn.setAttribute('aria-label', 'Follow up with other seats on: ' + truncText);
-      actions.appendChild(fuBtn);
+      // "Next step ▾" (0.8.0): follow up with seats (0.4.0; roar among them), refine or drill.
+      const target = { item: qData.item, about_qid: qData.qid };
+      const [nextBtn, nextPanel] = nextStepMenu('next-' + qData.qid, truncText, [
+        { id: 'follow', key: 'ask-' + qData.qid, label: '⑂ Follow up…',
+          aria: 'Follow up with other seats on: ' + truncText, build: () => renderAnswerFollowUp(q) },
+        { id: 'refine', key: 'refine-' + qData.qid, label: 'Refine…', aria: 'Refine from: ' + truncText,
+          build: () => renderStepForm(target, 'refine', 'refine-' + qData.qid) },
+        { id: 'drill', key: 'drill-' + qData.qid, label: 'Drill…', aria: 'Drill from: ' + truncText,
+          build: () => renderStepForm(target, 'drill', 'drill-' + qData.qid) }
+      ]);
+      actions.appendChild(nextBtn);
       bodyEl.appendChild(actions);
-      bodyEl.appendChild(fuSlot);
+      bodyEl.appendChild(nextPanel);
       const asked = Object.values(view.forks).filter(f => f.message.about_qid === qData.qid)
         .sort((a, b) => b.message.seq - a.message.seq);
       if (asked.length) {
         const f = asked[0];
-        const who = (f.message.roles || []).map(r => ROSTER_LABEL[r] || r.replace(/^other:/, '')).join(', ');
+        const who = f.message.step ? 'a ' + f.message.step
+          : (f.message.roles || []).map(r => ROSTER_LABEL[r] || r.replace(/^other:/, '')).join(', ');
         bodyEl.appendChild(el('p', { className: 'ck-muted' }, [
-          '⑂ Follow-up with ' + who + ' ' + relTime(f.message.ts) + ': ' + (f.questions.length
+          '⑂ ' + (f.message.step ? STEP_WORDS[f.message.step].title : 'Follow-up with ' + who) + ' ' +
+          relTime(f.message.ts) + ': ' + (f.questions.length
             ? f.questions.length + ' question' + (f.questions.length === 1 ? '' : 's') + ' back (' + f.questions.join(', ') + ').'
             : 'waiting for the seats\' questions.')]));
       }
@@ -1100,8 +1121,226 @@
       bodyEl.appendChild(hist);
     }
 
+    // A question a roar panel wrote carries that panel's transcript, collapsed (0.8.0).
+    const tr = qData.forked_from ? transcriptBlock(qData.forked_from) : null;
+    if (tr) bodyEl.appendChild(tr);
+
     card.appendChild(bodyEl);
     return card;
+  }
+
+  // ---------------------------------------------------------------------------
+  // 0.8.0: suggested next steps, the Next step menu, roar transcripts, visuals.
+  // Everything from the store reaches the page through textContent (el() makes
+  // text nodes) or, for an HTML mock, only through <iframe sandbox="">.
+  // ---------------------------------------------------------------------------
+
+  // The server's suggested next steps (tags.py): data with a reason, never worked out here.
+  function questionTags(qid) {
+    return (view && view.tags && view.tags.questions && view.tags.questions[qid]) || [];
+  }
+  function forkTags(fid) {
+    return (view && view.tags && view.tags.forks && view.tags.forks[fid]) || [];
+  }
+  // A small chip per tag. Its visible word is the step; its accessible text is the step
+  // AND the reason, so a screen reader hears why, and a pointer's tooltip shows the reason.
+  function tagChips(tags) {
+    if (!tags || !tags.length) return null;
+    const row = el('div', { className: 'ck-tags' });
+    for (const t of tags) {
+      const chip = el('span', { className: 'ck-tag', dataStep: String(t.step), title: String(t.reason) });
+      chip.appendChild(el('span', { 'aria-hidden': 'true' }, ['→ ' + t.step]));
+      chip.appendChild(el('span', { className: 'ck-sr-only' }, ['Suggested next step, ' + t.step + ': ' + t.reason]));
+      row.appendChild(chip);
+    }
+    return row;
+  }
+
+  // "Next step ▾": one button that opens the three kinds of next step, each its own form.
+  // Open state is remembered by key, like every disclosure, so a live redraw keeps it.
+  function nextStepMenu(key, forText, choices) {
+    const btn = el('button', { className: 'ck-btn ck-next-btn', type: 'button', 'aria-expanded': 'false',
+      'aria-label': 'Next step for: ' + forText }, ['Next step ▾']);
+    const panel = el('div', { className: 'ck-next-panel' });
+    const show = open => {
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      btn.textContent = open ? 'Next step ▴' : 'Next step ▾';
+      panel.textContent = '';
+      if (!open) return;
+      const row = el('div', { className: 'ck-actions ck-next-menu', role: 'group', 'aria-label': 'Next step: pick one' });
+      const slots = [];
+      for (const c of choices) {
+        const [b, s] = disclosure(c.label, c.key, c.build);
+        b.setAttribute('aria-label', c.aria);
+        b.setAttribute('data-step', c.id);
+        row.appendChild(b);
+        slots.push(s);
+      }
+      panel.appendChild(row);
+      for (const s of slots) panel.appendChild(s);
+    };
+    btn.addEventListener('click', () => {
+      const open = !openForms.has(key);
+      if (open) openForms.add(key); else openForms.delete(key);
+      show(open);
+      if (open) { const first = panel.querySelector('button'); if (first) first.focus(); }
+    });
+    if (openForms.has(key)) show(true);
+    return [btn, panel];
+  }
+
+  // A refine or drill (0.8.0): one owner fork message with `step`, on one locked answer
+  // (about_qid) or one round's answers (follow_up_of). The session runs the project's own
+  // skill for it; nothing is written into the project before you lock what comes back.
+  function renderStepForm(target, step, key) {
+    const w = STEP_WORDS[step];
+    const id = key.replace(/[^A-Za-z0-9_-]/g, '-');
+    const scope = target.about_qid ? 'your locked answer to ' + target.about_qid : 'this round\'s answers';
+    const form = el('div', { className: 'ck-fork-form ck-step-form', dataStep: step, role: 'group',
+      'aria-labelledby': id + '-h' });
+    form.appendChild(el('div', { className: 'ck-confirm-heading', id: id + '-h' }, [w.title + ' from ' + scope]));
+    form.appendChild(el('p', { className: 'ck-muted' }, [
+      'The agent runs the project\'s ' + step + ' skill on ' + scope + ', to ' + w.what + '. It writes nothing ' +
+      'before you lock: what it finds comes back here as questions, and a spec lands by pull request.']));
+    const noteId = id + '-note';
+    const text = el('textarea', { className: 'ck-textarea', rows: '2', id: noteId,
+      placeholder: step === 'refine' ? 'e.g. The spec still says 16 columns' : 'e.g. What does a zone own?' });
+    if (draftTexts[key] !== undefined) text.value = draftTexts[key];
+    text.addEventListener('input', () => { draftTexts[key] = text.value; });
+    form.appendChild(el('label', { for: noteId, className: 'ck-field-label' }, ['Note (optional)']));
+    form.appendChild(text);
+    const err = el('p', { className: 'ck-error-msg', role: 'status', 'aria-live': 'polite' });
+    form.appendChild(err);
+    const send = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' }, ['Start the ' + step]);
+    const cancel = el('button', { className: 'ck-btn', type: 'button' }, ['Cancel']);
+    cancel.addEventListener('click', () => { openForms.delete(key); renderPanel(); });
+    send.addEventListener('click', async () => {
+      err.textContent = '';
+      const body = { item: target.item, intent: 'fork', mode: w.mode, step: step,
+        text: text.value.trim() || (w.title + ' from ' + scope + '.') };
+      if (target.about_qid) body.about_qid = target.about_qid;
+      else body.follow_up_of = target.follow_up_of;
+      send.disabled = true;
+      const result = await apiPost('/message', body, key);
+      send.disabled = false;
+      if (result.error) {
+        err.textContent = 'Not sent: ' + result.error;
+        announce('Error: ' + result.error);
+      } else {
+        delete draftTexts[key];
+        openForms.delete(key);
+        announce(w.title + ' requested.');
+        renderPanel();
+      }
+    });
+    form.appendChild(el('div', { className: 'ck-actions' }, [send, cancel]));
+    return form;
+  }
+
+  // A roar panel's transcript, collapsed; its text only ever as text.
+  function transcriptBlock(forkId) {
+    const t = view && view.transcripts ? view.transcripts[forkId] : null;
+    if (!t) return null;
+    const kb = Math.max(1, Math.round(t.bytes / 1024));
+    const det = el('details', { className: 'ck-transcript' }, [
+      el('summary', {}, ['Roar transcript · three rounds · ' + kb + ' KB · ' + relTime(t.ts)])]);
+    const pre = el('pre', { className: 'ck-transcript-text' });
+    pre.textContent = t.text;
+    det.appendChild(pre);
+    return det;
+  }
+
+  // "Request a visual" (0.8.0): one owner message, intent 'visual', on the item.
+  function renderVisualForm(itemId) {
+    const key = 'vis-' + itemId;
+    const id = key.replace(/[^A-Za-z0-9_-]/g, '-');
+    const form = el('div', { className: 'ck-fork-form ck-visual-form', role: 'group', 'aria-labelledby': id + '-h' });
+    form.appendChild(el('div', { className: 'ck-confirm-heading', id: id + '-h' }, ['Request a visual of ' + itemId]));
+    const where = view.config && view.config.visuals_dir;
+    form.appendChild(el('p', { className: 'ck-muted' }, [where
+      ? 'An agent answers with a Mermaid diagram or a static HTML mock and a short doc, stored under ' + where +
+        '/ and listed in its INDEX.md. It shows here, a mock only inside a sandbox that runs no script.'
+      : 'This project sets no visuals_dir in .console-kit.json, so an agent has nowhere to store a visual yet.']));
+    const noteId = id + '-note';
+    const text = el('textarea', { className: 'ck-textarea', rows: '3', id: noteId,
+      placeholder: 'e.g. The grid page at phone width, with the session block open' });
+    if (draftTexts[key] !== undefined) text.value = draftTexts[key];
+    text.addEventListener('input', () => { draftTexts[key] = text.value; });
+    form.appendChild(el('label', { for: noteId, className: 'ck-field-label' }, ['What should it show?']));
+    form.appendChild(text);
+    const err = el('p', { className: 'ck-error-msg', role: 'status', 'aria-live': 'polite' });
+    form.appendChild(err);
+    const send = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' }, ['Request the visual']);
+    if (!where) send.disabled = true;
+    send.addEventListener('click', async () => {
+      err.textContent = '';
+      if (!text.value.trim()) { err.textContent = 'Say what the visual should show.'; announce(err.textContent); return; }
+      send.disabled = true;
+      const result = await apiPost('/message', { item: itemId, intent: 'visual', text: text.value.trim() }, key);
+      send.disabled = false;
+      if (result.error) { err.textContent = 'Not sent: ' + result.error; announce('Error: ' + result.error); }
+      else { delete draftTexts[key]; openForms.delete(key); announce('Visual requested.'); renderPanel(); }
+    });
+    form.appendChild(el('div', { className: 'ck-actions' }, [send]));
+    return form;
+  }
+
+  // This item's visual requests, newest first, each with what the agent drew.
+  function renderVisuals(itemId) {
+    const wrap = el('div', { className: 'ck-visuals' });
+    const reqs = ((view.threads || {})[itemId] || []).filter(m => m.intent === 'visual')
+      .sort((a, b) => b.seq - a.seq);
+    if (!reqs.length) return wrap;
+    wrap.appendChild(el('div', { className: 'ck-section-heading' }, ['Visuals']));
+    const drawn = (view.visuals || {})[itemId] || [];
+    for (const m of reqs) {
+      const card = el('div', { className: 'ck-fork ck-visual-request', dataRequest: m.id });
+      card.appendChild(el('div', { className: 'ck-fork-head' }, ['◫ Visual requested · ' + relTime(m.ts)]));
+      const t = el('div', { className: 'ck-message-text' });
+      t.textContent = m.text;
+      card.appendChild(t);
+      const mine = drawn.filter(v => v.request === m.id);
+      if (!mine.length) card.appendChild(el('p', { className: 'ck-muted' }, ['Waiting for an agent to draw it.']));
+      for (const v of mine) card.appendChild(renderVisual(v));
+      wrap.appendChild(card);
+    }
+    return wrap;
+  }
+
+  function renderVisual(v) {
+    const box = el('div', { className: 'ck-visual', dataFormat: v.format, dataVisual: v.id });
+    box.appendChild(el('div', { className: 'ck-visual-title' }, [v.title]));
+    box.appendChild(el('div', { className: 'ck-muted' }, [
+      (v.format === 'html' ? 'HTML mock' : 'Mermaid diagram') + ' · ' + v.path + ' · ' + relTime(v.ts)]));
+    const doc = el('div', { className: 'ck-visual-doc' });
+    doc.textContent = v.text;
+    box.appendChild(doc);
+    const src = config.api + '/visual?id=' + encodeURIComponent(v.id);
+    if (v.format === 'html') {
+      // The ONLY way a mock reaches the page: an iframe whose sandbox grants nothing
+      // (no scripts, no same-origin, no forms, no popups, no top navigation). The
+      // server's CSP on the response says the same, even if the URL is opened alone.
+      const frame = document.createElement('iframe');
+      frame.setAttribute('sandbox', '');
+      frame.setAttribute('referrerpolicy', 'no-referrer');
+      frame.setAttribute('title', 'Visual: ' + v.title);
+      frame.className = 'ck-visual-frame';
+      frame.src = src;
+      box.appendChild(frame);
+    } else {
+      // Mermaid is shown as its source, as text: no diagram library runs on this page.
+      const pre = el('pre', { className: 'ck-visual-code', 'aria-label': 'Mermaid source: ' + v.title });
+      pre.textContent = 'Loading…';
+      box.appendChild(pre);
+      fetch(src, { credentials: 'same-origin' }).then(async resp => {
+        const body = await resp.text();
+        if (resp.ok) { pre.textContent = body; return; }
+        let msg = 'HTTP ' + resp.status;
+        try { msg = JSON.parse(body).error || msg; } catch (e) { /* not JSON: keep the status */ }
+        pre.textContent = 'Not shown: ' + msg;
+      }).catch(e => { pre.textContent = 'Not shown: ' + (e.message || 'network error'); });
+    }
+    return box;
   }
 
   // Render answer form
@@ -1647,8 +1886,11 @@
     answersBtn.addEventListener('click', () => showSheet(itemId, null));
     const [forkBtn, slot] = disclosure('⑂ Deliberate (full round)', 'fork-' + itemId,
       () => renderForkForm(itemId, null));
-    wrap.appendChild(el('div', { className: 'ck-actions' }, [answersBtn, forkBtn]));
+    const [visBtn, visSlot] = disclosure('◫ Request a visual…', 'vis-' + itemId, () => renderVisualForm(itemId));
+    visBtn.setAttribute('aria-label', 'Request a visual of ' + itemId);
+    wrap.appendChild(el('div', { className: 'ck-actions' }, [answersBtn, forkBtn, visBtn]));
     wrap.appendChild(slot);
+    wrap.appendChild(visSlot);
     const sheet = answersSheet(itemId, null);
     wrap.appendChild(renderReadyButton(itemId, sheet.counts));
     return wrap;
@@ -1678,16 +1920,22 @@
   // The seat picker a follow-up uses (D13): 1 to 3 roster seats, or a typed
   // "other" seat sent as other:<role>. roles() returns the list, or null after
   // saying (visibly and to a screen reader) what is wrong with the pick.
-  function seatPicker(key, errEl) {
+  function seatPicker(key, errEl, withRoar) {
     const picked = new Set();
     const fs = el('fieldset', { className: 'ck-roster' }, [el('legend', {}, ['Seats (1 to 3)'])]);
     const boxes = [];
     const otherInput = el('input', { type: 'text', className: 'ck-input', maxlength: '40', id: key + '-other',
       placeholder: 'e.g. Legal, Lighting designer' });
+    // Roar (0.8.0): a three-round panel of its own, so it is picked alone. At most once per
+    // question: the server refuses a second, naming the first, and the refusal is shown here.
+    const roarBox = withRoar ? el('input', { type: 'checkbox', value: ROAR, name: key + '-seat' }) : null;
     const sync = () => {
       if (errEl) errEl.textContent = '';  // a changed pick clears the last complaint about it
+      const roar = !!(roarBox && roarBox.checked);
       const full = picked.size + (otherInput.value.trim() ? 1 : 0) >= MAX_ROLES;
-      for (const b of boxes) b.disabled = full && !b.checked;
+      for (const b of boxes) b.disabled = roar || (full && !b.checked);
+      otherInput.disabled = roar;
+      if (roarBox) roarBox.disabled = !roar && (picked.size > 0 || !!otherInput.value.trim());
     };
     for (const r of ROSTER) {
       const b = el('input', { type: 'checkbox', value: r, name: key + '-seat' });
@@ -1695,11 +1943,17 @@
       boxes.push(b);
       fs.appendChild(el('label', { className: 'ck-option' }, [b, ' ' + ROSTER_LABEL[r]]));
     }
+    if (roarBox) {
+      roarBox.addEventListener('change', sync);
+      fs.appendChild(el('label', { className: 'ck-option ck-roar-option' }, [roarBox,
+        ' Roar: a three-round panel (independent reads, deliberation, synthesis); alone, once per question']));
+    }
     otherInput.addEventListener('input', sync);
     fs.appendChild(el('label', { for: key + '-other', className: 'ck-field-label' }, ['Other seat (optional)']));
     fs.appendChild(otherInput);
     const fail = msg => { if (errEl) errEl.textContent = msg; announce(msg); return null; };
     const roles = () => {
+      if (roarBox && roarBox.checked) return [ROAR];
       const out = ROSTER.filter(r => picked.has(r));
       const other = otherInput.value.trim();
       if (other) {
@@ -1726,7 +1980,7 @@
       'The seats you pick look at your locked answer to ' + qData.qid + ' and bring any follow-up questions back ' +
       'here, on ' + qData.item + '. Your locked answer stays as it is.']));
     const err = el('p', { className: 'ck-error-msg', role: 'status', 'aria-live': 'polite' });
-    const seats = seatPicker(id, err);
+    const seats = seatPicker(id, err, true);
     form.appendChild(seats.fieldset);
 
     const modeName = id + '-mode';
@@ -1849,12 +2103,17 @@
       const m = f.message;
       const card = el('div', { className: 'ck-fork' });
       const bits = ['⑂ ' + m.mode, m.focus || 'whole'];
-      if (m.roles) bits.push(m.roles.map(r => ROSTER_LABEL[r] || r.replace(/^other:/, '')).join(', '));
+      if (m.step) bits.push(STEP_WORDS[m.step] ? STEP_WORDS[m.step].title : m.step);
+      else if (m.roles) bits.push(m.roles.map(r => ROSTER_LABEL[r] || r.replace(/^other:/, '')).join(', '));
       else bits.push('default committee');
       card.appendChild(el('div', { className: 'ck-fork-head' }, [bits.join(' · ') + ' · ' + relTime(m.ts)]));
+      const chips = tagChips(forkTags(m.id));
+      if (chips) card.appendChild(chips);
       const t = el('div', { className: 'ck-message-text' });
       t.textContent = m.text;
       card.appendChild(t);
+      const tr = transcriptBlock(m.id);
+      if (tr) card.appendChild(tr);
       if (m.about_qid) card.appendChild(el('div', { className: 'ck-muted' }, ['Follow-up on the locked answer to ' + m.about_qid]));
       if (m.follow_up_of) card.appendChild(el('div', { className: 'ck-muted' }, ['Follow-up of ' + m.follow_up_of.slice(0, 8)]));
       const qs = f.questions.map(qid => view.questions[qid]).filter(Boolean);
@@ -1873,11 +2132,19 @@
           actions.insertBefore(formBtn, answersBtn);
         }
         if (qs.every(q => q.state !== 'awaiting_you')) {
-          const [fuBtn, slot] = disclosure('Follow up with other seats…', 'fu-' + m.id,
-            () => renderForkForm(itemId, m.id));
-          actions.appendChild(fuBtn);
+          // "Next step ▾" on the round's answer set (0.8.0): a follow-up round, refine or drill.
+          const target = { item: itemId, follow_up_of: m.id };
+          const [nextBtn, nextPanel] = nextStepMenu('next-' + m.id, 'this round\'s answers', [
+            { id: 'follow', key: 'fu-' + m.id, label: 'Follow up with other seats…',
+              aria: 'Follow up this round with other seats', build: () => renderForkForm(itemId, m.id) },
+            { id: 'refine', key: 'refine-' + m.id, label: 'Refine…', aria: 'Refine from this round\'s answers',
+              build: () => renderStepForm(target, 'refine', 'refine-' + m.id) },
+            { id: 'drill', key: 'drill-' + m.id, label: 'Drill…', aria: 'Drill from this round\'s answers',
+              build: () => renderStepForm(target, 'drill', 'drill-' + m.id) }
+          ]);
+          actions.appendChild(nextBtn);
           card.appendChild(actions);
-          card.appendChild(slot);
+          card.appendChild(nextPanel);
         } else {
           card.appendChild(actions);
         }
@@ -2386,13 +2653,19 @@
   // ---------------------------------------------------------------------------
 
   const FEED_LABEL = { question: 'Question asked', answer: 'Answered', lock: 'Locked', reanchor: 'Re-anchored',
-    fork: 'Deliberation requested', process: 'Answers are in', chat: 'Chat', reply: 'Agent replied', note: 'Your note' };
+    fork: 'Deliberation requested', process: 'Answers are in', chat: 'Chat', reply: 'Agent replied', note: 'Your note',
+    transcript: 'Roar transcript', visual: 'Visual' };
   const feedState = { kind: '', item: '', events: null, next: null, error: null, seq: -1, key: '' };
 
   function feedWords(ev) {
     if (ev.kind === 'answer' && ev.supersedes) return 'Answer changed (supersedes a lock)';
     if (ev.kind === 'lock' && ev.relock) return 'Re-locked';
+    if (ev.kind === 'visual') return ev.by === 'owner' ? 'Visual requested' : 'Visual drawn';
     if (ev.kind === 'fork') {
+      if (ev.step && STEP_WORDS[ev.step]) {
+        return STEP_WORDS[ev.step].title + (ev.about_qid ? ' on ' + ev.about_qid : ' on a round');
+      }
+      if (ev.roles && ev.roles.indexOf(ROAR) >= 0 && ev.about_qid) return 'Roar on ' + ev.about_qid;
       if (ev.about_qid) return 'Follow-up on ' + ev.about_qid;
       if (ev.follow_up_of) return 'Follow-up round';
     }

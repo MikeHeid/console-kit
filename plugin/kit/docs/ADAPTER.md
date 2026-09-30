@@ -51,6 +51,52 @@ only when the question had evidence, and `fold` checks it with the store's
 rules. An adapter that ignores it loses nothing else; one that writes it should
 print `cite` and `command` inline and `result`/`text` as quoted blocks.
 
+## `.console-kit.json`: specs, visuals and next steps (0.8.0)
+
+Three optional keys in the project's `.console-kit.json`, beside `fold` and
+`audit`. They are the repository's **data**: the server reads them when it
+starts, and nothing ever runs a path taken from them.
+
+```json
+{
+  "specs_dir": "architect/40-specs/",
+  "visuals_dir": "architect/visuals/",
+  "next_step": {"refine": "refine", "drill": "drill"}
+}
+```
+
+- **`specs_dir`**: where the project keeps its specs. Read only, by the
+  suggested-next-step tags beside each question and each round's answers:
+  - *refine* when a locked answer cites a file under it (its `source`, an
+    evidence `cite`, or a `valid_if` path) and that file has not been edited
+    since the lock. "Edited" is the last commit touching the file
+    (`git log -1 --format=%ct`) in a git work tree, or the file's mtime when
+    it has uncommitted changes, is untracked, or the project is not in git;
+  - *drill* when the owner's own words on an answer name a term (a
+    `` `backticked` `` span, or a Capitalised Multi-Word phrase) that no file
+    under it mentions, by text or by file name; or when an item's status is
+    `proposed` and no spec names its id. `console_kit/tags.py` has the exact
+    rule and its false positives and negatives;
+  - *deliberate* (needs no `specs_dir`) when the answer is stale, or its pick
+    went against the ★.
+
+  Without `specs_dir`, only *deliberate* is ever suggested.
+- **`visuals_dir`**: where the server writes agent-drawn visuals, one folder
+  per item, plus a regenerated `INDEX.md` (it refuses to overwrite an
+  `INDEX.md` it did not write). Without it, "Request a visual" says there is
+  nowhere to store one, and `agent.py visual` is refused by name. Keep it
+  outside `specs_dir`.
+- **`next_step`**: the skill a session runs for each kind of fork, by name.
+  The console-fork skill reads it; the server only checks its shape.
+
+Both folders must be relative paths of plain characters, at least one folder
+deep, with no part starting with `.`, and must resolve inside the project (no
+symlink out). A key that breaks a rule stops the server at start, by name.
+Every visual path the server writes or reads is jailed the same way as
+evidence: under `visuals_dir`, no `..`, never a secrets file, never through a
+symlink, at most 256 KiB, and read back only while its sha256 matches the
+store's record.
+
 ## The page
 
 The server serves one HTML page (`CONSOLE_PAGE`) and injects the console into

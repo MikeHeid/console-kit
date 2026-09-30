@@ -33,7 +33,7 @@ import stat
 import sys
 from pathlib import Path
 
-WAKE_INTENTS = ("process", "fork", "chat")     # console_kit/doorbell.py
+WAKE_INTENTS = ("process", "fork", "chat", "visual")     # console_kit/doorbell.py
 CURSOR_FILE = "agent-cursor.json"      # console_kit/doorbell.py
 MAX_DOORBELL = 64 << 20                # console_kit/doorbell.py
 MAX_CURSOR = 4096                      # console_kit/doorbell.py
@@ -149,12 +149,14 @@ def context(project: Path) -> str | None:
         if r["intent"] == "chat":  # the chat is not a register item (0.7.0)
             lines.append(f"- seq {r['seq']} ({_shown(r.get('ts'), TS)}): answer the owner's chat message")
             continue
-        what = "process the answers" if r["intent"] == "process" else "run a deliberation round"
+        what = {"process": "process the answers", "visual": "draw the visual the owner asked for"}.get(
+            r["intent"], "run a deliberation round")
         lines.append(f"- seq {r['seq']} ({_shown(r.get('ts'), TS)}): {what} on `{_shown(r.get('item'), ITEM_ID)}`")
     if len(wake) > MAX_LISTED:
         lines.append(f"- … and {len(wake) - MAX_LISTED} more (`{agent} inbox`)")
     lines += ["",
-              "Use the console-process skill for `process` and `chat`, and the console-fork skill for `fork`. "
+              "Use the console-process skill for `process` and `chat`, the console-fork skill for `fork`, "
+              "and the console-visual skill for `visual`. "
               f"`{agent} inbox` lists them; after handling one, `{agent} synced --through SEQ` "
               "records it so it is not offered again.", "", ask]
     return "\n".join(lines)

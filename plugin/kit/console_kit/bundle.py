@@ -39,6 +39,10 @@ def rounds(view: dict, fork_id: str) -> list[dict]:
 
 
 def _seats(m: dict) -> str:
+    if m.get("step"):  # 0.8.0: a refine or drill runs the project's skill, not seats
+        return f"none: a {m['step']}, run by the project's {m['step']} skill"
+    if m.get("roles") == ["roar"]:  # 0.8.0
+        return "a roar panel (independent reads, deliberation, synthesis)"
     if not m.get("roles"):
         return "the default committee"
     return ", ".join(r.removeprefix("other:") for r in m["roles"])
@@ -101,8 +105,9 @@ def fork_context(view: dict, items: Mapping[str, dict], fork_id: str, max_bytes:
     if about is not None:
         # A follow-up on one answer (0.4.0) leads with that answer: the seats
         # read what was decided before they read the item around it.
+        what = {"refine": "Refine", "drill": "Drill"}.get(fork.get("step"), "Follow-up")
         parts.append((f"the question `{about}`",
-                      f"# Follow-up bundle: the locked answer to `{about}`\n\n" + _about_section(view, about)))
+                      f"# {what} bundle: the locked answer to `{about}`\n\n" + _about_section(view, about)))
         title = f"## The request, then the item context: `{item}` and all under it"
     else:
         title = f"# Deliberation bundle: `{item}` and all under it"

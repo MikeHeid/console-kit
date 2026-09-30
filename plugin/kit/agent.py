@@ -4,7 +4,8 @@
     agent.py --state DIR inbox [--since SEQ | --all]
                                                 the owner's writes from the doorbell, after the agent's cursor
     agent.py --state DIR watch [--since SEQ] [--timeout SECONDS]
-                                                block until the owner sends 'process', 'fork' or 'chat', print it, exit
+                                                block until the owner sends 'process', 'fork', 'chat' or
+                                                'visual', print it, exit
     agent.py --state DIR view                   print the current view as JSON
     agent.py --state DIR health                 the server's health as JSON; exit 0 healthy, 1 not, 2 unreachable
     agent.py --state DIR answers [--item ID] [--fork RECORD_ID] [--json]
@@ -18,6 +19,13 @@
     agent.py --state DIR ask QUESTION.json [...]
                                                 append questions (each the record without type or by), in
                                                 order; stops at the first refusal and names what was not sent
+    agent.py --state DIR transcript FORK_ID FILE
+                                                store a roar panel's transcript (Markdown, at most 48 KiB)
+                                                on the roar fork it ran; one per fork, refused if larger
+    agent.py --state DIR visual REQUEST_ID --format mermaid|html --file FILE --doc DOC.md --title TITLE
+                                                answer an owner's visual request: the server writes FILE
+                                                and its doc under the project's visuals_dir and
+                                                regenerates its INDEX.md
     agent.py --state DIR working ITEM [ITEM ...]
                                                 show the owner "agent active" on these items; the next
                                                 `synced` clears it, and it lapses after an hour
@@ -160,6 +168,29 @@ def _call(state: Path, method: str, path: str, body=None) -> int:
     return 0 if code == 200 else 1
 
 
+READ_CAP = 1 << 20  # a transcript or visual file larger than this is refused before it is sent
+
+
+def _read_text(path: Path, what: str) -> str | None:
+    """A local UTF-8 file's text, or None after saying why not. The server applies the real limits."""
+    try:
+        data = R.read_regular(path, READ_CAP + 1)
+    except R.RegistryError as e:
+        print(f"{what} {path}: {e}", file=sys.stderr)
+        return None
+    if data is None:
+        print(f"{what} {path} does not exist", file=sys.stderr)
+        return None
+    if len(data) > READ_CAP:
+        print(f"{what} {path} is over {READ_CAP} bytes; refused, not cut", file=sys.stderr)
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        print(f"{what} {path} is not UTF-8 text", file=sys.stderr)
+        return None
+
+
 def _refused_note(files: list, n: int, why: str | None, rc: int = 1) -> int:
     """A batch ask stopped at files[n]: say what was posted and what was not, so a re-run sends only the rest."""
     if why:
@@ -200,6 +231,15 @@ def main(argv=None) -> int:
     s.add_argument("--reply-to")
     s = sub.add_parser("ask")
     s.add_argument("files", type=Path, nargs="+", metavar="file")
+    s = sub.add_parser("transcript")
+    s.add_argument("fork")
+    s.add_argument("file", type=Path)
+    s = sub.add_parser("visual")
+    s.add_argument("request")
+    s.add_argument("--format", required=True, choices=("mermaid", "html"))
+    s.add_argument("--file", type=Path, required=True)
+    s.add_argument("--doc", type=Path, required=True)
+    s.add_argument("--title", required=True)
     s = sub.add_parser("working")
     s.add_argument("items", nargs="+", help="the item ids this session is now working on")
     s = sub.add_parser("synced")
@@ -240,7 +280,8 @@ def _run(a, bell: Path) -> int:
             for sig, h in old.items():
                 signal.signal(sig, h)
         if not found:
-            print(f"no 'process', 'fork' or 'chat' signal after seq {since} within {a.timeout:g}s", file=sys.stderr)
+            print(f"no 'process', 'fork', 'chat' or 'visual' signal after seq {since} within {a.timeout:g}s",
+                  file=sys.stderr)
             return 3
         for line in found:
             print(json.dumps(line, sort_keys=True))
@@ -264,6 +305,19 @@ def _run(a, bell: Path) -> int:
         return _call(a.state, "POST", "/message", body)
     if a.cmd == "working":
         return _call(a.state, "POST", "/working", {"items": a.items})
+    if a.cmd == "transcript":
+        text = _read_text(a.file, "transcript")
+        if text is None:
+            return 1
+        return _call(a.state, "POST", "/transcript", {"fork": a.fork, "text": text,
+                                                       "nonce": secrets.token_urlsafe(12)})
+    if a.cmd == "visual":
+        content, doc = _read_text(a.file, "visual"), _read_text(a.doc, "doc")
+        if content is None or doc is None:
+            return 1
+        return _call(a.state, "POST", "/visual", {"request": a.request, "format": a.format, "title": a.title,
+                                                  "content": content, "text": doc,
+                                                  "nonce": secrets.token_urlsafe(12)})
     if a.cmd == "ask":
         for n, f in enumerate(a.files):
             try:
