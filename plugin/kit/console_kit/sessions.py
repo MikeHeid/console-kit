@@ -67,7 +67,7 @@ def lookup(state: Path, session: object) -> str | None:
     if not isinstance(session, str) or not SESSION_ID.match(session):
         return None
     try:
-        data = R.read_regular(Path(state) / FILE, MAX_FILE)
+        data = R.read_regular(Path(state) / FILE, MAX_FILE, nofollow=True)   # the writer refuses a symlink too
     except (OSError, R.RegistryError):
         return None
     return None if data is None else mapping(data).get(session)

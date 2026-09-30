@@ -58,10 +58,11 @@ def location() -> Path:
     return Path(base) / "console-kit" / FILE
 
 
-def read_regular(path: Path, cap: int) -> bytes | None:
-    """The bytes of a regular file, or None when absent. A FIFO or device is refused without blocking."""
+def read_regular(path: Path, cap: int, nofollow: bool = False) -> bytes | None:
+    """The bytes of a regular file, or None when absent. A FIFO or device is refused without blocking;
+    with `nofollow`, so is a symlink (OSError)."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | (os.O_NOFOLLOW if nofollow else 0))
     except FileNotFoundError:
         return None
     try:

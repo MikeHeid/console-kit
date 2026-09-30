@@ -3813,12 +3813,87 @@ class SessionNameTests(_Steward):
             line(agent="Bad", session="b1", ts="t"), line(agent="agent-7", session="../b", ts="t"),
             line(agent="agent-7", session="c1", ts="t", more=1), line(agent="agent-7", session="c1"),
             "junk\n", "[1]\n", line(agent="agent-8", session="d1", ts="t"),
-            line(agent="agent-9\n", session="e1", ts="t"), '{"agent": "agent-9", "session": "d1", "ts": "t"}'])
-        self.file.write_text(body)
-        for sid in ("a1", "b1", "../b", "c1", "d1", "e1", "zz", None, 5):
+            line(agent="agent-9\n", session="e1", ts="t"),
+            '"a string"\n', "null\n", "\n", line(agent=5, session="f1", ts="t"), line(agent="agent-7", session=7, ts="t"),
+            line(agent="agent", session="g1", ts="t"), line(agent="owner", session="g1", ts="t"),
+            line(agent="agent-7", session="h1\n", ts="t"), line(agent="agent-7", session="x" * 129, ts="t"),
+            line(agent="agent-7", sessions="c1", ts="t"), line(agent="agent-7", session="a1", ts="t")[:-2] + "\n"])
+        torn = b'{"agent": "agent-9", "session": "d1", "ts": "t"}'      # a cut-short last line
+        self.file.write_bytes(body.encode("utf-8") + b"\xff\xfe{bad utf-8}\n" + torn)
+        for sid in ("a1", "b1", "../b", "c1", "d1", "e1", "f1", "g1", "h1", "x" * 129, "zz", None, 5):
             with self.subTest(sid=sid):
                 self.assertEqual(hook.session_name(self.state, sid), SN.lookup(self.state, sid))
         self.assertEqual(SN.mapping(self.file.read_bytes()), {"a1": "agent-6", "d1": "agent-8"})
+        self.assertEqual({k: v["agent"] for k, v in hook.session_records(self.file.read_bytes()).items()},
+                         {"a1": "agent-6", "d1": "agent-8"})
+
+    # -- PR #14 review follow-ups ----------------------------------------------------------------
+
+    def fill(self, size, last=None):
+        """A sessions file of well-formed lines for other sessions, `size` bytes or just over, ending with `last`."""
+        out, n = [], 0
+        while sum(map(len, out)) < size:
+            out.append(json.dumps({"agent": "agent-9", "session": f"other{n:06d}", "ts": "2026-09-30T00:00:00Z"})
+                       + "\n")
+            n += 1
+        if last:
+            out.append(json.dumps({"agent": last[1], "session": last[0], "ts": "2026-09-30T00:00:00Z"}) + "\n")
+        self.file.write_text("".join(out))
+        os.chmod(self.file, 0o600)
+
+    def test_a_file_over_the_readers_cap_is_repaired_by_typing_the_name(self):
+        # Review MEDIUM 1: between the reader's cap and the writer's, the reader saw no names and the
+        # writer answered "already agent-5" without writing, so retyping never repaired it.
+        self.register("--steward", "agent-5")
+        for size in (100 << 10, 300 << 10):             # between the two caps, and past both
+            with self.subTest(size=size):
+                self.fill(size, last=(SID5, "agent-5"))
+                self.assertIsNotNone(self.ask(SID5))    # the reader refuses an oversized file: no name
+                note = self.prompt("/console-kit:as agent-5")
+                self.assertIn("agent-5", note)
+                self.assertNotIn("nothing recorded", note)
+                self.assertLessEqual(self.file.stat().st_size, 64 << 10)
+                self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)
+                self.assertIsNone(self.ask(SID5))       # the steward is recognised again
+
+    def test_a_leftover_temp_file_never_breaks_naming(self):
+        # Review MEDIUM 2: a crashed compaction's `.sessions.jsonl.<pid>.tmp` made the next writer with
+        # that pid fail O_EXCL ("nothing recorded"), and leftovers piled up.
+        self.register()
+        hook = self.hook_module()
+        mine = self.state / f".sessions.jsonl.{os.getpid()}.tmp"
+        mine.write_text("half a compaction")
+        (self.state / ".sessions.jsonl.12345.tmp").write_text("older")
+        self.fill(hook.MAX_SESSIONS - 10)               # the next line compacts
+        self.assertTrue(hook.record_session(self.state, SID5, "agent-5"))
+        self.assertEqual(hook.session_name(self.state, SID5), "agent-5")
+        self.assertEqual(sorted(p.name for p in self.state.iterdir() if p.name.endswith(".tmp")), [])
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)
+
+    def test_the_export_never_extends_another_hooks_last_line(self):
+        # Review LOW: an env file whose last line has no newline would have had our export glued onto it.
+        self.register()
+        f = self.dir / "claude-env.sh"
+        for before, after in (("export A=1", "export A=1\n"), ("export A=1\n", "export A=1\n"), ("", "")):
+            with self.subTest(before=before):
+                f.write_text(before)
+                self.run_hook(self.START, {"session_id": SID5, "cwd": str(self.project), "source": "startup",
+                                           "hook_event_name": "SessionStart"}, CLAUDE_ENV_FILE=str(f))
+                self.assertEqual(f.read_text(), after + f"export CONSOLE_KIT_SESSION={SID5}\n")
+
+    def test_a_symlinked_sessions_file_is_refused_by_reader_and_writer(self):
+        # Review LOW: the writer refused a symlink but the readers followed one.
+        from console_kit import sessions as SN
+        self.register("--steward", "agent-5")
+        hook = self.hook_module()
+        target = self.dir / "elsewhere.jsonl"
+        target.write_text(json.dumps({"agent": "agent-5", "session": SID5, "ts": "t"}) + "\n")
+        self.file.symlink_to(target)
+        self.assertIsNone(hook.session_name(self.state, SID5))
+        self.assertIsNone(SN.lookup(self.state, SID5))
+        self.assertIsNotNone(self.ask(SID5))
+        self.assertIn("nothing recorded", self.prompt("/console-kit:as agent-6"))
+        self.assertEqual(json.loads(target.read_text())["agent"], "agent-5")   # never written through
 
     # -- SessionStart --------------------------------------------------------------------------
 
