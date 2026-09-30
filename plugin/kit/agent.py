@@ -26,6 +26,10 @@
                                                 answer an owner's visual request: the server writes FILE
                                                 and its doc under the project's visuals_dir and
                                                 regenerates its INDEX.md
+    agent.py --state DIR next-step refine|drill --project DIR
+                                                print the installed user skill .console-kit.json's
+                                                `next_step` names for that kind; exit 1 naming why when
+                                                it is unset, not installed, or resolves into the project
     agent.py --state DIR working ITEM [ITEM ...]
                                                 show the owner "agent active" on these items; the next
                                                 `synced` clears it, and it lapses after an hour
@@ -240,6 +244,9 @@ def main(argv=None) -> int:
     s.add_argument("--file", type=Path, required=True)
     s.add_argument("--doc", type=Path, required=True)
     s.add_argument("--title", required=True)
+    s = sub.add_parser("next-step")
+    s.add_argument("kind", choices=("refine", "drill"))
+    s.add_argument("--project", type=Path, required=True)
     s = sub.add_parser("working")
     s.add_argument("items", nargs="+", help="the item ids this session is now working on")
     s = sub.add_parser("synced")
@@ -305,6 +312,19 @@ def _run(a, bell: Path) -> int:
         return _call(a.state, "POST", "/message", body)
     if a.cmd == "working":
         return _call(a.state, "POST", "/working", {"items": a.items})
+    if a.cmd == "next-step":
+        from console_kit import projectcfg as PC
+        try:
+            cfg = PC.load(a.project)
+            name = cfg.next_step.get(a.kind)
+            if not name:
+                raise PC.ConfigError(f".console-kit.json names no next_step skill for {a.kind!r}")
+            path = PC.resolve_skill(name, a.project)
+        except PC.ConfigError as e:
+            print(f"refused: {e}", file=sys.stderr)
+            return 1
+        print(json.dumps({"kind": a.kind, "skill": name, "skill_md": str(path)}))
+        return 0
     if a.cmd == "transcript":
         text = _read_text(a.file, "transcript")
         if text is None:

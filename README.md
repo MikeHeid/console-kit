@@ -85,14 +85,17 @@ heartbeat `agent.py watch` writes while it waits (0.6.0).
   questions, specs land by pull request, and log entries at merge time.
 - **Roar** is a seat in the follow-up picker: a three-round panel
   (independent reads, deliberation, synthesis) on one locked answer, **at most
-  once per question**; the server refuses a second, naming the first. Its
+  once per lock**; the server refuses a second on the same lock, naming the
+  first, and a superseded-and-re-locked answer may roar again. Its
   transcript (at most 48 KiB, refused whole if larger, never cut) shows
   collapsed on the round and on each question it produced.
 - **Suggested next steps**: small chips beside each question and round say
   which step fits and why (the reason is the chip's accessible text):
   *refine* when a locked answer cites a spec under `specs_dir` that has not
-  been edited since the lock, *drill* when your own words name something no
-  spec mentions (or a proposed item has no spec), *deliberate* when an answer
+  been edited since the lock, *drill* when your own words name something (any
+  `backticked` term or Capitalised word, less common words like "The") that
+  no spec and no item title mentions (or a proposed item has no spec),
+  *deliberate* when an answer
   is stale or went against the ★. The server works them out by rule
   (`console_kit/tags.py`); they start nothing.
 - **Request a visual** on an item: an agent answers with a Mermaid diagram

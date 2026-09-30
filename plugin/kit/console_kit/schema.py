@@ -30,7 +30,7 @@ written changes meaning.
                         the file lives under the project's `visuals_dir`, the record holds its hash
 
     - intent 'visual': the owner asks for a visual on an item;
-    - seat 'roar': a follow-up on ONE answer run as a three-round panel, at most once per question;
+    - seat 'roar': a follow-up on ONE answer run as a three-round panel, at most once per lock;
     - `step`: 'refine' or 'drill', a fork that runs the project's refine or drill skill on one
       locked answer (`about_qid`) or one round's answer set (`follow_up_of`).
 """
@@ -77,7 +77,7 @@ OTHER_ROLE = re.compile(r"^other:[A-Za-z0-9][A-Za-z0-9 \-]{0,39}$")
 MAX_ROLES = 3
 # "roar" (0.8.0) is a seat of its own: a three-round panel (independent reads,
 # deliberation, synthesis) on ONE locked answer. It is called alone, only with
-# `about_qid`, and at most once per question (owner ruling); the store refuses
+# `about_qid`, and at most once per LOCK (owner ruling "Once per lock ★"); the store refuses
 # a second one, naming the first.
 ROAR = "roar"
 # The other kinds of fork (0.8.0), beside a follow-up: `step` names the

@@ -18,26 +18,38 @@ A lock and an edit in the same second count as "not edited since".
 
 **drill**, either of:
 
-1. the owner's own words on the current answer introduce a term no spec
-   mentions. A term is exactly one of: a span in `backticks` (3 to 80
-   characters), or a Capitalised Multi-Word phrase (two or more words in a
-   row that each start with a capital followed by lower-case letters,
-   single-spaced; a leading common word such as "The", "We" or "If" is
-   dropped first, and what is left must still be two words). A term is
-   "mentioned" when, lower-cased with runs of whitespace collapsed, it appears
-   in the text of any file under `specs_dir` or in a spec's file name (with
-   `-` and `_` read as spaces). At most MAX_TERMS terms per answer are looked
-   at.
+1. the owner's own words on the current answer introduce a term nothing in
+   the project names. Owner ruling, "Any backtick or Capital ★": a candidate
+   term is exactly one of
+   - a span in `backticks` (3 to 80 characters), or
+   - a Capitalised word, or a run of them (each word a capital followed by
+     lower-case letters, single-spaced, hyphenated parts allowed): "Goal",
+     "Session Block". One word counts, not only runs.
+
+   Removed before looking: every word in STOPLIST (common sentence-start and
+   function words, a fixed constant below) at the start or end of a run, so
+   "The Refine" is "Refine" and a lone "The", "We" or "If" at the start of a
+   sentence is nothing. A candidate is **covered**, and not flagged, when,
+   lower-cased with whitespace collapsed, it appears in the text of any file
+   under `specs_dir`, in a spec's file name (with `-` and `_` read as
+   spaces), or in any item's title from the adapter's `items()`. Matching is
+   case-insensitive substring matching. At most MAX_TERMS terms per answer
+   are looked at.
 2. the question's item has status `proposed` and no spec's text or file name
    mentions the item's id.
 
-Known limits of rule 1, on purpose conservative (it suggests, never blocks):
-false positives: a proper name (a person, a vendor) or a term a spec spells
-differently ("column chain" vs "column-chain", a plural) reads as new;
-false negatives: a new idea written in lower case without backticks is never
-seen, and a term that happens to appear anywhere in any spec (in an unrelated
-section) reads as specified. With no `specs_dir`, or an empty one, neither
-drill rule runs.
+Known limits of rule 1 (it suggests, never blocks). False positives: a
+proper name (a person, a vendor, a product) and an ordinary word the owner
+capitalised for emphasis, when no spec or title happens to contain it; a term
+a spec spells differently ("column chain" vs "column-chain", a plural in the
+answer and a singular nowhere); a common word missing from STOPLIST at the
+start of a sentence ("Honestly, ..."). False negatives: a new idea written in
+lower case without backticks is never seen; any candidate that appears
+anywhere in any spec or title, even in an unrelated sense ("Goal" inside
+"goalpost"), reads as covered; and a STOPLIST word ("Record", "Fix") is never
+flagged even when the owner meant it as a name. With no `specs_dir`, or an
+empty one, neither drill rule runs. **Changes if: the owner finds they ignore
+the chip.**
 
 **deliberate**: the question is stale (its lock's conditions no longer hold,
 the same machinery as "Why stale?"), or the current answer picked options
@@ -71,12 +83,25 @@ MAX_SPEC_FILES = 2000
 MAX_SPEC_BYTES = 16 << 20
 MAX_TERMS = 10
 GIT_TIMEOUT = 10
-BACKTICK = re.compile(r"`([^`\n]{3,80})`")
+# Pairs every backtick span (so a short `ab` cannot pair its closing tick with the next
+# span's opening one); only a span of 3 to 80 characters is a term.
+BACKTICK = re.compile(r"`([^`\n]{1,80})`")
 _WORD = r"[A-Z][a-z]+(?:-[A-Za-z][a-z0-9]*)*"
-CAPS = re.compile(rf"(?<![A-Za-z0-9]){_WORD}(?: {_WORD})+(?![A-Za-z0-9])")
-LEADING = frozenset({"The", "A", "An", "This", "That", "These", "Those", "We", "It", "If", "And", "But", "Or",
-                     "In", "On", "For", "To", "Of", "So", "Yes", "No", "Our", "My", "Your", "Use", "Keep", "Make",
-                     "Let", "Then", "When", "With", "Without", "Also", "Please", "Only", "Not", "Do", "Go"})
+CAPS = re.compile(rf"(?<![A-Za-z0-9`]){_WORD}(?: {_WORD})*(?![A-Za-z0-9`])")
+# Common sentence-start and function words: never a term on their own, and trimmed
+# from either end of a run of Capitalised words (drill rule 1).
+STOPLIST = frozenset("""
+The A An This That These Those It Its I We Us Our You Your He She They Them Their My Me
+If And But Or Nor So Yet Also Then Than When While Where Which Who Whom Whose What Why How
+In On At By For To Of From Into Onto Over Under With Without About After Before Between Through
+During Since Until Unless Because Although Though However Otherwise Instead Even Still
+Yes No Not Never Always Often Just Only Maybe Perhaps Please Now Here There Once Again
+Is Are Was Were Be Been Being Am Do Does Did Done Have Has Had Can Could Should Would Will
+Shall May Might Must Need Needs Let Lets Make Makes Keep Use Uses Go Get Put Take See Say
+All Any Each Every Some Both Either Neither None Same Other Another Such Much Many More Most
+First Next Last One Two Three Ok Okay Sure Fine Good Great Right Agreed Thanks
+Fix Record Leave Pick Option Options Answer Question
+""".split())
 TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
@@ -85,17 +110,20 @@ def _norm(t: str) -> str:
 
 
 def terms(own_text: str) -> list[str]:
-    """The terms rule 1 looks at, in order of appearance, at most MAX_TERMS (see the module doc)."""
+    """The candidate terms of drill rule 1: backticked spans, then Capitalised words and runs, at most MAX_TERMS."""
     found: list[str] = []
     for m in BACKTICK.finditer(own_text or ""):
         t = m.group(1).strip()
         if len(t) >= 3:
             found.append(t)
-    for m in CAPS.finditer(own_text or ""):
+    rest = BACKTICK.sub(lambda m: " " * len(m.group(0)), own_text or "")  # a backticked span is one term
+    for m in CAPS.finditer(rest):
         words = m.group(0).split(" ")
-        while words and words[0] in LEADING:
+        while words and words[0] in STOPLIST:
             words = words[1:]
-        if len(words) >= 2:
+        while words and words[-1] in STOPLIST:
+            words = words[:-1]
+        if words:
             found.append(" ".join(words))
     out, seen = [], set()
     for t in found:
@@ -263,6 +291,8 @@ def compute(store, view: dict, items: Mapping[str, dict], root: Path, specs_dir:
     git = _git(root)
     head: list = []           # HEAD, read at most once per call, and only when a spec is cited by a lock
     basis: set[str] = set()
+    # Item titles, lower-cased: a name the register already uses is not new (drill rule 1).
+    titles = "\n".join(_norm(str(d.get("title") or "")) for d in items.values() if isinstance(d, Mapping))
     out_q: dict[str, list[dict]] = {}
     for qid, q in view["questions"].items():
         rec = q["question"]
@@ -289,12 +319,12 @@ def compute(store, view: dict, items: Mapping[str, dict], root: Path, specs_dir:
         # drill: new words with no spec, or a proposed item no spec names
         if idx is not None and idx.files:
             new = [t for t in terms(cur["own_text"])] if cur is not None else []
-            new = [t for t in new if not idx.mentions(t)]
+            new = [t for t in new if not idx.mentions(t) and _norm(t) not in titles]
             if new:
                 shown = ", ".join(f"`{t}`" if " " not in t else f"\"{t}\"" for t in new[:3])
                 more = f" and {len(new) - 3} more" if len(new) > 3 else ""
                 tags.append({"step": "drill", "reason": f"your words name {shown}{more}, which no spec under "
-                                                        f"{specs_dir}/ mentions"})
+                                                        f"{specs_dir}/ and no item title mentions"})
             else:
                 it = items.get(rec["item"]) or {}
                 if str(it.get("status") or "").lower() == "proposed" and not idx.mentions(rec["item"]):

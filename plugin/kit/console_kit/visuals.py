@@ -102,9 +102,22 @@ def _write_once(p: Path, data: bytes) -> None:
         raise
 
 
+MD_META = "\\`*_[]()#<>!|"
+
+
+def md_escape(text: str) -> str:
+    """A one-line title as inert Markdown text: every metacharacter backslash-escaped.
+
+    The agent writes the title, and the generated files are read as Markdown
+    (in a PR, on a docs site), so a title must never become a link, an image,
+    a heading, an HTML tag or a table cell break.
+    """
+    return "".join("\\" + ch if ch in MD_META else ch for ch in text)
+
+
 def doc_markdown(title: str, item: str, fmt: str, visual_name: str, text: str, request_text: str) -> str:
     quoted = "\n".join("> " + ln for ln in request_text.splitlines()) or ">"
-    return (f"# {title}\n\n"
+    return (f"# {md_escape(title)}\n\n"
             f"A {'Mermaid diagram' if fmt == 'mermaid' else 'static HTML mock'} for item `{item}`: "
             f"[{visual_name}]({visual_name}).\n\n"
             f"The owner asked:\n\n{quoted}\n\n{text.rstrip()}\n")
@@ -134,7 +147,7 @@ def index_markdown(visuals_dir: str, records: Iterable[dict]) -> str:
         for r in sorted(rows[item], key=lambda r: r["seq"]):
             f = r["path"][len(visuals_dir) + 1:]
             d = r["doc_path"][len(visuals_dir) + 1:]
-            title = r["title"].replace("|", "\\|")
+            title = md_escape(r["title"])
             out.append(f"| {r['ts']} | {title} | {r['format']} | [visual]({f}) · [doc]({d}) |")
         out.append("")
     return "\n".join(out).rstrip() + "\n"

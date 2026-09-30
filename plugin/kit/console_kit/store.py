@@ -9,7 +9,7 @@ edited or removed. `append` enforces the rules that need the other records:
 - once an answer is locked, the next answer must name it in `supersedes` and
   give a `reason`, because a lock is superseded, never undone (D3);
 - an `anchor` re-anchors only the question's CURRENT lock (0.5.0);
-- a roar runs at most once per question, and its fork carries one transcript (0.8.0);
+- a roar runs at most once per lock (a new lock after a supersede may roar again), and its fork carries one transcript (0.8.0);
 - a `visual` answers an owner's visual request on that request's item (0.8.0).
 
 A retried write (same content, same nonce) returns the stored record and
@@ -220,17 +220,51 @@ class Store:
         elif kind == "visual":
             self._check_visual(rec)
 
-    def roar_of(self, qid: str) -> dict | None:
-        """The roar fork already run on `qid`, or None (0.8.0)."""
-        return next((r for r in self._records if r["type"] == "message" and r.get("intent") == "fork"
-                     and S.ROAR in (r.get("roles") or ()) and r.get("about_qid") == qid), None)
+    def lock_at(self, qid: str, seq: int) -> dict | None:
+        """The lock on `qid` that was current just before store seq `seq`: the latest lock written before it.
+
+        A lock is only ever superseded by a later answer AND its own later lock
+        (D3), so the latest lock before a record is the one that record saw.
+        """
+        return next((r for r in reversed(self._records[:max(0, seq - 1)])
+                     if r["type"] == "lock" and r["qid"] == qid), None)
+
+    def roar_of(self, qid: str, lock_id: str | None = None) -> dict | None:
+        """The roar fork already run on `qid` while `lock_id` was its lock (default: its current lock), or None.
+
+        The fork record needs no lock field: the lock it was about is derived
+        from the store, as the lock current when the fork was appended.
+        """
+        if lock_id is None:
+            lk = self.locks(qid)
+            lock_id = lk[-1]["id"] if lk else None
+        if lock_id is None:
+            return None
+        for r in self._records:
+            if (r["type"] == "message" and r.get("intent") == "fork" and S.ROAR in (r.get("roles") or ())
+                    and r.get("about_qid") == qid):
+                seen = self.lock_at(qid, r["seq"])
+                if seen is not None and seen["id"] == lock_id:
+                    return r
+        return None
 
     def _check_roar_once(self, rec: dict) -> None:
-        """A roar runs at most once per question (owner ruling, 0.8.0): a second is refused, naming the first."""
-        first = self.roar_of(rec["about_qid"])
+        """A roar runs at most once per LOCK (owner ruling "Once per lock ★", 0.8.0).
+
+        A second roar while the same lock stands is refused, naming the first.
+        Once the answer is superseded and locked again, the new lock may have
+        its own roar. (`_check_about` has already required a locked answer.)
+        """
+        qid = rec["about_qid"]
+        locks = self.locks(qid)
+        if not locks:
+            return
+        current = locks[-1]
+        first = self.roar_of(qid, current["id"])
         if first is not None:
-            raise StoreError(f"{rec['about_qid']} already had its roar: fork {first['id']}, requested {first['ts']}. "
-                             f"A roar runs at most once per question; follow up with other seats instead")
+            raise StoreError(f"{qid}'s lock {current['id']} already had its roar: fork {first['id']}, requested "
+                             f"{first['ts']}. A roar runs at most once per lock; supersede and re-lock the answer "
+                             f"to roar again, or follow up with other seats")
 
     def transcript_of(self, fork_id: str) -> dict | None:
         return next((r for r in self._records if r["type"] == "transcript" and r["fork"] == fork_id), None)

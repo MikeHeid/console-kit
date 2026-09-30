@@ -11,6 +11,11 @@ The file is the repository's DATA, never a path anything executes from
                  runs for each kind of fork. The server never reads it; the
                  console-fork skill does, and it is checked here only so a typo
                  is named when the server starts rather than in the middle of a fork.
+                 The name is resolved ONLY against the user's installed skills (the
+                 user-level skills folder or an installed plugin), NEVER against a
+                 skill folder inside the repository, and a name that is not an
+                 installed user skill is refused by name (`resolve_skill`, run by
+                 `agent.py next-step`).
 
 Each directory is jailed like an evidence path: relative, plain characters, at
 least one real folder (never "." or the root itself), no `..`, never a
@@ -88,3 +93,45 @@ def load(root: Path) -> ProjectConfig:
         raise ConfigError(f"{FILE}: visuals_dir {visuals!r} is inside specs_dir {specs!r}; keep them apart, "
                           f"or every visual would read as a spec")
     return ProjectConfig(specs_dir=specs, visuals_dir=visuals, next_step=dict(steps))
+
+
+def user_config_dir() -> Path:
+    """Claude Code's user-level folder: $CLAUDE_CONFIG_DIR, else ~/.claude."""
+    import os
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"))
+
+
+def resolve_skill(name: str, root: Path, config_dir: Path | None = None) -> Path:
+    """The SKILL.md a `next_step` name means, looked up ONLY among the user's installed skills.
+
+    `name` comes from the repository, so the repository must not also choose
+    what it runs. A plain name is `<config>/skills/<name>/SKILL.md`; a
+    `plugin:skill` name is an installed plugin's `.../<plugin>/<version>/skills/<skill>/SKILL.md`
+    under `<config>/plugins/cache/`. A skill folder inside the project
+    (`.claude/skills/...`) is never consulted, and a user-level entry whose real
+    path lands inside the project (a symlink into the repository) is refused.
+    Raises ConfigError naming why.
+    """
+    if not isinstance(name, str) or not SKILL.match(name):
+        raise ConfigError(f"next_step skill {name!r} is not a skill name")
+    cfg = Path(config_dir) if config_dir is not None else user_config_dir()
+    if ":" in name:
+        plugin, _, skill = name.partition(":")
+        if not plugin or not skill or ":" in skill:
+            raise ConfigError(f"next_step skill {name!r} must be <name> or <plugin>:<name>")
+        found = sorted((cfg / "plugins" / "cache").glob(f"*/{plugin}/*/skills/{skill}/SKILL.md"))
+    else:
+        p = cfg / "skills" / name / "SKILL.md"
+        found = [p] if p.exists() else []
+    if not found:
+        raise ConfigError(f"next_step skill {name!r} is not an installed user skill (looked in {cfg}/skills and "
+                          f"{cfg}/plugins/cache); a skill inside the repository is never used for it")
+    path = found[-1]
+    real = path.resolve()
+    top = Path(root).resolve()
+    if real == top or top in real.parents:
+        raise ConfigError(f"next_step skill {name!r} resolves into the project ({real}); a repository skill is "
+                          f"never used for it")
+    if not real.is_file():
+        raise ConfigError(f"next_step skill {name!r}: {path} is not a regular file")
+    return real

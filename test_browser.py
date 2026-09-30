@@ -1422,7 +1422,7 @@ class NextStepAndVisualTests(unittest.TestCase):
                     page.wait_for_function("document.querySelector('.ck-followup .ck-error-msg').textContent !== ''")
                     err = form.locator(".ck-error-msg").text_content()
                     self.assertIn(first["id"], err)
-                    self.assertIn("at most once per question", err)
+                    self.assertIn("at most once per lock", err)
                     self.assertEqual(len(self.forks()), 1)
                     self.shot(page, "roar-refused", kind, width)
                     self.assertFalse(page.evaluate(OVERFLOW))

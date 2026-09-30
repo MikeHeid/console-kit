@@ -1461,7 +1461,7 @@ class Phase4Tests(_Live, unittest.TestCase):
                                                       "nonce": "roaragain01"}, tok=token())
         self.assertEqual(code, 400)
         self.assertIn(first["id"], out["error"])
-        self.assertIn("at most once per question", out["error"])
+        self.assertIn("at most once per lock", out["error"])
         # The doorbell rang once, for the first roar only.
         self.assertEqual([b.get("intent") for b in self.doorbell() if b.get("intent") == "fork"], ["fork"])
 

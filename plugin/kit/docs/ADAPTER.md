@@ -28,6 +28,16 @@ def board() -> dict:          # OPTIONAL
     {"values": {key: str}, "shape": str}. Leave it out and the page is static."""
 ```
 
+From 0.8.0, **fold never exports a roar transcript or a visual, on purpose**:
+they are records a ruling can cite, not rulings themselves. A question a roar
+(or any deliberation) produced carries `forked_from`, the fork's id, and its
+entry carries that fork message whole (`fork`, with `roles: ["roar"]` for a
+roar). That is enough to trace the ruling to its transcript, which is the
+store's `transcript` record on the same fork id. The starter adapter prints
+"Asked by: a roar panel ... (fork `<id>`)" for such a ruling; a project's own
+adapter should print `forked_from` too. Visuals land in `visuals_dir` by their
+own pull request.
+
 ## The starter, and moving past it
 
 The starter keeps everything under `.console-kit/`:
@@ -72,11 +82,15 @@ starts, and nothing ever runs a path taken from them.
     since the lock. "Edited" is the last commit touching the file
     (`git log -1 --format=%ct`) in a git work tree, or the file's mtime when
     it has uncommitted changes, is untracked, or the project is not in git;
-  - *drill* when the owner's own words on an answer name a term (a
-    `` `backticked` `` span, or a Capitalised Multi-Word phrase) that no file
-    under it mentions, by text or by file name; or when an item's status is
-    `proposed` and no spec names its id. `console_kit/tags.py` has the exact
-    rule and its false positives and negatives;
+  - *drill* when the owner's own words on an answer name a term that nothing
+    in the project names: any `` `backticked` `` span, or any Capitalised word
+    or run of them (owner ruling "Any backtick or Capital ★"), less a fixed
+    stoplist of common sentence-start and function words ("The", "We", "If"),
+    and less anything found, case-insensitively, in a spec's text or file name
+    under `specs_dir` or in an item's title from `items()`. Also when an item's
+    status is `proposed` and no spec names its id. `console_kit/tags.py` has
+    the exact rule, the stoplist, and its known false positives and negatives.
+    Changes if: the owner finds they ignore the chip;
   - *deliberate* (needs no `specs_dir`) when the answer is stale, or its pick
     went against the ★.
 
@@ -87,7 +101,19 @@ starts, and nothing ever runs a path taken from them.
   nowhere to store one, and `agent.py visual` is refused by name. Keep it
   outside `specs_dir`.
 - **`next_step`**: the skill a session runs for each kind of fork, by name.
-  The console-fork skill reads it; the server only checks its shape.
+  The console-fork skill reads it; the server only checks its shape. **The
+  name is resolved ONLY against the user's installed skills** (the user-level
+  skills folder, `~/.claude/skills/<name>/`, or an installed plugin's skill,
+  `<plugin>:<name>`), **never against a skill folder inside the repository**:
+  the repository chooses the name, so it must not also choose what the name
+  runs. `agent.py next-step KIND --project DIR` does that lookup and refuses,
+  naming the reason, a name that is not an installed user skill or that
+  resolves into the project; the session stops there.
+
+  The fourth kind of follow-up, **roar**, needs no entry: it is a panel of the
+  kit's own seats, run at most **once per lock** (a second roar while the same
+  lock stands is refused, naming the first; a superseded and re-locked answer
+  may roar again).
 
 Both folders must be relative paths of plain characters, at least one folder
 deep, with no part starting with `.`, and must resolve inside the project (no

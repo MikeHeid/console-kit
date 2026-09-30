@@ -64,7 +64,7 @@
   const ROSTER = ['devops', 'ux', 'adversarial', 'security', 'architect', 'analyst'];
   const ROSTER_LABEL = { devops: 'DevOps', ux: 'UX', adversarial: 'Adversarial (red team)',
     security: 'Security', architect: 'Architect', analyst: 'Analyst', roar: 'Roar panel' };
-  // 0.8.0, mirrors schema.py: the roar seat (alone, on one answer, once per question)
+  // 0.8.0, mirrors schema.py: the roar seat (alone, on one answer, once per lock)
   // and the two other kinds of fork. The server refuses anything else by name.
   const ROAR = 'roar';
   const STEP_WORDS = {
@@ -1946,7 +1946,7 @@
     if (roarBox) {
       roarBox.addEventListener('change', sync);
       fs.appendChild(el('label', { className: 'ck-option ck-roar-option' }, [roarBox,
-        ' Roar: a three-round panel (independent reads, deliberation, synthesis); alone, once per question']));
+        ' Roar: a three-round panel (independent reads, deliberation, synthesis); alone, once per lock']));
     }
     otherInput.addEventListener('input', sync);
     fs.appendChild(el('label', { for: key + '-other', className: 'ck-field-label' }, ['Other seat (optional)']));

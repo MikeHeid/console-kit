@@ -2322,22 +2322,40 @@ class Phase4StoreTests(Tmp):
         st.append(question(qid))
         st.append(lock(st.append(answer(qid))))
 
-    def test_a_second_roar_on_one_question_is_refused_naming_the_first(self):
-        # Catches: no once-per-question rule (six agent runs, again), a rule keyed on the fork's
-        # item instead of the question (another question could never roar), and a roar before a lock.
+    def test_roar_is_once_per_lock_and_a_new_lock_may_roar_again(self):
+        # Owner ruling "Once per lock ★". Catches: no limit (six agent runs, again, on one lock),
+        # a limit keyed on the question (a superseded and re-locked answer could never roar
+        # again), one keyed on the fork's item (another question could never roar), a roar
+        # before a lock, and a roar allowed while the new answer is not yet locked.
         st = self.store()
         st.append(question("LANE.1/Q1"))
         with self.assertRaisesRegex(StoreError, "no locked answer"):
             st.append(roar())
-        st.append(lock(st.append(answer())))
+        a1 = st.append(answer())
+        lk1 = st.append(lock(a1))
         first = st.append(roar())
         with self.assertRaises(StoreError) as cm:
             st.append(roar(text="again"))
         self.assertIn(first["id"], str(cm.exception))
-        self.assertIn("at most once per question", str(cm.exception))
+        self.assertIn(lk1["id"], str(cm.exception))
+        self.assertIn("at most once per lock", str(cm.exception))
+        a2 = st.append(answer(picks=["a"], supersedes=a1["id"], reason="changed my mind"))
+        with self.assertRaisesRegex(StoreError, "no locked answer"):
+            st.append(roar(text="before the new lock"))
+        lk2 = st.append(lock(a2))
+        second = st.append(roar(text="the new lock's roar"))    # allowed: a fresh lock
+        self.assertEqual(st.roar_of("LANE.1/Q1", lk1["id"])["id"], first["id"])
+        self.assertEqual(st.roar_of("LANE.1/Q1", lk2["id"])["id"], second["id"])
+        with self.assertRaises(StoreError) as cm:
+            st.append(roar(text="third"))
+        self.assertIn(second["id"], str(cm.exception))
+        self.assertIn(lk2["id"], str(cm.exception))
         self.locked(st, "LANE.1/Q2")
         st.append(roar("LANE.1/Q2"))                     # another question keeps its own roar
         st.append(about("LANE.1/Q1", roles=["ux"]))      # other seats still follow up on Q1
+        # Reloaded from disk, the same rule holds: the lock a fork saw is derived, not stored.
+        with self.assertRaisesRegex(StoreError, second["id"]):
+            self.store().append(roar(text="after reload"))
 
     def test_a_transcript_belongs_to_one_roar_fork(self):
         # Catches: a transcript attached to any fork (it would read as a panel that never ran)
@@ -2479,14 +2497,19 @@ class OlderKit070RefusesTests(Tmp):
 class TermHeuristicTests(unittest.TestCase):
     """The drill rule's term finder, exactly as documented in tags.py."""
 
-    def test_backticks_and_capitalised_multi_word_phrases_only(self):
+    def test_any_backtick_or_capital_minus_the_stoplist(self):
+        # Owner ruling "Any backtick or Capital ★". Catches: single Capitalised words ignored
+        # (the old two-word rule), a sentence-start "The"/"Use" read as a term, and a backticked
+        # span counted twice (once whole, once for a capital inside it).
         from console_kit import tags as T
         got = T.terms("Use the `ZoneMaster` and a Session Block. The Grid stays. We Keep Going Places. "
-                      "lower case idea, API Key, `ab`, Option B")
-        # `ab` is too short; "The Grid" loses its leading word and is one word; "We Keep Going Places"
-        # loses both common leading words and keeps two; "API Key" and "Option B" are not
-        # Capitalised words (all capitals, one letter); a lower-case idea is never seen.
-        self.assertEqual(got, ["ZoneMaster", "Session Block", "Going Places"])
+                      "lower case idea, API Key, `ab`, Option B, `the Goal`")
+        # "Use", "The", "We", "Keep", "Option" are in STOPLIST; `ab` is too short; "API" and "B"
+        # are not Capitalised words; a lower-case idea is never seen.
+        self.assertEqual(got, ["ZoneMaster", "the Goal", "Session Block", "Grid", "Going Places", "Key"])
+        self.assertEqual(T.terms("The Refine and Drill tags need work"), ["Refine", "Drill"])
+        self.assertEqual(T.terms("make it a Goal"), ["Goal"])
+        self.assertEqual(T.terms("The. We. If. Yes, Please."), [])
         self.assertLessEqual(len(T.terms(" ".join(f"`term{n:02d}`" for n in range(30)))), T.MAX_TERMS)
 
 
@@ -2565,6 +2588,25 @@ class TagTests(Tmp):
         os.utime(self.dir / self.SPECS / "grid.md", (1_000_000_000, 1_000_000_000))  # mtime lies old
         self.assertNotIn("refine", self.steps(self.tags(st), "LANE.1/Q1"))       # the commit is after the lock
 
+    def drill_reason(self, own_text, items=ITEMS):
+        st = Store(self.dir / f"d{self.tick}.jsonl", known_items=items, clock=self.clock)
+        st.append(question("LANE.1/Q1"))
+        st.append(answer(own_text=own_text))
+        return self.steps(self.tags(st, items=items), "LANE.1/Q1").get("drill")
+
+    def test_single_capitalised_words_flag_unless_a_spec_or_title_names_them(self):
+        # Owner ruling "Any backtick or Capital ★", on realistic owner text. Catches: "The"
+        # flagged, a single new word missed, a word a spec carries flagged (case-insensitively),
+        # and a word the register's own item titles carry flagged.
+        reason = self.drill_reason("The Refine and Drill tags need work")
+        self.assertIn("`Refine`", reason)
+        self.assertIn("`Drill`", reason)
+        self.assertNotIn("`The`", reason)
+        self.assertIn("`Goal`", self.drill_reason("make it a Goal"))
+        self.assertIsNone(self.drill_reason("keep the Session and the Cells"))   # grid.md: "session", "cells"
+        titled = {**ITEMS, "LANE.1": {**ITEMS["LANE.1"], "title": "Goal tracking"}}
+        self.assertIsNone(self.drill_reason("make it a Goal", items=titled))
+
     def test_drill_names_the_owners_new_terms_and_a_proposed_item_without_a_spec(self):
         # Catches: a case-sensitive or name-blind search (terms the specs do carry read as new),
         # a rule that runs with no specs to compare against, and a proposed item a spec names.
@@ -2641,6 +2683,123 @@ class ProjectConfigTests(Tmp):
             self.load({"next_step": {"refine": "rm -rf /"}})
         with self.assertRaisesRegex(PC.ConfigError, "next_step"):
             self.load({"next_step": {"deploy": "x"}})
+
+    def test_a_next_step_skill_resolves_only_among_installed_user_skills(self):
+        # Review MEDIUM: the repository names the skill, so it must not also supply it. Catches: a
+        # lookup that finds the repository's own .claude/skills/<name>, one that follows a user-level
+        # symlink back into the repository, and a CLI that says "ok" for a skill nobody installed.
+        from console_kit import projectcfg as PC
+        user = self.dir / "userconfig"
+        proj = self.dir / "proj"
+        (proj / ".claude/skills/refine").mkdir(parents=True)
+        (proj / ".claude/skills/refine/SKILL.md").write_text("repo-supplied: do something else\n")
+        (proj / ".console-kit.json").write_text(json.dumps({"next_step": {"refine": "refine", "drill": "tool:dig"}}))
+        with self.assertRaisesRegex(PC.ConfigError, "not an installed user skill"):
+            PC.resolve_skill("refine", proj, user)
+        (user / "skills/refine").mkdir(parents=True)
+        (user / "skills/refine/SKILL.md").write_text("the user's refine\n")
+        self.assertEqual(PC.resolve_skill("refine", proj, user), (user / "skills/refine/SKILL.md").resolve())
+        plug = user / "plugins/cache/market/tool/1.0.0/skills/dig"
+        plug.mkdir(parents=True)
+        (plug / "SKILL.md").write_text("the plugin's dig\n")
+        self.assertEqual(PC.resolve_skill("tool:dig", proj, user), (plug / "SKILL.md").resolve())
+        (user / "skills/sneaky").symlink_to(proj / ".claude/skills/refine")
+        with self.assertRaisesRegex(PC.ConfigError, "resolves into the project"):
+            PC.resolve_skill("sneaky", proj, user)
+        agent_py = str(KIT / "agent.py")
+        env = {**os.environ, "CLAUDE_CONFIG_DIR": str(user)}
+        ok = subprocess.run([sys.executable, agent_py, "--state", str(self.dir / "st"), "next-step", "refine",
+                             "--project", str(proj)], capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertEqual(json.loads(ok.stdout)["skill_md"], str((user / "skills/refine/SKILL.md").resolve()))
+        (user / "skills/refine/SKILL.md").unlink()
+        bad = subprocess.run([sys.executable, agent_py, "--state", str(self.dir / "st"), "next-step", "refine",
+                              "--project", str(proj)], capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("refused: next_step skill 'refine' is not an installed user skill", bad.stderr)
+        self.assertNotIn("repo-supplied", bad.stdout + bad.stderr)
+
+
+class RoarTraceTests(Tmp):
+    """Review LOW: a ruling from a roar traces back to its transcript; fold never exports the transcript itself."""
+
+    def test_a_roar_derived_ruling_names_its_fork_and_the_transcript_is_not_exported(self):
+        # Catches: an export that drops forked_from (the ruling could not be traced to its panel),
+        # a starter adapter that never shows it, and an export that folds a transcript or a
+        # visual as if it were a ruling.
+        import importlib.util
+        st = self.store()
+        st.append(question())
+        st.append(lock(st.append(answer())))
+        r = st.append(roar())
+        t = st.append(transcript(r["id"]))
+        st.append(question("LANE.1/Q2", forked_from=r["id"], star_by="panel"))
+        st.append(lock(st.append(answer("LANE.1/Q2"))))
+        req = st.append(message(intent="visual", text="draw it"))
+        st.append(visual(req["id"]))
+        files = F.export(st)
+        self.assertEqual(sorted(files), ["LANE.1__Q1.json", "LANE.1__Q2.json"])   # rulings only
+        e = files["LANE.1__Q2.json"]
+        self.assertEqual((e["forked_from"], e["fork"]["roles"]), (r["id"], ["roar"]))
+        self.assertEqual(st.transcript_of(e["forked_from"])["id"], t["id"])    # enough to find the transcript
+        self.assertEqual(F.check_entry("LANE.1__Q2.json", e, ITEMS), [])
+        spec = importlib.util.spec_from_file_location("adapter_tpl", KIT / "adapter_template.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        text = mod._render(e)
+        self.assertIn(f"fork `{r['id']}`", text)
+        self.assertIn("a roar panel; its transcript is the `transcript` record on this fork", text)
+        self.assertNotIn("Asked by", mod._render(files["LANE.1__Q1.json"]))
+
+
+class VisualMarkdownTests(Tmp):
+    """Review LOW: an agent's title never becomes a link, image, heading or tag in the generated Markdown."""
+
+    EVIL = "[x](javascript:alert(1)) # h ![i](x) <b>`c`</b> *e* _u_ | cell \\"
+
+    def tokens(self, text):
+        try:
+            from markdown_it import MarkdownIt
+        except ImportError:
+            return None
+        out = []
+        for t in MarkdownIt("commonmark").enable("table").parse(text):
+            out.append(t)
+            out += t.children or []
+        return out
+
+    def test_a_hostile_title_is_inert_in_the_index_and_the_doc(self):
+        # Catches: escaping only "|" (the old code): the title became a javascript: link and, in the
+        # doc, a heading carrying a second "# h" and an inline <b>.
+        from console_kit import visuals as VIS
+        rec = {"item": "LANE.1", "seq": 1, "ts": "2026-09-30T00:00:00Z", "title": self.EVIL, "format": "html",
+               "path": "visuals/LANE.1/aaaaaaaa-bbbbbbbbbbbb.html", "doc_path": "visuals/LANE.1/aaaaaaaa-bbbbbbbbbbbb.md"}
+        index = VIS.index_markdown("visuals", [rec])
+        doc = VIS.doc_markdown(self.EVIL, "LANE.1", "html", "aaaaaaaa-bbbbbbbbbbbb.html", "body", "draw it")
+        self.assertIn(VIS.md_escape(self.EVIL), index)
+        self.assertNotIn("](javascript", index)
+        self.assertNotIn("](javascript", doc)
+        for text in (index, doc):
+            toks = self.tokens(text)
+            if toks is None:
+                continue  # markdown-it is not installed: the string checks above stand alone
+            hrefs = [t.attrGet("href") for t in toks if t.type == "link_open"]
+            self.assertFalse([h for h in hrefs if "javascript" in (h or "")], hrefs)
+            self.assertEqual([t for t in toks if t.type in ("image", "html_inline", "html_block")
+                              and t.content.strip() != VIS.MARK], [])   # the kit's own marker only
+            self.assertEqual([t.type for t in toks if t.type in ("em_open", "strong_open")], [])
+            # Only the kit's own code spans (the item id, the folder), none from the title's `c`.
+            self.assertLessEqual({t.content for t in toks if t.type == "code_inline"}, {"LANE.1", "visuals/"})
+        idx = self.tokens(index)
+        if idx is not None:
+            # The index's only headings are its own: "# Visuals" and the item's "##".
+            self.assertEqual([t.tag for t in idx if t.type == "heading_open"], ["h1", "h2"])
+            # The row keeps its four cells: the title's "|" did not split it.
+            row = [t for t in idx if t.type == "tr_open"][-1]
+            self.assertEqual(sum(1 for t in idx[idx.index(row):] if t.type == "td_open"), 4)
+            dtoks = self.tokens(doc)
+            [h] = [i for i, t in enumerate(dtoks) if t.type == "heading_open"]
+            self.assertEqual(dtoks[h + 1].content.replace("\\", ""), self.EVIL.replace("\\", ""))
 
 
 class VisualFileTests(Tmp):

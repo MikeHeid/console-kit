@@ -90,7 +90,8 @@ answer, a fork that carries `about_qid` (its doorbell line carries it too);
 console-fork's section 6 covers it. So does a **roar** (`roles: ["roar"]`,
 section 7: a three-round panel, whose transcript you store with
 `A transcript`) and a **refine** or **drill** (`step`, section 8: the
-project's own skill named in `.console-kit.json`'s `next_step`, run on that
+skill `.console-kit.json`'s `next_step` names, resolved only among your
+installed user skills with `A next-step`, never a repository skill, run on that
 answer or round, and nothing written before the owner locks what it asks).
 At most three forks in one session (§6.6);
 past that, reply on the item that the rest wait for the next session, and

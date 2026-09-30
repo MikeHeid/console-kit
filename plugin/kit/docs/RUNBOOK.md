@@ -160,9 +160,10 @@ then `systemctl --user restart <name>-console.service`.
 
 ## Roar is refused (0.8.0)
 
-**"LANE/Q3 already had its roar: fork <id>"**: by design, a roar runs at most
-once per question (each costs about six agent runs). Follow up with chosen
-seats instead, or supersede the answer and ask a new question. A transcript
+**"LANE/Q3's lock <id> already had its roar: fork <id>"**: by design, a roar
+runs at most once per lock (each costs about six agent runs). Follow up with
+chosen seats instead, or supersede the answer and lock it again: the new lock
+may have its own roar. A transcript
 is refused **"transcript is N bytes; the limit is 49152. It is refused, not
 truncated"**: the agent shortens its round summaries and sends it again.
 
