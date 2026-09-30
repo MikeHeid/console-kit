@@ -16,6 +16,10 @@ question's `valid_if` otherwise (0.5.0; see `anchors.py`).
 
 A thread is `awaiting_agent` when the owner's latest message on an item is
 newer than the agent's latest message there.
+
+Agent names (0.8.2): a record an agent wrote under a name carries `agent`
+here, joined from the names file (`names.py`); a record with no name is the
+store's own record, exactly as before.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from typing import Callable, Mapping
 
 from . import anchors as A
 from . import schema as S
+from .names import named
 from .store import Store
 
 STATES = ("awaiting_you", "unlocked", "locked", "stale")
@@ -50,10 +55,12 @@ def question_state(store: Store, q: dict, holds: Callable[[dict], bool]) -> str:
     return "locked" if all(holds(c) for c in conds) else "stale"
 
 
-def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]) -> dict:
+def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool],
+          names: Mapping[str, str] | None = None) -> dict:
     """Build the whole page view: each item's questions and threads, counts rolled up to ancestors, and the Inbox.
 
     `items` maps id -> {"title": str, "parent": id | None}, as the project adapter supplies it.
+    `names` maps record id -> agent name (0.8.2); a named record gains `agent`, no other changes.
     """
     recs = store.records()
     questions: dict[str, dict] = {}
@@ -63,7 +70,7 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
         answers = store.answers(r["qid"])
         conds, origin = A.conditions_for(store, r)
         questions[r["qid"]] = {
-            "question": r,
+            "question": named(r, names),
             "state": question_state(store, r, holds),
             "answers": [dict(a, locked=store.lock_of(a["id"]) is not None) for a in answers],
             "failing": [c for c in conds if not holds(c)],
@@ -78,17 +85,17 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
     visuals: dict[str, list[dict]] = {}
     for r in recs:
         if r["type"] == "message":
-            threads.setdefault(r["item"], []).append(r)
+            threads.setdefault(r["item"], []).append(named(r, names))
             if r.get("intent") == "fork":
                 forks[r["id"]] = {"message": r, "questions": [], "transcript": None}
         elif r["type"] == "transcript":
             # A roar's transcript (0.8.0), shown collapsed on its fork and that fork's questions.
-            transcripts[r["fork"]] = {"id": r["id"], "fork": r["fork"], "ts": r["ts"], "text": r["text"],
-                                      "bytes": len(r["text"].encode("utf-8"))}
+            transcripts[r["fork"]] = named({"id": r["id"], "fork": r["fork"], "ts": r["ts"], "text": r["text"],
+                                            "bytes": len(r["text"].encode("utf-8"))}, names)
         elif r["type"] == "visual":
-            visuals.setdefault(r["item"], []).append(
+            visuals.setdefault(r["item"], []).append(named(
                 {k: r[k] for k in ("id", "seq", "ts", "item", "request", "format", "title", "text",
-                                   "path", "doc_path", "bytes")})
+                                   "path", "doc_path", "bytes")}, names))
     for fid, t in transcripts.items():
         if fid in forks:
             forks[fid]["transcript"] = t["id"]
@@ -165,10 +172,12 @@ def _snip(text: str) -> str:
     return t if len(t) <= FEED_SNIPPET else t[:FEED_SNIPPET - 1] + "…"
 
 
-def feed_event(rec: dict, qitems: Mapping[str, str], relocks: set[str]) -> dict:
+def feed_event(rec: dict, qitems: Mapping[str, str], relocks: set[str], agent: str | None = None) -> dict:
     """One store record as a feed event: what happened, where, and a short line of what was said."""
     t = rec["type"]
     ev = {"seq": rec["seq"], "ts": rec["ts"], "by": rec["by"], "id": rec["id"]}
+    if agent:  # 0.8.2: which agent wrote it, when it gave a name
+        ev["agent"] = agent
     if t == "question":
         ev.update(kind="question", item=rec["item"], qid=rec["qid"], text=_snip(rec["text"]))
         if "forked_from" in rec:
@@ -200,7 +209,7 @@ def feed_event(rec: dict, qitems: Mapping[str, str], relocks: set[str]) -> dict:
 
 
 def feed(store: Store, items: Mapping[str, dict], *, kinds: set[str] | None = None, item: str | None = None,
-         before: int | None = None, limit: int = FEED_DEFAULT) -> dict:
+         before: int | None = None, limit: int = FEED_DEFAULT, names: Mapping[str, str] | None = None) -> dict:
     """The newest `limit` events (optionally of `kinds`, on `item` and all under it, before seq `before`).
 
     `next_before` is the seq to pass as `before` for the page after this one,
@@ -218,7 +227,7 @@ def feed(store: Store, items: Mapping[str, dict], *, kinds: set[str] | None = No
     for r in reversed(recs):
         if before is not None and r["seq"] >= before:
             continue
-        ev = feed_event(r, qitems, relocks)
+        ev = feed_event(r, qitems, relocks, (names or {}).get(r["id"]))
         if ev["kind"] == "transcript":
             fork = store.get(ev["fork"])
             ev["item"] = fork["item"] if fork is not None else None
@@ -292,7 +301,7 @@ def answers_sheet(view: dict, items: Mapping[str, dict], item: str | None = None
             "qid": qid, "item": rec["item"], "orphaned": not known,
             "text": rec["text"], "kind": rec["kind"], "state": q["state"], "failing": q["failing"],
             "star": rec["star"], "options": rec["options"],
-            **{k: rec[k] for k in ("star_by", "forked_from") if k in rec},
+            **{k: rec[k] for k in ("star_by", "forked_from", "agent") if k in rec},
             "answers": q["answers"],
         })
     rows.sort(key=lambda r: (r["orphaned"], order.get(r["item"], len(order)), r["item"],
@@ -332,6 +341,8 @@ def sheet_markdown(sheet: dict) -> str:
         out.append(f"## {r['qid']}: {STATE_WORDS[r['state']]}" + (" (item no longer in the register)"
                                                                      if r["orphaned"] else ""))
         out += [f"> {line}" for line in r["text"].splitlines()] + [""]
+        if r.get("agent"):  # 0.8.2: only a question an agent asked under a name
+            out.append(f"Asked by {r['agent']}.")
         if r.get("star"):
             whose = f", {r['star_by']}'s" if r.get("star_by") else ""
             out.append(f"★{whose}: {labels.get(r['star'], r['star'])}")

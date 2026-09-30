@@ -2751,6 +2751,28 @@ class RoarTraceTests(Tmp):
         self.assertIn("a roar panel; its transcript is the `transcript` record on this fork", text)
         self.assertNotIn("Asked by", mod._render(files["LANE.1__Q1.json"]))
 
+    def test_a_ruling_says_which_named_agent_asked_and_an_unnamed_one_is_unchanged(self):
+        # 0.8.2. Catches: an export or starter adapter that drops the agent's name, and one that
+        # changes a ruling for a question asked with no name (v0.8.1's export takes no names).
+        import importlib.util
+        st = self.store()
+        st.append(question())
+        q2 = st.append(question("LANE.1/Q2"))
+        for qid in ("LANE.1/Q1", "LANE.1/Q2"):
+            st.append(lock(st.append(answer(qid))))
+        plain = F.export(st)
+        files = F.export(st, names={q2["id"]: "agent-6"})
+        self.assertEqual(files["LANE.1__Q1.json"], plain["LANE.1__Q1.json"])
+        self.assertNotIn("asked_by_agent", files["LANE.1__Q1.json"])
+        self.assertEqual(files["LANE.1__Q2.json"], {**plain["LANE.1__Q2.json"], "asked_by_agent": "agent-6"})
+        self.assertEqual(F.check_entry("LANE.1__Q2.json", files["LANE.1__Q2.json"], ITEMS), [])
+        spec = importlib.util.spec_from_file_location("adapter_tpl", KIT / "adapter_template.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertIn("**Agent:** `agent-6`.", mod._render(files["LANE.1__Q2.json"]))
+        self.assertEqual(mod._render(files["LANE.1__Q1.json"]), mod._render(plain["LANE.1__Q1.json"]))
+        self.assertNotIn("Agent:", mod._render(files["LANE.1__Q1.json"]))
+
 
 class VisualMarkdownTests(Tmp):
     """Review LOW: an agent's title never becomes a link, image, heading or tag in the generated Markdown."""
@@ -2909,6 +2931,85 @@ class VisualFileTests(Tmp):
             VIS.export_write(other, "architect/visuals", VIS.export_plan(other, "architect/visuals", [entry]), [r])
         self.assertEqual(list((self.dir / "elsewhere").iterdir()), [])
 
+    # -- 0.8.2 (4b): the folder checked is the folder used ------------------------------------
+
+    def swap_to(self, state, outside, name_test, target):
+        """A wrapper for os.open or os.mkdir that, on the first call `name_test` accepts, swaps
+        STATE/<target> for a symlink to `outside` (the real folder moves beside it), then goes on."""
+        real = {"open": os.open, "mkdir": os.mkdir}
+        swapped = []
+
+        def hook(kind):
+            def call(path, *a, **kw):
+                if not swapped and name_test(os.path.basename(os.fspath(path))):
+                    (state / target).rename(state / (target + "-real"))
+                    (state / target).symlink_to(outside)
+                    swapped.append(target)
+                return real[kind](path, *a, **kw)
+            return call
+        return hook, swapped
+
+    def test_a_folder_swapped_for_a_symlink_after_the_walk_lets_nothing_out(self):
+        # Catches: a walk that checks each folder by its path and then writes by path again, so a
+        # folder swapped for a symlink between the check and the write sends the visual and its doc
+        # wherever the symlink points (v0.8.1 writes both into `outside`).
+        from unittest import mock
+        from console_kit import visuals as VIS
+        state, outside = self.dir / "state", self.dir / "outside"
+        state.mkdir(mode=0o700)
+        outside.mkdir()
+        (state / "visuals/LANE.1").mkdir(parents=True)
+        r = self.rec()
+        hook, swapped = self.swap_to(state, outside, lambda n: bool(VIS.NAME.match(n)), "visuals/LANE.1")
+        with mock.patch("os.open", hook("open")):
+            try:
+                VIS.store(state, r["path"], r["doc_path"], b"<p>hi</p>", self.doc(r))
+            except VIS.VisualError:
+                pass                                  # refusing is fine too; escaping is not
+        self.assertEqual(swapped, ["visuals/LANE.1"])
+        self.assertEqual(list(outside.iterdir()), [])
+        # What was written went into the folder that was checked, which moved beside the symlink.
+        self.assertEqual((state / "visuals/LANE.1-real" / r["path"].rsplit("/", 1)[1]).read_bytes(), b"<p>hi</p>")
+        # And the swapped-in symlink is refused on the next read, by name.
+        with self.assertRaisesRegex(VIS.VisualError, "symlink"):
+            VIS.read(state, r)
+
+    def test_a_folder_swapped_while_the_walk_makes_folders_makes_nothing_outside(self):
+        # Catches: a walk that makes each missing folder by its full path, so swapping a parent for a
+        # symlink just before a mkdir creates the folder outside the state (v0.8.1 makes
+        # outside/LANE.1, then refuses: the folder is already there).
+        from unittest import mock
+        from console_kit import visuals as VIS
+        state, outside = self.dir / "state", self.dir / "outside"
+        state.mkdir(mode=0o700)
+        outside.mkdir()
+        (state / "visuals").mkdir()
+        r = self.rec()
+        hook, swapped = self.swap_to(state, outside, lambda n: n == "LANE.1", "visuals")
+        with mock.patch("os.mkdir", hook("mkdir")):
+            try:
+                VIS.store(state, r["path"], r["doc_path"], b"<p>hi</p>", self.doc(r))
+            except VIS.VisualError:
+                pass
+        self.assertEqual(swapped, ["visuals"])
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_a_symlink_already_in_the_walk_is_refused_by_name(self):
+        # Keeps every 0.8.1 refusal: a symlinked folder on the way, and a file where a folder must be.
+        from console_kit import visuals as VIS
+        state, outside = self.dir / "state", self.dir / "outside"
+        state.mkdir(mode=0o700)
+        outside.mkdir()
+        (state / "visuals").symlink_to(outside)
+        r = self.rec()
+        with self.assertRaisesRegex(VIS.VisualError, "visuals is a symlink; the kit never follows one"):
+            VIS.store(state, r["path"], r["doc_path"], b"<p>hi</p>", self.doc(r))
+        (state / "visuals").unlink()
+        (state / "visuals").write_text("a file")
+        with self.assertRaisesRegex(VIS.VisualError, "visuals is not a folder"):
+            VIS.store(state, r["path"], r["doc_path"], b"<p>hi</p>", self.doc(r))
+        self.assertEqual(list(outside.iterdir()), [])
+
 
 class GitReadOnlyTests(Tmp):
     """0.8.1 (e): every git call the server makes in the project takes no optional locks."""
@@ -2956,6 +3057,48 @@ class GitReadOnlyTests(Tmp):
         g = T._Git(self.dir)
         g.edited_at("specs/a.md", (1, 1), g.head())
         self.assertEqual((index.read_bytes(), index.stat().st_mtime_ns), before)
+
+
+class AgentNamesFileTests(Tmp):
+    """0.8.2: the names sidecar beside the store (names.py)."""
+
+    def test_a_name_is_a_short_plain_token_and_nothing_else(self):
+        from console_kit import names as N
+        for good in ("agent-6", "a", "review-bot", "x" * 32, "a1-b2-c3"):
+            self.assertIsNone(N.problem(good), good)
+        for bad in ("Agent-6", "agent 6", "agent_6", "6agent", "-a", "a-", "a--b", "x" * 33, "a\n", "",
+                    "agent", "owner", None, 6, ["agent-6"]):
+            self.assertIsNotNone(N.problem(bad), bad)
+        self.assertIn("'Bad'", N.problem("Bad"))
+
+    def test_the_first_name_stays_and_a_bad_file_is_refused_by_line(self):
+        # Catches: a retry that renames a record, and a hand-edited names file read as if it were good.
+        from console_kit import names as N
+        names = N.Names(self.dir)
+        self.assertTrue(names.add("a" * 24, "agent-6"))
+        self.assertFalse(names.add("a" * 24, "agent-7"))
+        self.assertEqual(N.Names(self.dir).get("a" * 24), "agent-6")
+        with self.assertRaises(N.NamesError):
+            names.add("b" * 24, "Bad Name")
+        with self.assertRaises(N.NamesError):
+            names.add("not-an-id", "agent-6")
+        for text, words in (('{"agent":"agent-6","id":"' + "c" * 24 + '"}', "no newline"),
+                            ('{"agent":"Agent 6","id":"' + "c" * 24 + '"}\n', ":1: agent name"),
+                            ('{"agent":"agent-6","id":"x"}\n', ":1: id"),
+                            ('{"agent":"agent-6","id":"' + "c" * 24 + '","more":1}\n', ":1: a line is exactly"),
+                            ("not json\n", ":1: not JSON")):
+            with self.subTest(text=text):
+                (self.dir / N.FILE).write_text(text)
+                with self.assertRaisesRegex(N.NamesError, words):
+                    N.Names(self.dir)
+
+    def test_named_returns_the_record_itself_when_unnamed(self):
+        from console_kit import names as N
+        r = {"id": "d" * 24, "type": "message"}
+        self.assertIs(N.named(r, {}), r)
+        self.assertIs(N.named(r, None), r)
+        self.assertEqual(N.named(r, {"d" * 24: "agent-6"}), {**r, "agent": "agent-6"})
+        self.assertNotIn("agent", r)                   # the store's record is never changed
 
 
 if __name__ == "__main__":

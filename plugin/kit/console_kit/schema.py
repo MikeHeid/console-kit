@@ -43,6 +43,12 @@ both. A 0.8.0 kit reading a 0.8.1 record validates it, then serves it only
 when a file at that path in its checkout still hashes to the record's sha256:
 unless its visuals_dir is `visuals`, it refuses the path by name ("not under
 visuals_dir"); it never shows other bytes.
+
+0.8.2 changes no shape and keeps SCHEMA_VERSION 1. An agent's name is NOT a
+field of any record: `validate` refuses a field it does not know (see
+`unknown field(s)` below) and `Store._load` refuses the whole store on the
+first line that fails, so a name in `store.jsonl` would stop a 0.8.1 kit from
+starting. The names are kept beside the store instead (`names.py`).
 """
 
 from __future__ import annotations

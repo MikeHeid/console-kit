@@ -1232,6 +1232,46 @@ class LiveConsoleTests(unittest.TestCase):
                             path=str(Path(os.environ["CONSOLE_KIT_SHOTS"]) / f"chat-{kind}-{width}.png"))
                     self.assert_not_reloaded(page)
 
+    def test_a_named_agent_is_shown_by_name_and_an_unnamed_one_as_before(self):
+        # 0.8.2. Catches: a name the view carries but the page never shows (the owner still sees
+        # "agent" on every session's reply), and an unnamed record whose author text changed.
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    url = self.serve()
+                    body = {"qid": "LANE.1/Q1", "item": "LANE.1", "text": "Question 1: which way?", "kind": "single",
+                            "options": [{"id": "fix", "label": "Fix now"}, {"id": "leave", "label": "Leave it"}],
+                            "star": "fix", "source": "docs/spec.md:1", "valid_if": [], "nonce": "namedq0001"}
+                    code, out = self.SV.agent_request(self.cfg.socket, "POST", "/question", body, agent="agent-6")
+                    self.assertEqual(code, 200, out)
+                    for text, nonce, name in (("Named reply.", "namedreply01", "agent-6"),
+                                              ("Plain reply.", "plainreply01", None)):
+                        code, out = self.SV.agent_request(self.cfg.socket, "POST", "/message",
+                                                          {"item": "LANE.1", "text": text, "nonce": nonce}, agent=name)
+                        self.assertEqual(code, 200, out)
+                        code, out = self.SV.agent_request(self.cfg.socket, "POST", "/message",
+                                                          {"item": "@chat", "text": "Chat " + text, "nonce": "c" + nonce},
+                                                          agent=name)
+                        self.assertEqual(code, 200, out)
+                    page = self.page(kind, width, url)
+                    self.open_inbox(page, width)
+                    page.click(".ck-inbox-item[data-qid='LANE.1/Q1']")
+                    page.wait_for_selector(".ck-q-agent")
+                    self.assertEqual(page.locator(".ck-q-agent").first.text_content(), "asked by agent-6")
+                    bys = page.locator(".ck-message-by").all_text_contents()
+                    self.assertIn("agent-6", bys)
+                    self.assertIn("agent", bys)          # the unnamed reply reads as it always did
+                    self.assertFalse(page.evaluate(OVERFLOW))
+                    page = self.page(kind, width, url)       # a fresh page for the chat tab
+                    self.open_inbox(page, width)
+                    page.click("#ck-tab-chat")
+                    page.wait_for_selector(".ck-chat-msg[data-by='agent']")
+                    who = page.locator(".ck-chat-msg[data-by='agent'] .ck-chat-who").all_text_contents()
+                    self.assertTrue(any(w.startswith("agent-6 · ") for w in who), who)
+                    self.assertTrue(any(w.startswith("Agent · ") for w in who), who)
+                    self.assertFalse(page.evaluate(OVERFLOW))
+                    self.assert_not_reloaded(page)
+
     def test_polling_pauses_when_hidden_and_backs_off_on_errors(self):
         # Catches: a loop that keeps polling in a background tab (a thread held open for
         # nothing), and one that retries a failing server in a tight loop.

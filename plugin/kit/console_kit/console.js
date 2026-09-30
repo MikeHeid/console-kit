@@ -335,7 +335,19 @@
   function agentActive(itemId) {
     return !!(cursor && cursor.working && Object.prototype.hasOwnProperty.call(cursor.working, itemId));
   }
-  function agentWords(itemId) { return agentActive(itemId) ? 'agent active' : 'awaiting agent'; }
+  // 0.8.2: the named agents holding a mark on this item (the unnamed sessions' bucket is "agent").
+  function activeNames(itemId) {
+    const by = (cursor && cursor.working_by) || {};
+    return Object.keys(by).filter(n => n !== 'agent' && by[n] &&
+      Object.prototype.hasOwnProperty.call(by[n], itemId)).sort();
+  }
+  function agentWords(itemId) {
+    if (!agentActive(itemId)) return 'awaiting agent';
+    const names = activeNames(itemId);
+    return names.length ? names.join(', ') + ' active' : 'agent active';
+  }
+  // 0.8.2: who wrote an agent record: its name when it gave one, else the word it always had.
+  function agentLabel(rec, fallback) { return (rec && rec.by === 'agent' && rec.agent) ? rec.agent : fallback; }
 
   // What arrived with this view that the page had not seen (0.7.0): new rows are
   // marked so they can be eased in, and a screen reader is told how many came.
@@ -990,6 +1002,7 @@
       srcEl.textContent = qData.source;
       textCol.appendChild(srcEl);
     }
+    if (qData.agent) textCol.appendChild(el('div', { className: 'ck-q-agent' }, ['asked by ' + qData.agent]));
     const chips = tagChips(questionTags(qData.qid));
     if (chips) textCol.appendChild(chips);
     hdr.appendChild(textCol);
@@ -1243,7 +1256,8 @@
     if (!t) return null;
     const kb = Math.max(1, Math.round(t.bytes / 1024));
     const det = el('details', { className: 'ck-transcript' }, [
-      el('summary', {}, ['Roar transcript · three rounds · ' + kb + ' KB · ' + relTime(t.ts)])]);
+      el('summary', {}, ['Roar transcript · three rounds · ' + kb + ' KB · ' + relTime(t.ts) +
+        (t.agent ? ' · by ' + t.agent : '')])]);
     const pre = el('pre', { className: 'ck-transcript-text' });
     pre.textContent = t.text;
     det.appendChild(pre);
@@ -1314,7 +1328,7 @@
     box.appendChild(el('div', { className: 'ck-visual-title' }, [v.title]));
     box.appendChild(el('div', { className: 'ck-muted' }, [
       (v.format === 'html' ? 'HTML mock' : 'Mermaid diagram') + ' · ' + String(v.path).split('/').pop() +
-      ' · ' + relTime(v.ts)]));
+      ' · ' + relTime(v.ts) + (v.agent ? ' · by ' + v.agent : '')]));
     const doc = el('div', { className: 'ck-visual-doc' });
     doc.textContent = v.text;
     box.appendChild(doc);
@@ -1676,7 +1690,7 @@
       for (const m of sorted) {
         const msg = el('div', { className: 'ck-message' });
         const byEl = el('span', { className: 'ck-message-by', dataBy: m.by });
-        byEl.textContent = m.by;
+        byEl.textContent = agentLabel(m, m.by);
         msg.appendChild(byEl);
         const content = el('div', { className: 'ck-message-content' });
         const textEl = el('div', { className: 'ck-message-text' });
@@ -2335,6 +2349,7 @@
     text.textContent = qData.text;
     card.appendChild(text);
     if (qData.source) card.appendChild(el('div', { className: 'ck-q-source' }, [qData.source]));
+    if (qData.agent) card.appendChild(el('div', { className: 'ck-q-agent' }, ['asked by ' + qData.agent]));
     if (tighten) {
       card.appendChild(el('p', { className: 'ck-muted' }, [
         'A tighten round: each finding is Fix now, Record in findings.md, or Leave it. Nothing happens on a pick ' +
@@ -2757,6 +2772,7 @@
         el('span', { className: 'ck-inbox-item-id' }, [where]),
         el('span', { className: 'ck-feed-time', title: new Date(ev.ts).toLocaleString() }, [relTime(ev.ts)])
       ]);
+      if (ev.agent) head.appendChild(el('span', { className: 'ck-feed-agent' }, ['by ' + ev.agent]));
       if (isNew) head.appendChild(el('span', { className: 'ck-feed-newtag' }, ['new']));
       row.appendChild(head);
       if (ev.text) {
@@ -2824,7 +2840,7 @@
     for (const m of msgs) {
       const b = el('div', { className: 'ck-chat-msg' + (arrived.has(m.id) ? ' ck-arrived' : ''), dataBy: m.by });
       b.appendChild(el('div', { className: 'ck-chat-who' }, [
-        m.by === 'owner' ? 'You' : 'Agent', ' · ',
+        m.by === 'owner' ? 'You' : agentLabel(m, 'Agent'), ' · ',
         el('span', { title: new Date(m.ts).toLocaleString() }, [relTime(m.ts)])]));
       const t = el('div', { className: 'ck-chat-text' });
       t.textContent = m.text;

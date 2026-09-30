@@ -34,7 +34,8 @@ anything under `visuals_dir` in the checkout.
 
 Every read and write is jailed like evidence: a relative path of plain
 characters, no `..`, never a secrets file, every directory on the way a real
-directory (never a symlink), the file itself opened with O_NOFOLLOW and
+directory (never a symlink), opened as a directory fd and used through that
+fd (0.8.2), the file itself opened with O_NOFOLLOW and
 checked to be a regular file, and at most `schema.MAX_VISUAL` bytes. A write
 never replaces a file holding other bytes. A read also checks the file still
 hashes to what the record says: a file edited after it was stored is refused
@@ -49,8 +50,8 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import secrets
 import stat as _stat
-import tempfile
 from pathlib import Path
 from typing import Iterable
 
@@ -104,59 +105,127 @@ def stored_names(rec: dict) -> tuple[str, str]:
 
 
 # -- jailed file primitives ------------------------------------------------------------
+#
+# 0.8.2 (the 0.8.1 review's follow-up (b)): every folder on the way is opened as
+# a directory file descriptor, O_DIRECTORY|O_NOFOLLOW, each one relative to the
+# one before it (`dir_fd=`), and every file operation after the walk goes
+# through the last one. So the folder that was checked is the folder used: a
+# folder swapped for a symlink after the walk changes nothing here (the kit
+# still holds the real one), and one swapped in during the walk is refused
+# when its turn comes, because O_NOFOLLOW will not open it. 0.8.1 checked each
+# folder with lstat and then used its PATH again, which a swap in between
+# redirected. The refusals are the same words as before.
 
-def _dirs_nofollow(top: Path, parts: list[str], create: bool) -> Path:
-    """top/parts..., each part a plain name and a REAL directory (never a symlink); made when `create`."""
-    cur = top
-    for part in parts:
-        if part in ("", ".", "..") or "/" in part:
-            raise VisualError(f"{part!r} is not a plain folder name")
-        cur = cur / part
-        try:
-            st = os.lstat(cur)
-        except FileNotFoundError:
-            if not create:
-                raise VisualError(f"{cur.relative_to(top).as_posix()} is not there") from None
-            try:
-                os.mkdir(cur, 0o755)
-            except FileExistsError:
-                pass
-            st = os.lstat(cur)
-        if _stat.S_ISLNK(st.st_mode):
-            raise VisualError(f"{cur.relative_to(top).as_posix()} is a symlink; the kit never follows one")
-        if not _stat.S_ISDIR(st.st_mode):
-            raise VisualError(f"{cur.relative_to(top).as_posix()} is not a folder")
-    return cur
+_O_DIR = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+_O_FILE = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK
 
 
-def _jail(top: Path, rel: str, field: str, create: bool) -> Path:
-    """`rel` under `top`, checked like evidence: plain, no `..`, no secrets file, no symlinked folder."""
+class _At:
+    """An open folder (a directory fd reached without following a symlink) and one name in it.
+
+    A context manager: the fd is closed on exit. `shown` is the path as the
+    refusals say it.
+    """
+
+    def __init__(self, fd: int, name: str, shown: str) -> None:
+        self.fd, self.name, self.shown = fd, name, shown
+
+    def close(self) -> None:
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+    def __enter__(self) -> "_At":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def lstat(self) -> os.stat_result | None:
+        """The name's own stat, never through a symlink; None when absent."""
+        return _lstat_at(self.fd, self.name)
+
+
+def _open_child(fd: int, part: str, shown: str, create: bool) -> int:
+    """Open folder `part` inside the open folder `fd`, never through a symlink; make it first when `create`."""
+    try:
+        return os.open(part, _O_DIR, dir_fd=fd)
+    except FileNotFoundError:
+        if not create:
+            raise VisualError(f"{shown} is not there") from None
+    except OSError:
+        st = _lstat_at(fd, part)
+        if st is not None and _stat.S_ISLNK(st.st_mode):
+            raise VisualError(f"{shown} is a symlink; the kit never follows one") from None
+        if st is not None and not _stat.S_ISDIR(st.st_mode):
+            raise VisualError(f"{shown} is not a folder") from None
+        raise VisualError(f"{shown} cannot be opened as a folder") from None
+    try:
+        os.mkdir(part, 0o755, dir_fd=fd)
+    except FileExistsError:
+        pass                                     # made by someone else meanwhile: opened and checked below
+    return _open_child(fd, part, shown, create=False)
+
+
+def _lstat_at(fd: int, name: str) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _open_dirs(top: Path, parts: list[str], create: bool) -> int:
+    """A directory fd for top/parts..., each part a plain name and a REAL folder (never a symlink); made when `create`.
+
+    `top` itself is trusted (the caller resolved it). The caller closes the fd.
+    """
+    try:
+        fd = os.open(top, _O_DIR)
+    except FileNotFoundError:
+        raise VisualError(f"{top} is not there") from None
+    except OSError as e:
+        raise VisualError(f"{top} cannot be opened as a folder ({type(e).__name__})") from None
+    walked: list[str] = []
+    try:
+        for part in parts:
+            if part in ("", ".", "..") or "/" in part:
+                raise VisualError(f"{part!r} is not a plain folder name")
+            walked.append(part)
+            nxt = _open_child(fd, part, "/".join(walked), create)
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _jail(top: Path, rel: str, field: str, create: bool) -> _At:
+    """`rel` under `top`, checked like evidence: plain, no `..`, no secrets file, no symlinked folder.
+
+    Returns the open parent folder and the file's name: every use goes through it.
+    """
     why = S.visual_path_problem(rel, field)
     if why:
         raise VisualError(why)
-    top = Path(top).resolve()
     parts = rel.split("/")
-    parent = _dirs_nofollow(top, parts[:-1], create)
-    real = parent.resolve()
-    if real != top and top not in real.parents:  # belt and braces: nothing above resolved out
-        raise VisualError(f"{field} {rel!r} resolves outside {top}")
-    return parent / parts[-1]
+    return _At(_open_dirs(Path(top).resolve(), parts[:-1], create), parts[-1], rel)
 
 
-def _read_nofollow(p: Path, cap: int) -> bytes | None:
-    """The bytes of a regular file at `p`, opened without following a symlink; None when absent."""
+def _read_nofollow(at: _At, cap: int) -> bytes | None:
+    """The bytes of the regular file `at` names, opened without following a symlink; None when absent."""
     try:
-        fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK)
+        fd = os.open(at.name, _O_FILE, dir_fd=at.fd)
     except FileNotFoundError:
         return None
     except OSError as e:
-        raise VisualError(f"{p.name} cannot be opened ({type(e).__name__}); a symlink is never followed") from None
+        raise VisualError(f"{at.name} cannot be opened ({type(e).__name__}); a symlink is never followed") from None
     try:
         st = os.fstat(fd)
         if not _stat.S_ISREG(st.st_mode):
-            raise VisualError(f"{p.name} is not a regular file")
+            raise VisualError(f"{at.name} is not a regular file")
         if st.st_size > cap:
-            raise VisualError(f"{p.name} is {st.st_size} bytes, over the {cap}-byte limit")
+            raise VisualError(f"{at.name} is {st.st_size} bytes, over the {cap}-byte limit")
         chunks, left = [], cap + 1
         while left > 0:
             b = os.read(fd, left)
@@ -166,31 +235,45 @@ def _read_nofollow(p: Path, cap: int) -> bytes | None:
             left -= len(b)
         data = b"".join(chunks)
         if len(data) > cap:
-            raise VisualError(f"{p.name} grew past the {cap}-byte limit while it was read")
+            raise VisualError(f"{at.name} grew past the {cap}-byte limit while it was read")
         return data
     finally:
         os.close(fd)
 
 
-def _atomic_write(p: Path, data: bytes) -> None:
-    fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=".ck-", suffix=".tmp")
+def _atomic_write(at: _At, data: bytes) -> None:
+    """Write `data` as `at`'s name: a new temporary file in the same open folder, then a rename over it."""
+    for _ in range(16):
+        tmp = f".ck-{secrets.token_hex(8)}.tmp"
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600,
+                         dir_fd=at.fd)
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise VisualError(f"no free temporary name beside {at.shown}")
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
+            os.fchmod(fh.fileno(), 0o644)
             os.fsync(fh.fileno())
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, p)
+        os.replace(tmp, at.name, src_dir_fd=at.fd, dst_dir_fd=at.fd)
     except BaseException:
-        Path(tmp).unlink(missing_ok=True)
+        try:
+            os.unlink(tmp, dir_fd=at.fd)
+        except FileNotFoundError:
+            pass
         raise
 
 
-def _same_or_absent(p: Path, data: bytes, shown: str) -> bool:
-    """True when `p` already holds exactly `data`, False when absent; refuse other content or a non-file."""
-    if p.is_symlink():
+def _same_or_absent(at: _At, data: bytes, shown: str) -> bool:
+    """True when `at` already holds exactly `data`, False when absent; refuse other content or a non-file."""
+    st = at.lstat()
+    if st is not None and _stat.S_ISLNK(st.st_mode):
         raise VisualError(f"{shown} is a symlink; the kit never writes through one")
-    have = _read_nofollow(p, max(len(data), S.MAX_VISUAL, MAX_DOC_BYTES) + 1)
+    have = _read_nofollow(at, max(len(data), S.MAX_VISUAL, MAX_DOC_BYTES) + 1)
     if have is None:
         return False
     if have != data:
@@ -198,11 +281,11 @@ def _same_or_absent(p: Path, data: bytes, shown: str) -> bool:
     return True
 
 
-def _write_once(p: Path, data: bytes, shown: str) -> bool:
-    """Write `data` at `p` atomically unless it already holds exactly these bytes; True when written."""
-    if _same_or_absent(p, data, shown):
+def _write_once(at: _At, data: bytes, shown: str) -> bool:
+    """Write `data` at `at` atomically unless it already holds exactly these bytes; True when written."""
+    if _same_or_absent(at, data, shown):
         return False
-    _atomic_write(p, data)
+    _atomic_write(at, data)
     return True
 
 
@@ -263,26 +346,24 @@ def store(state: Path, rel: str, doc_rel: str, content: bytes, doc: str) -> None
     for r in (rel, doc_rel):
         if not r.startswith(STORE_DIR + "/"):
             raise VisualError(f"{r!r} is not under {STORE_DIR}/")
-    p = _jail(state, rel, "path", create=True)
-    d = _jail(state, doc_rel, "doc_path", create=True)
-    _write_once(p, content, rel)
-    _write_once(d, doc.encode("utf-8"), doc_rel)
+    with _jail(state, rel, "path", create=True) as p, _jail(state, doc_rel, "doc_path", create=True) as d:
+        _write_once(p, content, rel)
+        _write_once(d, doc.encode("utf-8"), doc_rel)
 
 
-def _locate(state: Path, rec: dict) -> tuple[Path, Path, str]:
+def _locate(state: Path, rec: dict, field: str) -> tuple[_At | None, str]:
+    """The open folder holding a record's visual (`path`) or doc (`doc_path`), or None when its folder is missing."""
     name, doc = stored_names(rec)
     item = rec.get("item")
     if not isinstance(item, str) or not S.ITEM_ID.match(item):
         raise VisualError("the record's item is not an item id")
-    rel = f"{STORE_DIR}/{item}/{name}"
+    rel = f"{STORE_DIR}/{item}/{name if field == 'path' else doc}"
     try:
-        p = _jail(state, rel, "path", create=False)
-        d = _jail(state, f"{STORE_DIR}/{item}/{doc}", "doc_path", create=False)
+        return _jail(state, rel, field, create=False), rel
     except VisualError as e:
         if "is not there" not in str(e):
             raise
-        p = d = Path(state) / rel  # the folder is missing: the file is too, named below
-    return p, d, rel
+        return None, rel  # the folder is missing: the file is too, named by the caller
 
 
 def _missing(rec: dict, rel: str) -> VisualError:
@@ -294,8 +375,11 @@ def _missing(rec: dict, rel: str) -> VisualError:
 
 def read(state: Path, rec: dict) -> bytes:
     """The visual's bytes from STATE, only when it is still exactly what its record says."""
-    p, _, rel = _locate(state, rec)
-    data = _read_nofollow(p, S.MAX_VISUAL)
+    p, rel = _locate(state, rec, "path")
+    if p is None:
+        raise _missing(rec, rel)
+    with p:
+        data = _read_nofollow(p, S.MAX_VISUAL)
     if data is None:
         raise _missing(rec, rel)
     if hashlib.sha256(data).hexdigest() != rec["sha256"]:
@@ -305,12 +389,16 @@ def read(state: Path, rec: dict) -> bytes:
 
 def read_doc(state: Path, rec: dict, request_text: str) -> str:
     """The visual's doc from STATE, only when it is exactly the doc its record and request make."""
-    _, d, rel = _locate(state, rec)
+    d, doc_rel = _locate(state, rec, "doc_path")
     name, _ = stored_names(rec)
+    rel = doc_rel.rsplit("/", 1)[0] + "/" + name
     want = doc_markdown(rec["title"], rec["item"], rec["format"], name, rec["text"], request_text)
-    data = _read_nofollow(d, MAX_DOC_BYTES)
+    if d is None:
+        raise _missing(rec, doc_rel)
+    with d:
+        data = _read_nofollow(d, MAX_DOC_BYTES)
     if data is None:
-        raise _missing(rec, rel.rsplit(".", 1)[0] + ".md")
+        raise _missing(rec, doc_rel)
     if data != want.encode("utf-8"):
         raise VisualError(f"the doc of {rel} changed since the agent stored it; it is not exported")
     return want
@@ -325,19 +413,30 @@ def _dest_names(item: str, name: str, doc: str, visuals_dir: str) -> tuple[str, 
 def scan_destination(top: Path, visuals_dir: str) -> set[tuple[str, str]]:
     """(item, file name) of every visual-shaped file already under top/visuals_dir, never through a symlink."""
     try:
-        base = _dirs_nofollow(Path(top).resolve(), visuals_dir.split("/"), create=False)
+        base = _open_dirs(Path(top).resolve(), visuals_dir.split("/"), create=False)
     except VisualError as e:
         if "is not there" in str(e):
             return set()
         raise
     found: set[tuple[str, str]] = set()
-    for item_dir in sorted(os.listdir(base)):
-        p = base / item_dir
-        if not S.ITEM_ID.match(item_dir) or not _stat.S_ISDIR(os.lstat(p).st_mode):
-            continue
-        for name in sorted(os.listdir(p)):
-            if NAME.match(name) and _stat.S_ISREG(os.lstat(p / name).st_mode):
-                found.add((item_dir, name))
+    try:
+        for item_dir in sorted(os.listdir(base)):
+            st = _lstat_at(base, item_dir)
+            if not S.ITEM_ID.match(item_dir) or st is None or not _stat.S_ISDIR(st.st_mode):
+                continue
+            try:
+                sub = os.open(item_dir, _O_DIR, dir_fd=base)
+            except OSError:
+                continue                      # swapped for something else since the listing: not ours
+            try:
+                for name in sorted(os.listdir(sub)):
+                    fst = _lstat_at(sub, name)
+                    if NAME.match(name) and fst is not None and _stat.S_ISREG(fst.st_mode):
+                        found.add((item_dir, name))
+            finally:
+                os.close(sub)
+    finally:
+        os.close(base)
     return found
 
 
@@ -354,8 +453,8 @@ def export_plan(top: Path, visuals_dir: str, entries: list[dict]) -> list[tuple[
         for rel, data in zip(_dest_names(e["item"], name, doc, visuals_dir),
                              (e["content"].encode("utf-8"), e["doc"].encode("utf-8"))):
             try:
-                p = _jail(top, rel, "destination", create=False)
-                there = _same_or_absent(p, data, rel)
+                with _jail(top, rel, "destination", create=False) as p:
+                    there = _same_or_absent(p, data, rel)
             except VisualError as err:
                 if "is not there" not in str(err):
                     problems.append(str(err))
@@ -376,11 +475,19 @@ def check_index(top: Path, visuals_dir: str) -> None:
         if "is not there" in str(e):
             return
         raise
-    if p.is_symlink():
+    with p:
+        _index_now(p, rel)
+
+
+def _index_now(at: _At, rel: str) -> bytes | None:
+    """The kit's INDEX.md as it is in the open folder, or None; refuse a symlink or one the kit did not write."""
+    st = at.lstat()
+    if st is not None and _stat.S_ISLNK(st.st_mode):
         raise VisualError(f"{rel} is a symlink; the kit never writes through one")
-    have = _read_nofollow(p, MAX_INDEX_BYTES)
+    have = _read_nofollow(at, MAX_INDEX_BYTES)
     if have is not None and have.decode("utf-8", errors="replace").split("\n", 1)[0].strip() != MARK:
         raise VisualError(f"{rel} was not written by the kit; move it aside, and the next export regenerates it")
+    return have
 
 
 def export_write(top: Path, visuals_dir: str, plan: list[tuple[str, bytes, bool]], records: list[dict]) -> dict:
@@ -394,8 +501,8 @@ def export_write(top: Path, visuals_dir: str, plan: list[tuple[str, bytes, bool]
     check_index(top, visuals_dir)
     written, same = [], []
     for rel, data, there in plan:
-        p = _jail(top, rel, "destination", create=True)
-        (written if _write_once(p, data, rel) else same).append(rel)
+        with _jail(top, rel, "destination", create=True) as p:
+            (written if _write_once(p, data, rel) else same).append(rel)
     present = scan_destination(top, visuals_dir)
     by_name, rows = {}, []
     for r in records:
@@ -408,13 +515,12 @@ def export_write(top: Path, visuals_dir: str, plan: list[tuple[str, bytes, bool]
             rows.append(by_name[key])
     unknown = [f"{i}/{n}" for (i, n) in sorted(present) if (i, n) not in by_name]
     index = index_markdown(visuals_dir, rows, unknown).encode("utf-8")
-    base = _dirs_nofollow(top, visuals_dir.split("/"), create=True)
-    p = base / INDEX
-    check_index(top, visuals_dir)           # again, just before the write
-    old = _read_nofollow(p, MAX_INDEX_BYTES)
-    if old != index:
-        _atomic_write(p, index)
-        written.append(f"{visuals_dir}/{INDEX}")
-    else:
-        same.append(f"{visuals_dir}/{INDEX}")
+    rel = f"{visuals_dir}/{INDEX}"
+    with _At(_open_dirs(top, visuals_dir.split("/"), create=True), INDEX, rel) as p:
+        old = _index_now(p, rel)            # again, just before the write, in the folder written to
+        if old != index:
+            _atomic_write(p, index)
+            written.append(rel)
+        else:
+            same.append(rel)
     return {"written": written, "unchanged": same}

@@ -1842,6 +1842,199 @@ class VisualLandingTests(_Live, unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(git(self.svc, "status", "--porcelain", "--untracked-files=all").stdout, "")
 
+    def test_d_a_partial_export_exits_3_and_a_refused_one_exits_1(self):
+        # 0.8.2 (4a). Catches: an export that wrote files but exits 1, the code for "nothing was
+        # written", so a caller cannot tell a partial landing from a refusal (v0.8.1 exits 1 here).
+        good, bad = self.draw(title="Good"), self.draw(title="Bad")
+        (self.cfg.state / bad["path"]).write_text("graph TD\n  tampered\n")    # its hash no longer matches
+        r = self.cli("visual-export", "--project", str(self.work))
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn(f"not exported: visual {bad['id']}", r.stderr)
+        out = json.loads(r.stdout)
+        name = good["path"].rsplit("/", 1)[1]
+        self.assertIn(f"architect/visuals/LANE.1/{name}", out["written"])
+        self.assertEqual([x["id"] for x in out["refused"]], [bad["id"]])
+        # Every chosen visual refused: nothing is written at all, not even INDEX.md, and it exits 1.
+        other = self.base / "agent2"
+        git(self.base, "clone", "-q", "-b", "main", str(self.base / "origin.git"), "agent2")
+        before = snapshot(other)
+        r = self.cli("visual-export", "--project", str(other), "--visual", bad["id"])
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("nothing was written", r.stderr)
+        self.assertEqual(snapshot(other), before)
+        # The codes are documented where a caller looks.
+        self.assertIn("exits 3", self.cli("visual-export", "--help").stdout)
+
+
+# -- 0.8.2: agent names on records, and each agent's own working marks ----------------------
+
+
+class AgentNameTests(_Live, unittest.TestCase):
+    """Several agent sessions share one console: each may say who it is (`agent.py --as NAME`)."""
+
+    def cli(self, *args, env=None):
+        """agent.py in-process with a controlled environment (CONSOLE_KIT_AGENT unset unless given)."""
+        from unittest import mock
+        clean = {k: v for k, v in os.environ.items() if k != "CONSOLE_KIT_AGENT"}
+        with mock.patch.dict(os.environ, {**clean, **(env or {})}, clear=True):
+            return self.agent_cli(*args)
+
+    def view(self):
+        code, body = self.get("/api/view")
+        self.assertEqual(code, 200, body)
+        return body
+
+    def stored_lines(self):
+        return [json.loads(x) for x in self.cfg.store.read_text().splitlines()]
+
+    def test_a_named_agents_records_carry_its_name_in_the_view_and_the_feed(self):
+        # Catches: a name that never leaves agent.py, one stored but not shown, and one shown on
+        # the reply but not on the question or the visual (v0.8.1 has no --as at all).
+        from test_kit import question
+        qfile = self.cfg.root / "q.json"
+        qfile.write_text(json.dumps({k: v for k, v in question(qid="LANE.1/Q2", item="LANE.1").items()
+                                     if k not in ("type", "schemaVersion", "by", "nonce")}))
+        rc, out, err = self.cli("--as", "agent-6", "ask", str(qfile))
+        self.assertEqual(rc, 0, out + err)
+        rc, out, err = self.cli("--as", "agent-6", "reply", "LANE.1", "On it.")
+        self.assertEqual(rc, 0, out + err)
+        reply = json.loads(out)["record"]
+        rc, out, err = self.cli("reply", "LANE.1", "From a session with a name in its env.",
+                                env={"CONSOLE_KIT_AGENT": "agent-7"})
+        self.assertEqual(rc, 0, out + err)
+        from_env = json.loads(out)["record"]
+        rc, out, err = self.cli("--as", "agent-8", "reply", "LANE", "--as beats the env.",
+                                env={"CONSOLE_KIT_AGENT": "agent-7"})
+        self.assertEqual(rc, 0, out + err)
+        beats = json.loads(out)["record"]
+        req = self.owner_msg(item="LANE.1", intent="visual", text="Draw it")
+        (self.cfg.root / "v.mmd").write_text("graph TD\n  A-->B\n")
+        (self.cfg.root / "v.md").write_text("A to B.")
+        rc, out, err = self.cli("--as", "agent-6", "visual", req["id"], "--format", "mermaid", "--file",
+                                str(self.cfg.root / "v.mmd"), "--doc", str(self.cfg.root / "v.md"), "--title", "A to B")
+        self.assertEqual(rc, 0, out + err)
+        view = self.view()["view"]
+        self.assertEqual(view["questions"]["LANE.1/Q2"]["question"]["agent"], "agent-6")
+        by_id = {m["id"]: m for m in view["threads"]["LANE.1"] + view["threads"]["LANE"]}
+        self.assertEqual(by_id[reply["id"]]["agent"], "agent-6")
+        self.assertEqual(by_id[from_env["id"]]["agent"], "agent-7")
+        self.assertEqual(by_id[beats["id"]]["agent"], "agent-8")
+        self.assertEqual(view["visuals"]["LANE.1"][0]["agent"], "agent-6")
+        self.assertEqual(by_id[reply["id"]]["by"], "agent")          # the writer is still the agent door
+        code, feed = self.get("/api/feed?limit=20")
+        self.assertEqual(code, 200, feed)
+        named = {e["id"]: e.get("agent") for e in feed["events"]}
+        self.assertEqual(named[reply["id"]], "agent-6")
+        self.assertIsNone(named[req["id"]])                           # the owner's request names no agent
+
+    def test_an_invalid_name_is_refused_by_name_and_writes_nothing(self):
+        # Catches: a name taken as given (markup, spaces, a newline on the owner's page or in the
+        # rulings record), a name that impersonates the owner, and a refusal that still writes.
+        before = self.console.store.seq()
+        for bad in ("Agent 6", "agent_6", "a" * 33, "agent-6\n", "-agent", "agent--6", "owner", "agent", ""):
+            with self.subTest(name=bad):
+                rc, out, err = self.cli("--as=" + bad, "reply", "LANE.1", "hello")   # = so "-agent" is a value
+                self.assertEqual(rc, 2, out + err)
+                self.assertIn(repr(bad), err)
+                if bad:                                    # an empty variable is an unset one
+                    rc, out, err = self.cli("reply", "LANE.1", "hello", env={"CONSOLE_KIT_AGENT": bad})
+                    self.assertEqual(rc, 2, out + err)
+                    self.assertIn("CONSOLE_KIT_AGENT", err)
+        # The server refuses it too, whoever calls the door.
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/message",
+                                     {"item": "LANE.1", "text": "hi", "nonce": "badname001"}, agent="Bad Name")
+        self.assertEqual(code, 400)
+        self.assertIn("'Bad Name'", out["error"])
+        self.assertEqual(self.console.store.seq(), before)
+        self.assertFalse((self.cfg.state / "names.jsonl").exists())
+
+    def test_a_sync_by_one_agent_leaves_another_agents_working_marks(self):
+        # Catches: `synced` deleting working.json whole, so agent-5 finishing its request wipes the
+        # "agent active" marks agent-6 still holds (v0.8.1 does exactly that).
+        self.assertEqual(self.cli("--as", "agent-5", "working", "LANE")[0], 0)
+        self.assertEqual(self.cli("--as", "agent-6", "working", "LANE.1")[0], 0)
+        self.assertEqual(self.cli("working", "LANE")[0], 0)                   # an unnamed session
+        cur = self.view()["cursor"]
+        self.assertEqual(sorted(cur["working"]), ["LANE", "LANE.1"])
+        self.assertEqual({k: sorted(v) for k, v in cur["working_by"].items()},
+                         {"agent": ["LANE"], "agent-5": ["LANE"], "agent-6": ["LANE.1"]})
+        self.assertEqual(self.cli("--as", "agent-5", "synced")[0], 0)
+        cur = self.view()["cursor"]
+        self.assertEqual({k: sorted(v) for k, v in cur["working_by"].items()},
+                         {"agent": ["LANE"], "agent-6": ["LANE.1"]})
+        self.assertEqual(sorted(cur["working"]), ["LANE", "LANE.1"])
+        self.assertEqual(self.cli("synced")[0], 0)                            # the unnamed bucket only
+        cur = self.view()["cursor"]
+        self.assertEqual({k: sorted(v) for k, v in cur["working_by"].items()}, {"agent-6": ["LANE.1"]})
+        self.assertEqual(self.cli("--as", "agent-6", "synced")[0], 0)
+        self.assertEqual(self.view()["cursor"]["working"], {})
+
+    def test_a_0_8_1_working_file_is_read_as_the_unnamed_bucket(self):
+        # Catches: an upgrade that drops the marks a 0.8.1 server wrote (a flat item -> time map).
+        now = time.strftime(SV.TS_FORMAT, time.gmtime())
+        self.cfg.working.write_text(json.dumps({"LANE.1": now}))
+        cur = self.view()["cursor"]
+        self.assertEqual(cur["working"], {"LANE.1": now})
+        self.assertEqual(cur["working_by"], {"agent": {"LANE.1": now}})
+        self.assertEqual(self.cli("--as", "agent-6", "synced")[0], 0)         # not agent-6's mark
+        self.assertEqual(self.view()["cursor"]["working"], {"LANE.1": now})
+
+    def test_an_unnamed_record_is_stored_and_rendered_exactly_as_before(self):
+        # Catches: a name written into store.jsonl (a 0.8.1 kit refuses the WHOLE store on an
+        # unknown field, so a rollback would not start), and an unnamed record that gains a key.
+        from console_kit import fold as F
+        from console_kit import schema as S
+        from console_kit.store import Store
+        rc, out, _ = self.cli("reply", "LANE.1", "No name.")
+        plain = json.loads(out)["record"]
+        rc, out, _ = self.cli("--as", "agent-6", "reply", "LANE.1", "Named.")
+        named = json.loads(out)["record"]
+        for rec in self.stored_lines():
+            self.assertNotIn("agent", rec)
+            self.assertEqual(S.validate(rec), [], rec)          # what 0.8.1's Store._load runs, line by line
+        self.assertEqual(Store(self.cfg.store).seq(), len(self.stored_lines()))
+        self.assertEqual((self.cfg.state / "names.jsonl").read_text(),
+                         json.dumps({"agent": "agent-6", "id": named["id"]}, separators=(",", ":")) + "\n")
+        view = self.view()["view"]
+        by_id = {m["id"]: m for m in view["threads"]["LANE.1"]}
+        self.assertEqual(by_id[plain["id"]], self.console.store.get(plain["id"]))   # not a key more
+        self.assertEqual(by_id[named["id"]], {**self.console.store.get(named["id"]), "agent": "agent-6"})
+        self.assertEqual(view["questions"]["LANE.1/Q1"]["question"], self.console.store.get(
+            view["questions"]["LANE.1/Q1"]["question"]["id"]))
+        events = {e["id"]: e for e in self.get("/api/feed?limit=20")[1]["events"]}
+        self.assertNotIn("agent", events[plain["id"]])
+
+        # fold export: a question an agent asked by name says so; the seed (no name) is byte-identical.
+        from test_kit import question
+        q = {k: v for k, v in question(qid="LANE.1/Q2", item="LANE.1").items()
+             if k not in ("type", "schemaVersion", "by", "nonce")}
+        code, _ = SV.agent_request(self.cfg.socket, "POST", "/question", {**q, "nonce": "namedq0001"},
+                                   agent="agent-6")
+        self.assertEqual(code, 200)
+        for qid in ("LANE.1/Q1", "LANE.1/Q2"):
+            code, a = self.req("POST", "/api/answer", self.answer(qid=qid, nonce="ans" + qid[-1] * 9), tok=token())
+            self.assertEqual(code, 200, a)
+            code, lk = self.req("POST", "/api/lock", {"qid": qid, "answer": a["record"]["id"],
+                                                      "nonce": "lck" + qid[-1] * 9}, tok=token())
+            self.assertEqual(code, 200, lk)
+        with_names = F.export(Store(self.cfg.store), names=F.names_beside(self.cfg.store))
+        without = F.export(Store(self.cfg.store))
+        self.assertEqual(with_names["LANE.1__Q1.json"], without["LANE.1__Q1.json"])
+        self.assertNotIn("asked_by_agent", with_names["LANE.1__Q1.json"])
+        self.assertEqual(with_names["LANE.1__Q2.json"]["asked_by_agent"], "agent-6")
+        self.assertEqual(with_names["LANE.1__Q2.json"]["asked_by"], "agent")
+        self.assertEqual(F.check_entry("LANE.1__Q2.json", with_names["LANE.1__Q2.json"], ITEMS), [])
+        bad = {**with_names["LANE.1__Q2.json"], "asked_by_agent": "Agent <b>6</b>"}
+        self.assertTrue(any("asked_by_agent" in e for e in F.check_entry("LANE.1__Q2.json", bad, ITEMS)))
+        # The CLI export reads the names file beside the store it is given.
+        import contextlib
+        import io
+        outdir = self.cfg.root / "locked"
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            rc = F.main(["--root", str(self.cfg.root), "export", "--store", str(self.cfg.store), "--out", "locked"])
+        self.assertEqual(rc, 0, printed.getvalue())
+        self.assertEqual(json.loads((outdir / "LANE.1__Q2.json").read_text())["asked_by_agent"], "agent-6")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

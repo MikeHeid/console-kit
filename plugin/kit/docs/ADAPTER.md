@@ -38,6 +38,14 @@ store's `transcript` record on the same fork id. The starter adapter prints
 adapter should print `forked_from` too. Visuals land in `visuals_dir` by their
 own pull request, made with `agent.py visual-export` (below).
 
+From 0.8.2, an entry whose question an agent asked under a name
+(`agent.py --as agent-6`) also carries **`asked_by_agent`**: that name, which
+fold checks is a plain name (lowercase letters, digits, single hyphens) before
+`record()` sees it. An entry for a question asked with no name has no such
+key, and is byte for byte what 0.8.1 exported. The starter adapter prints
+"**Agent:** `agent-6`." only when the key is there; a project's own adapter
+may print it the same way, and needs no change if it does not.
+
 ## The starter, and moving past it
 
 The starter keeps everything under `.console-kit/`:
