@@ -2108,6 +2108,15 @@ GOOD_USAGE = {
     "seven_day": {"used_percentage": 18.5, "resets_at": None},
     "extra_field_never_forwarded": "planted-usage-marker",
 }
+NATIVE_USAGE = {  # the shape Claude Code hands a status line command (abridged)
+    "session_id": "planted-session-marker",
+    "transcript_path": "/home/planted-path-marker/t.jsonl",
+    "cost": {"total_cost_usd": 1.25},
+    "rate_limits": {
+        "five_hour": {"used_percentage": 42, "resets_at": 1790802000},
+        "seven_day": {"used_percentage": 18, "resets_at": 1791158400},
+    },
+}
 ACCOUNT_DOC = {
     "oauthAccount": {"emailAddress": "owner@example.com", "accountUuid": "planted-uuid-marker"},
     "primaryApiKey": "planted-secret-marker",
@@ -2184,6 +2193,71 @@ class UsageTests(_Live, unittest.TestCase):
                 self.assertIsNone(out["usage"])
                 self.assertIn(problem, out["usage_problem"])
                 self.assertNotIn("planted", json.dumps(out))
+
+    def test_claude_codes_own_status_line_input_is_read_as_is(self):
+        # Claude Code hands its status line command a JSON object with the windows under
+        # rate_limits, reset times as epoch seconds and no updated_at; a status line that saves it
+        # is the usage file. Catches: a kit that reads only claude-hud's shape (the footer stays
+        # empty on a host whose status line is not claude-hud), an updated_at invented as "now"
+        # instead of the file's own write time (a stale file would never read as stale), and the
+        # session's other fields (paths, session id) reaching the page.
+        u, _ = self.configure(NATIVE_USAGE)
+        os.utime(u, (1790791200, 1790791200))
+        out = self.usage()
+        self.assertIsNone(out["usage_problem"])
+        self.assertEqual(out["usage"], {
+            "updated_at": "2026-09-30T18:00:00Z",
+            "five_hour": {"used_percentage": 42.0, "resets_at": "2026-09-30T21:00:00Z"},
+            "seven_day": {"used_percentage": 18.0, "resets_at": "2026-10-05T00:00:00Z"}})
+        self.assertNotIn("planted", json.dumps(out))
+
+    def test_a_bad_epoch_reset_is_named(self):
+        # Catches: a boolean or float taken as seconds, and a negative or far-future number
+        # turned into a date (or a 500) instead of a named problem.
+        for resets, problem in [(True, "five_hour reset time is not a timestamp"),
+                                (1.5, "five_hour reset time is not a timestamp"),
+                                (-1, "five_hour reset time is out of range"),
+                                (10 ** 12, "five_hour reset time is out of range"),
+                                (10 ** 400, "five_hour reset time is out of range")]:
+            with self.subTest(resets=resets):
+                limits = {**NATIVE_USAGE["rate_limits"],
+                          "five_hour": {"used_percentage": 1, "resets_at": resets}}
+                self.configure({**NATIVE_USAGE, "rate_limits": limits})
+                out = self.usage()
+                self.assertIsNone(out["usage"])
+                self.assertIn(problem, out["usage_problem"])
+
+    def test_a_write_time_in_the_future_is_named_not_shown_as_fresh(self):
+        # Review of #17: a clock skew or a touch -d would otherwise read as fresh for years.
+        # Catches: forwarding any mtime unchecked; and one minute of slack is allowed, so a
+        # host whose clock sits a few seconds behind the writer's still shows the numbers.
+        u, _ = self.configure(NATIVE_USAGE)
+        ahead = time.time() + 3600
+        os.utime(u, (ahead, ahead))
+        out = self.usage()
+        self.assertIsNone(out["usage"])
+        self.assertIn("write time is in the future", out["usage_problem"])
+        nearly = time.time() + 5
+        os.utime(u, (nearly, nearly))
+        self.assertIsNone(self.usage()["usage_problem"])
+
+    def test_claude_code_input_before_its_first_limits_says_so(self):
+        # Claude Code sends no rate_limits until the session's first API answer. Catches: the
+        # misleading "updated_at is not a timestamp" the review of #17 measured for that case.
+        self.configure({k: v for k, v in NATIVE_USAGE.items() if k != "rate_limits"})
+        self.assertEqual(self.usage()["usage_problem"], "the usage file has no usage limits yet")
+
+    def test_a_huge_percentage_is_named(self):
+        # Review of #17: 10**400 made math.isfinite raise, which reached only the generic message.
+        limits = {**NATIVE_USAGE["rate_limits"], "five_hour": {"used_percentage": 10 ** 400, "resets_at": None}}
+        self.configure({**NATIVE_USAGE, "rate_limits": limits})
+        self.assertIn("five_hour percentage is not 0-100", self.usage()["usage_problem"])
+
+    def test_top_level_windows_win_over_rate_limits(self):
+        # Catches: a file carrying both shapes read from the one the writer did not mean.
+        self.configure({**GOOD_USAGE, "rate_limits": {"five_hour": {"used_percentage": 99, "resets_at": None},
+                                                      "seven_day": {"used_percentage": 99, "resets_at": None}}})
+        self.assertEqual(self.usage()["usage"]["five_hour"]["used_percentage"], 42.0)
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a FIFO")
     def test_a_fifo_where_a_file_should_be_is_refused_without_blocking(self):
