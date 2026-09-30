@@ -14,6 +14,13 @@ Set up `KIT`, `STATE` and `A` as in the console-process skill: from the
 user's registry only, and stop if this project is not registered there. In an
 unregistered project, ask in the conversation instead.
 
+**When the console has a steward (0.8.3)**, every session but the steward's
+posts its questions here, never with AskUserQuestion: the plugin blocks that
+tool in those sessions and points here. Sign the posts (`A` with `--as
+NAME`). The steward may ask the owner live, and then mirrors the question and
+the owner's answer here (`A ask`, then `A reply ITEM` with the answer), so
+every decision reaches the console either way.
+
 ## 1. Keep the document as the source
 
 The study, brief or spec that raised the question keeps its full text. The

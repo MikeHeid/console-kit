@@ -26,6 +26,10 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 HERE = Path(__file__).resolve().parent
 KIT = HERE / "plugin" / "kit"  # the kit ships inside the plugin, so every install carries it
 sys.path.insert(0, str(KIT))
+# 0.8.3: never read or write the user's real registry (`watch`, `synced` and the fold read it).
+if not os.environ.get("CONSOLE_KIT_TEST_CONFIG"):
+    os.environ["CONSOLE_KIT_TEST_CONFIG"] = os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="ck-cfg-")
+os.environ.pop("CONSOLE_KIT_AGENT", None)
 from console_kit import server as SV  # noqa: E402
 
 TEAM = "team.example.cloudflareaccess.com"
@@ -2034,6 +2038,64 @@ class AgentNameTests(_Live, unittest.TestCase):
             rc = F.main(["--root", str(self.cfg.root), "export", "--store", str(self.cfg.store), "--out", "locked"])
         self.assertEqual(rc, 0, printed.getvalue())
         self.assertEqual(json.loads((outdir / "LANE.1__Q2.json").read_text())["asked_by_agent"], "agent-6")
+
+
+    def test_one_agent_keeps_at_most_32_marks_its_newest(self):
+        # 0.8.2 review follow-up (server.py `set_working`). Catches: a cap that is never applied, one
+        # that keeps the OLDEST marks (the items this agent left long ago), and one that cuts
+        # another agent's marks to make room.
+        self.assertEqual(self.cli("--as", "agent-5", "working", "LANE")[0], 0)
+        items = [f"ITEM.{n:02d}" for n in range(40)]
+        for i in items:
+            rc, out, err = self.cli("--as", "agent-6", "working", i)
+            self.assertEqual(rc, 0, out + err)
+        by = self.view()["cursor"]["working_by"]
+        self.assertEqual(len(by["agent-6"]), SV.MAX_WORKING)
+        self.assertEqual(SV.MAX_WORKING, 32)
+        self.assertEqual(sorted(by["agent-6"]), items[-32:])
+        self.assertEqual(list(by["agent-5"]), ["LANE"])
+
+
+# -- 0.8.3: the steward -------------------------------------------------------------------
+
+
+class StewardDoorTests(_Live, unittest.TestCase):
+    """Under a steward, every other session still asks, replies and marks work through the door."""
+
+    def setUp(self):
+        _Live.setUp(self)
+        from unittest import mock
+        from console_kit import registry as R
+        cfg = Path(self.tmp.name) / "cfg"
+        self._env = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(cfg)})
+        self._env.start()
+        project = Path(self.tmp.name) / "project"
+        project.mkdir()
+        R.register(project, self.cfg.state, KIT)
+        R.set_steward(self.cfg.state, "agent-5")
+
+    def tearDown(self):
+        self._env.stop()
+        _Live.tearDown(self)
+
+    def test_ask_reply_and_working_stay_open_to_every_session(self):
+        from test_kit import question
+        qfile = self.cfg.root / "q.json"
+        qfile.write_text(json.dumps({k: v for k, v in question(qid="LANE.1/Q2", item="LANE.1").items()
+                                     if k not in ("type", "schemaVersion", "by", "nonce")}))
+        for who in (["--as", "agent-6"], []):
+            with self.subTest(who=who):
+                rc, out, err = ServerTests.agent_cli(self, *who, "reply", "LANE.1", "Posted, not asked live.")
+                self.assertEqual(rc, 0, out + err)
+                rc, out, err = ServerTests.agent_cli(self, *who, "working", "LANE.1")
+                self.assertEqual(rc, 0, out + err)
+        rc, out, err = ServerTests.agent_cli(self, "--as", "agent-6", "ask", str(qfile))
+        self.assertEqual(rc, 0, out + err)
+        rc, out, err = ServerTests.agent_cli(self, "--as", "agent-6", "synced")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("steward, agent-5", err)
+        rc, out, err = ServerTests.agent_cli(self, "--as", "agent-5", "synced")
+        self.assertEqual(rc, 0, out + err)
 
 
 if __name__ == "__main__":

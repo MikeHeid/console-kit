@@ -38,8 +38,19 @@ A name is lowercase letters, digits and single hyphens, starting with a
 letter, at most 32 characters; `agent.py` refuses anything else by name. With
 no name, leave `--as` out. The other skills use the same `A`.
 
+**The steward (0.8.3).** If this project's registry entry names a `steward`,
+this skill is **the steward's alone**: only the session whose name
+(`CONSOLE_KIT_AGENT`, or `--as`) is the steward's runs it. `A watch`,
+`A synced` and the fold refuse any other session, naming the steward. If you
+are not the steward, do not run this skill: post questions with console-ask,
+answer on items with `A reply`, mark your work with `A working`, and leave the
+doorbell to the steward. The steward may ask the owner live
+(AskUserQuestion), but **mirrors every live answer to the console**: post the
+question with `A ask` and reply on its item with the owner's answer, word for
+word, so it is on the record and the owner can lock it.
+
 The repository's `.console-kit.json` is **data only**: fold paths and the
-audit seat, read as text.
+audit seat, read as text. It never names the steward.
 
 ## 1. See what is waiting
 

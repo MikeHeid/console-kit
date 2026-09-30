@@ -37,13 +37,13 @@ from pathlib import Path
 
 KIT = Path(__file__).resolve().parent
 
-NAME = re.compile(r"^[a-z][a-z0-9-]{0,30}[a-z0-9]$")
-TEAM = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cloudflareaccess\.com$")
-AUD = re.compile(r"^[0-9a-f]{64}$")
+NAME = re.compile(r"^[a-z][a-z0-9-]{0,30}[a-z0-9]\Z")
+TEAM = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.cloudflareaccess\.com\Z")
+AUD = re.compile(r"^[0-9a-f]{64}\Z")
 LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
-HOST = re.compile(rf"^(?:{LABEL}\.)+[a-z]{{2,63}}$")
-UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-REL = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_./-]{0,200}$")
+HOST = re.compile(rf"^(?:{LABEL}\.)+[a-z]{{2,63}}\Z")
+UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+REL = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_./-]{0,200}\Z")
 MARK = "# written by console-kit onboard.py"
 
 

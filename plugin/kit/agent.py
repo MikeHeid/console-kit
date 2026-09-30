@@ -47,8 +47,11 @@
                                                 marks, by --as name), and it lapses after an hour
     agent.py --state DIR synced [--through SEQ] [--error MSG]
                                                 record that the agent has processed the doorbell up to SEQ
-    agent.py --state DIR register --project DIR
+    agent.py --state DIR register --project DIR [--steward NAME]
                                                 switch the plugin on for a project (you run this, never a session)
+    agent.py --state DIR steward [NAME | --clear]
+                                                show, set or clear the console's steward in your registry (0.8.3;
+                                                you run this, never a session)
 
 `register` records, in your own registry (~/.config/console-kit/projects.json),
 the project, this state dir, and the kit this agent.py lives in. The plugin
@@ -74,6 +77,17 @@ visuals and transcripts this session writes, and `working`/`synced` then keep
 and clear this session's own "agent active" marks, never another's. With no
 name, everything is exactly as in 0.8.1, and the unnamed sessions share one
 set of marks.
+
+**The steward (0.8.3).** The doorbell has one cursor, so when several
+sessions share a console, the user may name one of them its steward, in their
+own registry: `agent.py --state DIR steward agent-5` (or `register ...
+--steward agent-5`). Then `watch` and `synced` (and `fold.py`) refuse, exit 1,
+unless this session's name (`--as`, or CONSOLE_KIT_AGENT) is the steward's; the
+refusal names the steward and points at `ask`, `reply` and `working`, which
+stay open to every session, named or not. The repository's `.console-kit.json`
+cannot set it. With no steward, everything is as in 0.8.2. It is a guardrail
+between cooperating sessions of one user, not a security boundary: any process
+running as that user can edit the registry or the cursor.
 """
 
 import argparse
@@ -371,6 +385,13 @@ def main(argv=None) -> int:
     s.add_argument("--error")
     s = sub.add_parser("register")
     s.add_argument("--project", type=Path, required=True)
+    s.add_argument("--steward", metavar="NAME",
+                   help="the one session that may watch, sync and fold this console (0.8.3; default: keep it)")
+    s = sub.add_parser("steward", description="Show, set or clear this console's steward in your own registry "
+                       "(0.8.3). You run this, never a session.")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("name", nargs="?", help="the steward's agent name, e.g. agent-5")
+    g.add_argument("--clear", action="store_true", help="no steward: every session may watch, sync and fold")
     a = ap.parse_args(argv)
     # The agent name (0.8.2): --as wins over the environment; an empty variable counts as unset.
     if a.agent is None and os.environ.get(N.ENV):
@@ -382,6 +403,10 @@ def main(argv=None) -> int:
         if why:
             print(f"agent.py: {where}: {why}; nothing was sent", file=sys.stderr)
             return 2
+    for given in (getattr(a, "steward", None), getattr(a, "name", None)):
+        if given is not None and N.problem(given):
+            print(f"agent.py: steward: {N.problem(given)}; nothing was written", file=sys.stderr)
+            return 2
     bell = a.state / "inbox.jsonl"
     try:
         return _run(a, bell)
@@ -390,11 +415,47 @@ def main(argv=None) -> int:
         return 1
 
 
+def steward_refusal(state: Path, agent: str | None, what: str) -> str | None:
+    """Why this session may not `what` (watch, synced, the fold), or None when it may (0.8.3).
+
+    The check lives HERE, in the client, and not on the agent socket: `watch`
+    reads the doorbell file and writes its heartbeat without ever calling the
+    server, `synced` moves the cursor file before its one POST, and the fold
+    reads the store file directly. A server check would see only that POST.
+    Raises R.RegistryError when the registry cannot be read or names two
+    stewards: a lock the user set does not quietly switch itself off.
+    """
+    name = R.steward_for_state(state)
+    if name is None or agent == name:
+        return None
+    who = f"this session ({agent})" if agent else "this session (unnamed)"
+    return (f"refused: {what} belongs to this console's steward, {name}, and {who} is not it. Only the steward "
+            f"watches the doorbell, marks it synced and folds answers. Use `ask`, `reply` and `working` instead, "
+            f"signed with --as YOUR-NAME: the steward handles the owner's requests. (The steward is set in your "
+            f"own registry, {R.location()}, with `agent.py steward`; a session named {name} runs as it: "
+            f"--as {name}, or {N.ENV}={name}.)")
+
+
 def _run(a, bell: Path) -> int:
     if a.cmd == "register":
-        e = R.register(a.project, a.state, Path(__file__).resolve().parent)
-        print(f"registered {Path(a.project).resolve()}: state {e['state']}, kit {e['kit']} in {R.location()}")
+        e = R.register(a.project, a.state, Path(__file__).resolve().parent, steward=a.steward)
+        print(f"registered {Path(a.project).resolve()}: state {e['state']}, kit {e['kit']}"
+              + (f", steward {e[R.STEWARD]}" if R.STEWARD in e else "") + f" in {R.location()}")
         return 0
+    if a.cmd == "steward":
+        if a.name is None and not a.clear:
+            name = R.steward_for_state(a.state)
+            print(f"steward: {name}" if name else "no steward: every session may watch, sync and fold")
+            return 0
+        roots = R.set_steward(a.state, None if a.clear else a.name)
+        print((f"steward {a.name}" if a.name else "no steward") + f" for the console at "
+              f"{Path(a.state).resolve()}: {', '.join(roots)} in {R.location()}")
+        return 0
+    if a.cmd in ("watch", "synced"):
+        why = steward_refusal(a.state, a.agent, f"`{a.cmd}`")
+        if why:
+            print(why, file=sys.stderr)
+            return 1
     if a.cmd == "inbox":
         since = 0 if a.all else (a.since if a.since is not None else D.read_cursor(a.state))
         for line in D.pending(bell, since, intents=None):

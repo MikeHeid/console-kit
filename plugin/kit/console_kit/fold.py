@@ -31,6 +31,7 @@ from typing import Protocol
 
 from . import anchors as A
 from . import names as N
+from . import registry as R
 from . import schema as S
 from .store import Store
 
@@ -61,7 +62,7 @@ RECORD_ID = S.RECORD_ID
 # file is refused rather than bloating the record. Generous on purpose.
 MAX_EARLIER = 100
 MAX_FORK_QUESTIONS = 5  # the store's cap, re-checked across committed files (§6.6)
-TS = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+TS = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\Z")
 
 
 def locked_filename(qid: str) -> str:
@@ -474,6 +475,42 @@ def inside(root: Path, raw: str, what: str) -> Path:
     return Path(full)
 
 
+def _steward_refusal(a) -> str | None:
+    """The steward lock (0.8.3), as `agent.py` applies it to `watch` and `synced`.
+
+    The lock is keyed to what the command TOUCHES, not to how it was called:
+    `export` to the console whose store it reads (the store's directory is the
+    console's state) and to the project its `--out` lands in; `fold` to the
+    project of `--root` and of each of `--locked`, `--ledger` and `--adapter`.
+    Each path is resolved and walked up to the NEAREST registered project
+    (`R.enclosing`), so neither an ancestor `--root` above a registered project
+    nor a path reaching into a project registered below `--root` escapes the
+    lock. If any of them lands on a console with a steward that is not this
+    session, it is refused. Paths in no registered project carry no lock.
+    """
+    root = Path(a.root)
+    touched = [root, root / a.out] if a.cmd == "export" else \
+        [root, root / a.locked, root / a.ledger, root / a.adapter]
+    projects = R.load()
+    states: dict[Path, str] = {}
+    if a.cmd == "export":
+        states[Path(a.store).resolve().parent] = f"the store {a.store}"
+    for t in touched:
+        hit = R.enclosing(t, projects)
+        if hit is not None:
+            states.setdefault(Path(hit[1]["state"]), f"{t} (in {hit[0]})")
+    for state, what in states.items():
+        name = R.steward_for_state(state)
+        if name is None or a.agent == name:
+            continue
+        who = f"this session ({a.agent})" if a.agent else "this session (unnamed)"
+        return (f"refused: the fold belongs to this console's steward, {name}, and {who} is not it ({what} is "
+                f"on its console). Only the steward watches the doorbell, marks it synced and folds answers. "
+                f"Use `ask`, `reply` and `working` instead; the steward folds what the owner locks. (A session "
+                f"named {name} runs as it: --as {name}, or {N.ENV}={name}.)")
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--root", type=Path, default=Path("."),
@@ -487,7 +524,22 @@ def main(argv: list[str] | None = None) -> int:
     fo.add_argument("--ledger", required=True)
     fo.add_argument("--adapter", required=True)
     fo.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--as", dest="agent", metavar="NAME",
+                    help=f"this session's agent name (default: ${N.ENV}); checked against the console's steward")
     a = ap.parse_args(argv)
+    if a.agent is None and os.environ.get(N.ENV):
+        a.agent = os.environ[N.ENV]
+    if a.agent is not None and N.problem(a.agent):
+        print(f"fold: agent name: {N.problem(a.agent)}; nothing was done", file=sys.stderr)
+        return 2
+    try:
+        why = _steward_refusal(a)
+    except R.RegistryError as err:
+        print(f"fold: {err}", file=sys.stderr)
+        return 1
+    if why:
+        print(f"fold: {why}", file=sys.stderr)
+        return 1
     try:
         if a.cmd == "export":
             a.out = inside(a.root, a.out, "--out")

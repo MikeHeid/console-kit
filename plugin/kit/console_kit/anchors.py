@@ -42,7 +42,7 @@ MAX_READ = 2 << 20      # bytes: a larger file is never read (0.7.0); it answers
 UNREADABLE = {"outside": "resolves outside the project", "missing": "is not in the project",
               "secret": "is a secrets file, which is never read", "too_large": f"is over {MAX_READ >> 20} MiB, "
               "so it is not read"}
-SOURCE_RANGE = re.compile(r"^(?P<path>[^:]+):(?P<a>[0-9]+)(?:-(?P<b>[0-9]+))?$")
+SOURCE_RANGE = re.compile(r"^(?P<path>[^:]+):(?P<a>[0-9]+)(?:-(?P<b>[0-9]+))?\Z")
 
 
 def normalise(text: str) -> str:

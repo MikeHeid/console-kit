@@ -45,7 +45,7 @@ ENV = "CONSOLE_KIT_AGENT"
 # single hyphens, at most 32 characters ("agent-6", "review-bot"). It is shown
 # on the owner's page and printed into the rulings record, so it is held to
 # exactly this shape.
-NAME = re.compile(r"^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31}$")
+NAME = re.compile(r"^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31}\Z")
 MAX_NAME = 32
 # "agent" is the shared bucket of every session that gives no name (the working
 # marks, `server.working`), and "owner" is the owner's own author word: an agent

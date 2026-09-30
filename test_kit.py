@@ -23,6 +23,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 KIT = HERE / "plugin" / "kit"  # the kit ships inside the plugin, so every install carries it
 sys.path.insert(0, str(KIT))
+# 0.8.3: `watch`, `synced` and the fold read the user's registry for a steward, so no test may
+# ever read (or write) the real one: every test process gets an empty config home of its own.
+if not os.environ.get("CONSOLE_KIT_TEST_CONFIG"):
+    os.environ["CONSOLE_KIT_TEST_CONFIG"] = os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="ck-cfg-")
+os.environ.pop("CONSOLE_KIT_AGENT", None)
 from console_kit import doorbell as D  # noqa: E402
 from console_kit import registry as R  # noqa: E402
 from console_kit import fold as F  # noqa: E402
@@ -1496,8 +1501,14 @@ class SessionStartHookTests(Tmp):
             self.assertEqual(getattr(hook, name), getattr(R, name), name)
         self.assertEqual(hook.PLAIN_PATH.pattern, R.PLAIN_PATH.pattern)
         self.assertEqual(hook.REGISTRY_FILE, R.FILE)
+        from console_kit import names as N
+        self.assertEqual((hook.AGENT_NAME.pattern, hook.MAX_NAME, hook.RESERVED, hook.AGENT_ENV),
+                         (N.NAME.pattern, N.MAX_NAME, N.RESERVED, N.ENV))
         good = {"state": str(self.dir / "s"), "kit": str(KIT)}
-        cases = [good, {"state": "rel", "kit": str(KIT)}, dict(good, x=1), {"state": 5, "kit": str(KIT)}, []]
+        cases = [good, {"state": "rel", "kit": str(KIT)}, dict(good, x=1), {"state": 5, "kit": str(KIT)}, [],
+                 dict(good, steward="agent-5"), dict(good, steward="Agent 5"), dict(good, steward="agent"),
+                 dict(good, steward="agent-5\n"), dict(good, steward=5), dict(good, steward=None),
+                 dict(good, steward="agent-5", x=1)]  # 0.8.3: an optional steward, held to the name rule
         reg = self.config_home / "console-kit" / "projects.json"
         reg.parent.mkdir(parents=True)
         env_before = os.environ.get("XDG_CONFIG_HOME")
@@ -1572,6 +1583,460 @@ class RegistryTests(Tmp):
         D.write_cursor(self.dir, 3)
         self.assertEqual(oct((self.dir / D.CURSOR_FILE).stat().st_mode & 0o777), "0o600")
         self.assertEqual(sorted(p.name for p in self.dir.iterdir()), [D.CURSOR_FILE])
+
+
+# -- 0.8.3: the steward (owner, 2026-09-30, "Lock + hook others ★") --------------------------
+
+
+class _Steward(Tmp):
+    """A user registry in a temporary config home, and agent.py / fold.py run as a session would."""
+
+    def setUp(self):
+        super().setUp()
+        self.cfg_home = self.dir / "cfg"
+        self.project = self.dir / "project"
+        self.project.mkdir()
+        self.state = self.dir / "state"
+        self.state.mkdir()
+        self.reg = self.cfg_home / "console-kit" / "projects.json"
+
+    def env(self, agent=None, **extra):
+        e = {k: v for k, v in os.environ.items() if k != "CONSOLE_KIT_AGENT"}
+        e["XDG_CONFIG_HOME"] = str(self.cfg_home)
+        if agent is not None:
+            e["CONSOLE_KIT_AGENT"] = agent
+        e.update(extra)
+        return e
+
+    def run_py(self, script, *args, agent=None, cwd=None):
+        r = subprocess.run([sys.executable, str(script), *args], env=self.env(agent), capture_output=True,
+                           text=True, timeout=60, cwd=cwd)
+        return r.returncode, r.stdout, r.stderr
+
+    def agent(self, *args, agent=None):
+        return self.run_py(KIT / "agent.py", "--state", str(self.state), *args, agent=agent)
+
+    def registry(self):
+        return json.loads(self.reg.read_text())["projects"]
+
+    def register(self, *extra, project=None):
+        rc, out, err = self.agent("register", "--project", str(project or self.project), *extra)
+        self.assertEqual(rc, 0, out + err)
+
+
+class StewardRegistryTests(_Steward):
+    """The steward lives in the USER's registry: set by the user's own command, never by the repository."""
+
+    def test_register_and_steward_set_change_and_clear_it(self):
+        # Catches: a --steward that is parsed but never written, a `steward` command that rewrites
+        # state or kit, and a clear that leaves a key behind (0.8.2's exact entry shape must return).
+        self.register("--steward", "agent-5")
+        entry = self.registry()[os.path.realpath(self.project)]
+        self.assertEqual(entry, {"state": os.path.realpath(self.state), "kit": str(KIT), "steward": "agent-5"})
+        rc, out, err = self.agent("steward")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("agent-5", out)
+        rc, out, err = self.agent("steward", "agent-6")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.registry()[os.path.realpath(self.project)]["steward"], "agent-6")
+        self.register()      # re-registering (a new kit, say) keeps the console's steward: no silent unlock
+        self.assertEqual(self.registry()[os.path.realpath(self.project)]["steward"], "agent-6")
+        rc, out, err = self.agent("steward", "--clear")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.registry()[os.path.realpath(self.project)],
+                         {"state": os.path.realpath(self.state), "kit": str(KIT)})
+        self.assertEqual(oct(self.reg.stat().st_mode & 0o777), "0o600")
+
+    def test_a_bad_steward_name_is_refused_and_nothing_is_written(self):
+        # Catches: a steward taken as given (it is printed into every session's context).
+        self.register()
+        before = self.reg.read_bytes()
+        for bad in ("Agent 5", "agent", "owner", "agent-5\n", "x" * 33):
+            with self.subTest(name=bad):
+                rc, out, err = self.agent("steward", bad)
+                self.assertEqual(rc, 2, out + err)
+                self.assertIn(repr(bad), err)
+                rc, out, err = self.agent("register", "--project", str(self.project), "--steward", bad)
+                self.assertEqual(rc, 2, out + err)
+        self.assertEqual(self.reg.read_bytes(), before)
+
+    def test_steward_needs_a_registered_console(self):
+        rc, out, err = self.agent("steward", "agent-5")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("register", err)
+        self.assertFalse(self.reg.exists())
+
+    def test_the_steward_belongs_to_the_console_so_every_entry_on_its_state_carries_it(self):
+        # Several checkouts (worktrees) of one project share one console. Catches: a lock that
+        # holds in the checkout it was set in and is silently off in its sibling.
+        other = self.dir / "worktree"
+        other.mkdir()
+        self.register()
+        self.register(project=other)
+        rc, out, err = self.agent("steward", "agent-5")
+        self.assertEqual(rc, 0, out + err)
+        reg = self.registry()
+        self.assertEqual({reg[os.path.realpath(p)].get("steward") for p in (self.project, other)}, {"agent-5"})
+        third = self.dir / "third"
+        third.mkdir()
+        self.register(project=third)            # no --steward: it joins the console's steward
+        self.assertEqual(self.registry()[os.path.realpath(third)]["steward"], "agent-5")
+        elsewhere = self.dir / "elsewhere-state"
+        elsewhere.mkdir()
+        R.register(third, elsewhere, KIT, path=self.reg)   # moved to another console: no steward there
+        self.assertNotIn("steward", self.registry()[os.path.realpath(third)])
+        self.assertEqual(self.registry()[os.path.realpath(other)]["steward"], "agent-5")
+
+    def test_two_stewards_on_one_console_are_refused_by_name(self):
+        other = self.dir / "worktree"
+        other.mkdir()
+        self.register("--steward", "agent-5")
+        body = json.loads(self.reg.read_text())
+        body["projects"][os.path.realpath(other)] = {"state": os.path.realpath(self.state), "kit": str(KIT),
+                                                     "steward": "agent-6"}
+        self.reg.write_text(json.dumps(body))
+        rc, out, err = self.agent("watch", "--timeout", "0.1", agent="agent-5")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("agent-5", err)
+        self.assertIn("agent-6", err)
+
+    def test_the_repository_cannot_set_a_steward(self):
+        # Registry trust, as for kit and state. Catches: a steward read from .console-kit.json,
+        # which would let a clone lock the owner's own sessions out (or name itself steward).
+        self.register()
+        (self.project / ".console-kit.json").write_text(json.dumps({"steward": "agent-9"}))
+        self.assertIsNone(R.steward_for_state(self.state, path=self.reg))
+        rc, out, err = self.agent("watch", "--timeout", "0.1", agent="agent-1")
+        self.assertEqual(rc, 3, out + err)      # timed out waiting: not refused
+
+
+class StewardLockTests(_Steward):
+    """watch, synced and the fold refuse every session but the steward; ask, reply and working stay open."""
+
+    def assert_refused(self, rc, err, steward="agent-5"):
+        self.assertEqual(rc, 1, err)
+        self.assertIn(f"steward, {steward}", err)
+        for verb in ("ask", "reply", "working"):
+            self.assertIn(f"`{verb}`", err)
+
+    def test_watch_refuses_all_but_the_steward(self):
+        # Catches: a lock on --as only (the environment's name ignored), an unnamed session let
+        # through, and a lock that also stops the steward.
+        self.register("--steward", "agent-5")
+        rc, _, err = self.agent("--as", "agent-6", "watch", "--timeout", "0.1")
+        self.assert_refused(rc, err)
+        self.assertIn("agent-6", err)
+        rc, _, err = self.agent("watch", "--timeout", "0.1", agent="agent-6")
+        self.assert_refused(rc, err)
+        rc, _, err = self.agent("watch", "--timeout", "0.1")
+        self.assert_refused(rc, err)
+        self.assertIn("unnamed", err)
+        self.assertFalse((self.state / "watch.json").exists())      # a refused watch never says "listening"
+        self.assertEqual(self.agent("watch", "--timeout", "0.1", agent="agent-5")[0], 3)
+        self.assertEqual(self.agent("--as", "agent-5", "watch", "--timeout", "0.1", agent="agent-6")[0], 3)
+
+    def test_synced_refuses_all_but_the_steward_and_moves_no_cursor(self):
+        self.register("--steward", "agent-5")
+        rc, _, err = self.agent("--as", "agent-6", "synced", "--through", "7")
+        self.assert_refused(rc, err)
+        self.assertEqual(D.read_cursor(self.state), 0)
+        rc, _, err = self.agent("synced", "--error", "x")
+        self.assert_refused(rc, err)
+        rc, _, err = self.agent("--as", "agent-5", "synced", "--through", "7")
+        self.assertEqual(rc, 2, err)          # no server in this test: the cursor moved, then the POST failed
+        self.assertEqual(D.read_cursor(self.state), 7)
+
+    def test_with_no_steward_everything_is_as_in_0_8_2(self):
+        self.register()
+        self.assertEqual(self.agent("watch", "--timeout", "0.1")[0], 3)
+        self.assertEqual(self.agent("--as", "agent-6", "watch", "--timeout", "0.1")[0], 3)
+        self.assertEqual(self.agent("--as", "agent-6", "synced", "--through", "3")[0], 2)
+        self.assertEqual(D.read_cursor(self.state), 3)
+        # An unregistered console (no registry at all) is not locked either.
+        self.reg.unlink()
+        self.assertEqual(self.agent("watch", "--timeout", "0.1")[0], 3)
+
+    def test_a_broken_registry_refuses_the_locked_verbs_by_name(self):
+        # A guardrail the user set must not switch itself off because the file broke: agent.py
+        # names the registry and does nothing (the question hook, by contrast, fails open).
+        self.register("--steward", "agent-5")
+        self.reg.write_text("{not json")
+        rc, out, err = self.agent("--as", "agent-5", "watch", "--timeout", "0.1")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("registry", err)
+
+    def test_the_fold_refuses_all_but_the_steward(self):
+        # export reads the live store beside the console's state; fold runs from a registered root.
+        self.register("--steward", "agent-5")
+        (self.state / "store.jsonl").write_text("")        # nothing locked: an export writes nothing
+        fold = KIT / "fold.py"
+        args = ["--root", str(self.project), "export", "--store", str(self.state / "store.jsonl"), "--out", "locked"]
+        rc, _, err = self.run_py(fold, *args, agent="agent-6")
+        self.assert_refused(rc, err)
+        self.assertFalse((self.project / "locked").exists())
+        rc, _, err = self.run_py(fold, "--as", "agent-6", *args)
+        self.assert_refused(rc, err)
+        rc, out, err = self.run_py(fold, *args, agent="agent-5")
+        self.assertEqual(rc, 0, out + err)
+        (self.project / "locked").mkdir(exist_ok=True)
+        (self.project / "adapter.py").write_text(
+            "def items():\n    return {}\ndef record(e, d):\n    return []\ndef seed_questions():\n    return []\n")
+        fargs = ["--root", str(self.project), "fold", "--locked", "locked", "--ledger", "folded.txt",
+                 "--adapter", "adapter.py", "--dry-run"]
+        rc, _, err = self.run_py(fold, *fargs, agent="agent-6")
+        self.assert_refused(rc, err)
+        rc, out, err = self.run_py(fold, *fargs, agent="agent-5")
+        self.assertEqual(rc, 0, out + err)
+        rc, _, err = self.run_py(fold, "--as", "Bad Name", *fargs)
+        self.assertEqual(rc, 2, err)
+
+
+class FoldLockPathTests(_Steward):
+    """PR #13 review, HIGH + MEDIUM: the fold lock follows the paths the fold touches, not `--root` alone."""
+
+    ADAPTER = "def items():\n    return {}\ndef record(e, d):\n    return []\ndef seed_questions():\n    return []\n"
+
+    def fold(self, root, where, agent):
+        """fold --dry-run from `root`, with --locked, --ledger and --adapter under `where` (relative to root)."""
+        d = Path(root) / where
+        (d / "locked").mkdir(parents=True, exist_ok=True)
+        (d / "adapter.py").write_text(self.ADAPTER)
+        rel = lambda n: str(Path(where) / n)  # noqa: E731
+        return self.run_py(KIT / "fold.py", "--root", str(root), "fold", "--locked", rel("locked"),
+                           "--ledger", rel("folded.txt"), "--adapter", rel("adapter.py"), "--dry-run", agent=agent)
+
+    def test_an_ancestor_root_does_not_escape_the_lock(self):
+        # Catches: a lock looked up by exact --root, so `--root /p` folds into the registered /p/console-kit.
+        inner = self.project / "console-kit"
+        inner.mkdir()
+        self.register("--steward", "agent-5", project=inner)
+        rc, _, err = self.fold(self.project, "console-kit", agent="agent-6")
+        self.assertEqual(rc, 1, err)
+        self.assertIn("steward, agent-5", err)
+        self.assertFalse((inner / "folded.txt").exists())
+        rc, _, err = self.fold(self.project, "console-kit", agent=None)
+        self.assertEqual(rc, 1, err)
+        other = self.dir / "other-state"
+        other.mkdir()
+        (other / "store.jsonl").write_text("")
+        rc, _, err = self.run_py(KIT / "fold.py", "--root", str(self.project), "export", "--store",
+                                 str(other / "store.jsonl"), "--out", "console-kit/locked", agent="agent-6")
+        self.assertEqual(rc, 1, err)                     # --out lands in the steward's project
+        self.assertIn("steward, agent-5", err)
+
+    def test_the_steward_is_allowed_through_an_ancestor_root(self):
+        inner = self.project / "console-kit"
+        inner.mkdir()
+        self.register("--steward", "agent-5", project=inner)
+        rc, out, err = self.fold(self.project, "console-kit", agent="agent-5")
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_path_reaching_into_another_registered_project_is_locked_by_that_project(self):
+        # --root is registered on a console with NO steward; a project registered below it, on the
+        # steward's console, is reached by --ledger alone. Catches: a lock keyed to --root only.
+        free = self.dir / "free-state"
+        free.mkdir()
+        rc, out, err = self.run_py(KIT / "agent.py", "--state", str(free), "register", "--project", str(self.project))
+        self.assertEqual(rc, 0, out + err)
+        inner = self.project / "inner"
+        inner.mkdir()
+        self.register("--steward", "agent-5", project=inner)
+        rc, out, err = self.fold(self.project, "work", agent="agent-6")        # nothing under inner: allowed
+        self.assertEqual(rc, 0, out + err)
+        (self.project / "work" / "locked").mkdir(parents=True, exist_ok=True)
+        rc, _, err = self.run_py(KIT / "fold.py", "--root", str(self.project), "fold", "--locked", "work/locked",
+                                 "--ledger", "inner/folded.txt", "--adapter", "work/adapter.py", "--dry-run",
+                                 agent="agent-6")
+        self.assertEqual(rc, 1, err)
+        self.assertIn("steward, agent-5", err)
+        self.assertIn("inner", err)
+
+    def test_the_hook_and_the_kit_walk_to_the_same_project(self):
+        # The hook may import nothing from the kit, so it carries its own walk. Catches: the two drifting.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ask_guard", QuestionHookTests.HOOK)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        inner = self.project / "a" / "inner"
+        inner.mkdir(parents=True)
+        link = self.dir / "link"
+        link.symlink_to(inner)
+        found = {os.path.realpath(self.project): {"state": str(self.state), "kit": str(KIT)},
+                 os.path.realpath(inner): {"state": str(self.dir / "s2"), "kit": str(KIT), "steward": "agent-5"}}
+        for t in (self.project, self.project / "a", inner, inner / "x" / "y", link / "z", self.dir, Path("/")):
+            with self.subTest(target=str(t)):
+                kit = R.enclosing(t, found)
+                self.assertEqual(guard._registered(t, found), kit[1] if kit else None)
+
+
+class QuestionHookTests(_Steward):
+    """The PreToolUse hook: AskUserQuestion is the steward's; every other session posts with `agent.py ask`."""
+
+    HOOK = HERE / "plugin" / "hooks" / "ask_guard.py"
+
+    def payload(self, cwd=None, tool="AskUserQuestion"):
+        """What Claude Code sends a PreToolUse command hook on stdin (hooks reference, 'Common input fields')."""
+        return {"session_id": "abc123", "transcript_path": str(self.dir / "t.jsonl"),
+                "cwd": str(cwd or self.project), "permission_mode": "default", "hook_event_name": "PreToolUse",
+                "tool_name": tool, "tool_use_id": "toolu_01ABC",
+                "tool_input": {"questions": [{"question": "Which?", "header": "Pick", "multiSelect": False,
+                                              "options": [{"label": "A", "description": "a"},
+                                                          {"label": "B", "description": "b"}]}]}}
+
+    def hook(self, agent=None, stdin=None, project_dir=None, **kw):
+        env = self.env(agent)
+        env["CLAUDE_PROJECT_DIR"] = str(project_dir or self.project)
+        r = subprocess.run([sys.executable, str(self.HOOK)], input=stdin if stdin is not None
+                           else json.dumps(self.payload(**kw)), env=env, capture_output=True, text=True, timeout=30)
+        return r.returncode, r.stdout, r.stderr
+
+    def denied(self, out):
+        if not out.strip():
+            return None
+        o = json.loads(out)["hookSpecificOutput"]
+        self.assertEqual(o["hookEventName"], "PreToolUse")
+        self.assertEqual(o["permissionDecision"], "deny")
+        return o["permissionDecisionReason"]
+
+    def test_hooks_json_runs_the_guard_on_ask_user_question(self):
+        # Catches: a guard script nothing runs, or one matched to every tool.
+        hooks = json.loads((HERE / "plugin" / "hooks" / "hooks.json").read_text())["hooks"]
+        [entry] = hooks["PreToolUse"]
+        self.assertEqual(entry["matcher"], "AskUserQuestion")
+        [h] = entry["hooks"]
+        self.assertEqual(h["type"], "command")
+        self.assertIn("${CLAUDE_PLUGIN_ROOT}/hooks/ask_guard.py", h["command"])
+        self.assertIn("SessionStart", hooks)
+
+    def test_another_session_is_blocked_and_told_how_to_ask(self):
+        self.register("--steward", "agent-5")
+        for agent in ("agent-6", None):
+            with self.subTest(agent=agent):
+                rc, out, err = self.hook(agent=agent, cwd=self.project / "deep" / "sub")
+                self.assertEqual(rc, 0, err)
+                why = self.denied(out)
+                self.assertIsNotNone(why, "the call was not blocked")
+                self.assertIn(f"python3 {KIT / 'agent.py'} --state {os.path.realpath(self.state)}", why)
+                self.assertIn(" ask ", why)
+                self.assertIn("console-ask", why)
+                self.assertIn("agent-5", why)
+                self.assertIn("mirror", why)
+                self.assertIn("--as agent-6" if agent else "--as YOUR-NAME", why)
+
+    def test_the_steward_is_allowed(self):
+        self.register("--steward", "agent-5")
+        rc, out, err = self.hook(agent="agent-5")
+        self.assertEqual((rc, out.strip()), (0, ""), err)
+
+    def test_an_unregistered_project_is_allowed(self):
+        self.register("--steward", "agent-5", project=self.dir / "state")  # some other project is registered
+        (self.project / ".console-kit.json").write_text(json.dumps({"steward": "agent-9"}))
+        rc, out, err = self.hook(agent="agent-6")
+        self.assertEqual((rc, out.strip()), (0, ""), err)
+
+    def test_no_steward_set_is_allowed(self):
+        self.register()
+        rc, out, err = self.hook(agent="agent-6")
+        self.assertEqual((rc, out.strip()), (0, ""), err)
+
+    def test_a_broken_registry_or_input_fails_open(self):
+        # A guardrail never costs a session: every failure lets the question through.
+        self.register("--steward", "agent-5")
+        good = self.reg.read_text()
+        for body in ("{not json", '["a list"]', '{"projects": []}',
+                     json.dumps({"projects": {os.path.realpath(self.project): {
+                         "state": str(self.state), "kit": str(KIT), "steward": "Bad Name"}}}),
+                     json.dumps({"projects": {os.path.realpath(self.project): {
+                         "state": "relative", "kit": str(KIT), "steward": "agent-5"}}})):
+            with self.subTest(body=body):
+                self.reg.write_text(body)
+                rc, out, err = self.hook(agent="agent-6")
+                self.assertEqual((rc, out.strip()), (0, ""), err)
+        self.reg.unlink()
+        os.mkfifo(self.reg)                         # must not hang: the 30 s timeout is the detector
+        self.assertEqual(self.hook(agent="agent-6")[:2], (0, ""))
+        self.reg.unlink()
+        self.reg.write_text(good)
+        for stdin in ("", "not json", "[1]"):
+            with self.subTest(stdin=stdin):
+                rc, out, err = self.hook(agent="agent-6", stdin=stdin, project_dir=self.dir / "nowhere")
+                self.assertEqual((rc, out.strip()), (0, ""), err)
+        rc, out, _ = self.hook(agent="agent-6", tool="Bash")   # only AskUserQuestion is its business
+        self.assertEqual((rc, out.strip()), (0, ""))
+
+
+class StewardSessionStartTests(_Steward):
+    HOOK = HERE / "plugin" / "hooks" / "session_start.py"
+
+    def note(self, agent=None):
+        env = self.env(agent)
+        env["CLAUDE_PROJECT_DIR"] = str(self.project)
+        r = subprocess.run([sys.executable, str(self.HOOK)], env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    def test_the_note_names_the_steward_and_tells_others_what_not_to_run(self):
+        self.register("--steward", "agent-5")
+        (self.state / "inbox.jsonl").write_text(json.dumps(
+            {"seq": 1, "type": "message", "ts": "t", "item": "AB", "intent": "process"}) + "\n")
+        other = self.note(agent="agent-6")
+        self.assertIn("steward", other)
+        self.assertIn("agent-5", other)
+        self.assertIn("--as", other)
+        self.assertIn("never run `watch`, `synced` or the fold", other)
+        self.assertNotIn("synced --through SEQ", other)     # the steward's instructions are not theirs
+        mine = self.note(agent="agent-5")
+        self.assertIn("this session is the steward", mine)
+        self.assertIn("- seq 1 ", mine)
+        self.assertIn("mirror", mine)
+
+    def test_no_steward_no_steward_line(self):
+        self.register()
+        self.assertNotIn("steward", self.note(agent="agent-6"))
+
+
+class TrailingNewlineTests(unittest.TestCase):
+    """0.8.2 review follow-up: `re.match` with `$` accepts one trailing newline; no shape may."""
+
+    def test_no_shape_accepts_a_trailing_newline(self):
+        import importlib.util
+        from console_kit import anchors as A
+        from console_kit import names as N
+        from console_kit import projectcfg as PC
+        from console_kit import visuals as VIS
+        spec = importlib.util.spec_from_file_location("session_start", HERE / "plugin" / "hooks" / "session_start.py")
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        sys.path.insert(0, str(KIT))
+        import onboard as O
+        good = [
+            (S.ITEM_ID, "LANE.1"), (S.RECORD_ID, "a" * 24), (S.NONCE, "nonce0001"), (S.QID, "LANE.1/Q1"),
+            (S.OPTION_ID, "fix"), (S.OTHER_ROLE, "other:Fire safety"), (S.SOURCE, "a/b.md:1-2"),
+            (S.CITE, "a/b.md:3-4"), (S.VISUAL_PATH, "a/b.mmd"), (S.SHA256, "0" * 64),
+            (R.PLAIN_PATH, "/a/b"), (PC.DIR, "architect/specs/"), (PC.SKILL, "plugin:skill"),
+            (F.TS, "2026-09-30T00:00:00Z"), (A.SOURCE_RANGE, "a.md:1-2"),
+            (VIS.NAME, "0123abcd-0123456789ab.mmd"), (N.NAME, "agent-6"),
+            (hook.PLAIN_PATH, "/a/b"), (hook.ITEM_ID, "LANE"), (hook.TS, "2026-09-30T00:00:00Z"),
+            (O.NAME, "proj"), (O.TEAM, "t.cloudflareaccess.com"), (O.AUD, "a" * 64),
+            (O.HOST, "console.example.com"), (O.UUID, "01234567-0123-0123-0123-0123456789ab"), (O.REL, "a/b"),
+        ]
+        for pat, v in good:
+            with self.subTest(pattern=pat.pattern):
+                self.assertIsNotNone(pat.match(v), v)
+                self.assertIsNone(pat.match(v + "\n"), f"{v!r} + newline matched")
+
+    def test_a_record_with_a_newline_on_an_id_is_refused(self):
+        # One per class the store reads: an item, a qid, a nonce, an option id, a source, a cite.
+        base = question()
+        for field, value in (("item", "LANE.1\n"), ("qid", "LANE.1/Q1\n"), ("nonce", "nonce000001\n"),
+                             ("source", "a/b.md:1\n"), ("star", "b\n")):
+            with self.subTest(field=field):
+                self.assertTrue(S.validate({**base, field: value}), field)
+        opts = [dict(o) for o in base["options"]]
+        opts[0]["id"] = "a\n"
+        self.assertTrue(S.validate({**base, "options": opts}))
+        ev = {**base, "evidence": [{"cite": "a/b.md:1-2\n"}]}
+        self.assertTrue(S.validate(ev))
 
 
 class BundleTests(Tmp):
