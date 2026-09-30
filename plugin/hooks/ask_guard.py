@@ -8,19 +8,22 @@ record. The steward may still ask the owner live, and mirrors each live answer
 to the console.
 
 **Which session is the steward.** A hook learns nothing from Claude Code about
-who the session is beyond a session id, and that id changes on /clear and is
-not known to the user before the session starts. So the user says it when
-starting the session: `CONSOLE_KIT_AGENT=agent-5 claude`. A hook process
-inherits Claude Code's environment, and so do the session's Bash commands, so
-the one variable makes this hook allow the steward and makes the steward's
-`agent.py` calls carry its name. The steward itself is named only in the user's
-registry (`agent.py steward NAME`), never by the repository.
+who the session is beyond a session id (the input's `session_id`), which
+changes on /clear and --fork-session and is kept by --resume and --continue.
+So the user says it (0.8.4): typing `/console-kit:as agent-5` in the session
+records that session id as agent-5 in the console's STATE/sessions.jsonl
+(`name_session.py`). Starting the session as `CONSOLE_KIT_AGENT=agent-5 claude`
+still works, as the fallback when the session was given no name. The steward
+itself is named only in the user's registry (`agent.py steward NAME`), never by
+the repository, and never by the sessions file: that file only says which name
+a session goes by.
 
 The decision, for a call to AskUserQuestion:
 
 - the session's directory (the input's `cwd`, then CLAUDE_PROJECT_DIR) is in
   no registered project, or its console has no steward: allowed, as in 0.8.2;
-- CONSOLE_KIT_AGENT is the steward's name: allowed;
+- the session's name (its /console-kit:as, else CONSOLE_KIT_AGENT) is the
+  steward's name: allowed;
 - otherwise: denied, with the full `agent.py ask` command (KIT and STATE from
   the registry) as the reason Claude reads.
 
@@ -31,13 +34,13 @@ costs the owner a session. It reads the registry as the SessionStart hook does
 executes nothing from the project.
 
 This is a guardrail between the owner's own cooperating sessions, not a
-security boundary: any session can set CONSOLE_KIT_AGENT to the steward's name.
+security boundary: any session can set CONSOLE_KIT_AGENT to the steward's name,
+and anything that runs code as the user can write the sessions file.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -49,39 +52,21 @@ TOOL = "AskUserQuestion"
 MAX_INPUT = 1 << 20
 
 
-def _registered(start: Path, found: dict) -> dict | None:
-    """The registry entry of the NEAREST registered project holding `start` (itself or an ancestor), or None.
-
-    The same walk as `console_kit/registry.enclosing`, which `fold.py`'s steward
-    lock uses. A copy, not an import, because a hook may import nothing from a
-    kit path; the kit's tests hold the two to one fixture.
-    """
-    p = Path(os.path.realpath(start))
-    for d in (p, *p.parents):
-        e = found.get(str(d))
-        if e is not None:
-            return SS.checked(e)
-    return None
+_registered = SS.registered   # the walk lives beside the other copies of the kit's rules (0.8.4)
 
 
 def reason(payload: object) -> str | None:
     """Why this AskUserQuestion call is blocked, or None to let it through. Raises on anything unreadable."""
     if not isinstance(payload, dict) or payload.get("tool_name") != TOOL:
         return None
-    found = SS.projects()
-    e = None
-    for start in (payload.get("cwd"), os.environ.get("CLAUDE_PROJECT_DIR")):
-        if isinstance(start, str) and start.startswith("/"):
-            e = _registered(Path(start), found)
-            if e is not None:
-                break
+    e = SS.enclosing_entry(payload)
     if e is None or not e.get(SS.STEWARD):
         return None
     steward = e[SS.STEWARD]
-    me = os.environ.get(SS.AGENT_ENV, "")
-    if SS.is_name(me) and me == steward:
+    me = SS.whoami(Path(e["state"]), payload.get("session_id"))
+    if me == steward:
         return None
-    you = f"--as {me}" if SS.is_name(me) else "--as YOUR-NAME"
+    you = f"--as {me}" if me else "--as YOUR-NAME"
     cmd = f"python3 {Path(e['kit']) / 'agent.py'} --state {e['state']} {you} ask QUESTION.json"
     return (f"Owner console: AskUserQuestion is blocked in this session. This console's steward is {steward}, and "
             f"this session is not it, so it does not ask the owner live. Post the question to the owner's console "
@@ -89,7 +74,9 @@ def reason(payload: object) -> str | None:
             f"costs, your recommendation):\n\n    {cmd}\n\n"
             f"It reaches the owner's inbox, where the owner answers and locks it; the steward, {steward}, who asks "
             f"the owner live, mirrors each live answer to the console, so every question reaches the owner either "
-            f"way. Then carry on with other work, or stop and say which question is waiting on the console.")
+            f"way. Then carry on with other work, or stop and say which question is waiting on the console."
+            + ("" if me else f" (If this session is the steward, the user names it by typing "
+                             f"`/console-kit:as {steward}`; tell the user.)"))
 
 
 def main() -> int:

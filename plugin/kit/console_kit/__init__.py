@@ -5,4 +5,4 @@ shadow a host project's own module of the same name. A project plugs in
 through one adapter module (`fold.ProjectAdapter`).
 """
 
-__version__ = "0.8.3"  # kept equal to VERSION and plugin.json by test_build; /health reports it
+__version__ = "0.8.4"  # kept equal to VERSION and plugin.json by test_build; /health reports it

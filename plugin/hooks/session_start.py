@@ -10,10 +10,17 @@ register`, which writes the user's own registry:
                                               "steward": "<agent name, optional (0.8.3)>"}}}
 
 When the entry names a steward, the note says so: the steward session (the one
-whose CONSOLE_KIT_AGENT is that name) is told it alone watches, syncs and folds,
-and mirrors live answers to the console; every other session is told to sign
-its posts, never to run those, and that its AskUserQuestion is blocked
-(`ask_guard.py`).
+whose name is that name) is told it alone watches, syncs and folds, and mirrors
+live answers to the console; every other session is told to sign its posts,
+never to run those, and that its AskUserQuestion is blocked (`ask_guard.py`).
+
+**A session's name (0.8.4)** is the one the user typed in it, `/console-kit:as
+NAME` (recorded by `name_session.py` in STATE/sessions.jsonl against the
+session id Claude Code gives every hook on stdin), else CONSOLE_KIT_AGENT from
+the environment the session was started with. This hook also writes `export
+CONSOLE_KIT_SESSION=<session id>` to CLAUDE_ENV_FILE, so the session's Bash
+commands (`agent.py`, `fold.py`) can look the same name up. A session with no
+name, on a console with a steward, is told to type `/console-kit:as NAME`.
 
 In any other project it prints nothing and exits 0, whatever files the project
 carries: a clone's `.console-kit.json` or fake doorbell is never read. It
@@ -33,11 +40,13 @@ absolute path of plain characters. Anything else is `?`, never passed through.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import stat
 import sys
+import time
 from pathlib import Path
 
 WAKE_INTENTS = ("process", "fork", "chat", "visual")     # console_kit/doorbell.py
@@ -55,6 +64,13 @@ AGENT_NAME = re.compile(r"^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31}\Z")  # console_
 MAX_NAME = 32                                                        # console_kit/names.py
 RESERVED = frozenset({"agent", "owner"})                            # console_kit/names.py
 STEWARD = "steward"                                                  # console_kit/registry.py (0.8.3)
+SESSIONS_FILE = "sessions.jsonl"                                     # console_kit/sessions.py FILE (0.8.4)
+SESSION_ENV = "CONSOLE_KIT_SESSION"                                  # console_kit/sessions.py ENV
+SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]{0,127}\Z")      # console_kit/sessions.py SESSION_ID
+MAX_SESSIONS = 64 << 10                                              # console_kit/sessions.py MAX_FILE
+KEEP_SESSIONS = 256                                                  # console_kit/sessions.py KEEP
+SESSIONS_LOCK = ".sessions.lock"
+MAX_INPUT = 1 << 20
 
 
 class Unsafe(ValueError):
@@ -113,29 +129,186 @@ def checked(e: object) -> dict:
     return e
 
 
+def registered(start: Path, found: dict) -> dict | None:
+    """The registry entry of the NEAREST registered project holding `start` (itself or an ancestor), or None.
+
+    The same walk as `console_kit/registry.enclosing`, which `fold.py`'s steward
+    lock uses. A copy, not an import, because a hook may import nothing from a
+    kit path; the kit's tests hold the two to one fixture.
+    """
+    p = Path(os.path.realpath(start))
+    for d in (p, *p.parents):
+        e = found.get(str(d))
+        if e is not None:
+            return checked(e)
+    return None
+
+
+def enclosing_entry(payload: dict) -> dict | None:
+    """The entry of the registered project the session works in: the input's `cwd`, then CLAUDE_PROJECT_DIR."""
+    found = projects()
+    for start in (payload.get("cwd"), os.environ.get("CLAUDE_PROJECT_DIR")):
+        if isinstance(start, str) and start.startswith("/"):
+            e = registered(Path(start), found)
+            if e is not None:
+                return e
+    return None
+
+
+def read_input() -> dict:
+    """The hook's JSON input from stdin, {} when there is none or it is not an object (never raises)."""
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return {}
+        raw = sys.stdin.read(MAX_INPUT + 1)
+        v = json.loads(raw) if raw.strip() and len(raw) <= MAX_INPUT else {}
+    except Exception:  # noqa: BLE001 - an input it cannot read is no input
+        return {}
+    return v if isinstance(v, dict) else {}
+
+
+def session_id(payload: dict) -> str | None:
+    v = payload.get("session_id")
+    return v if isinstance(v, str) and SESSION_ID.match(v) else None
+
+
+def session_records(data: bytes) -> dict[str, dict]:
+    """As console_kit/sessions.mapping, keeping each session's whole line: the last well-formed one wins."""
+    out: dict[str, dict] = {}
+    for line in data.decode("utf-8", errors="replace").split("\n")[:-1]:  # the last piece may still be written
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(rec, dict) and set(rec) == {"agent", "session", "ts"}
+                and isinstance(rec["session"], str) and SESSION_ID.match(rec["session"])
+                and is_name(rec["agent"])):
+            out.pop(rec["session"], None)
+            out[rec["session"]] = rec
+    return out
+
+
+def session_name(state: Path, sid: object) -> str | None:
+    """As console_kit/sessions.lookup: the name the user gave this session, or None (never raises)."""
+    if not isinstance(sid, str) or not SESSION_ID.match(sid):
+        return None
+    try:
+        data = _read_regular(Path(state) / SESSIONS_FILE, MAX_SESSIONS)
+    except (OSError, Unsafe):
+        return None
+    rec = None if data is None else session_records(data).get(sid)
+    return rec["agent"] if rec else None
+
+
+def whoami(state: Path, sid: object) -> str:
+    """This session's name: its /console-kit:as, else CONSOLE_KIT_AGENT; "" when it has none."""
+    named = session_name(state, sid)
+    if named:
+        return named
+    me = os.environ.get(AGENT_ENV, "")
+    return me if is_name(me) else ""
+
+
+def record_session(state: Path, sid: str, name: str) -> bool:
+    """Append `sid -> name` to STATE/sessions.jsonl (0600); False when that is already its name.
+
+    Writers take a lock file beside it; readers take none, so a compaction
+    writes a new file and renames it over the old one (a reader sees one or the
+    other, whole). Before a line would take the file past MAX_SESSIONS, it is
+    rewritten with each session's last line, the KEEP_SESSIONS most recently
+    named. Raises Unsafe or OSError; the caller says so.
+    """
+    if not SESSION_ID.match(sid) or not is_name(name):
+        raise Unsafe("not a session id and an agent name")
+    if not os.path.isdir(state):
+        raise Unsafe(f"the console's state directory {state} does not exist")
+    path = Path(state) / SESSIONS_FILE
+    flags = os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    lock = os.open(Path(state) / SESSIONS_LOCK, os.O_RDWR | os.O_CREAT | flags, 0o600)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = _read_regular(path, 4 * MAX_SESSIONS) or b""
+        records = session_records(data)
+        if sid in records and records[sid]["agent"] == name:
+            return False
+        rec = {"agent": name, "session": sid, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        line = json.dumps(rec, sort_keys=True, separators=(",", ":")) + "\n"
+        if len(data) + len(line) + 1 > MAX_SESSIONS:
+            records.pop(sid, None)
+            records[sid] = rec
+            body = "".join(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n"
+                           for r in list(records.values())[-KEEP_SESSIONS:])
+            tmp = Path(state) / f".{SESSIONS_FILE}.{os.getpid()}.tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | flags, 0o600)
+            try:
+                os.write(fd, body.encode("utf-8"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, path)
+            return True
+        if data and not data.endswith(b"\n"):
+            line = "\n" + line      # never glue a line onto a cut-short one
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NONBLOCK | flags, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise Unsafe(f"{SESSIONS_FILE} is not a regular file")
+            os.fchmod(fd, 0o600)
+            os.write(fd, line.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return True
+    finally:
+        os.close(lock)
+
+
+def export_session(project: Path, sid: str | None) -> None:
+    """In a registered project, put this session's id into its Bash environment (CLAUDE_ENV_FILE).
+
+    `agent.py` and `fold.py`, run from the session's Bash, look their name up
+    with it. Only in a registered project, like everything this hook does; any
+    failure is silent (the session then falls back to CONSOLE_KIT_AGENT).
+    """
+    env_file = os.environ.get("CLAUDE_ENV_FILE")
+    if not env_file or sid is None:
+        return
+    try:
+        if _entry(project) is None:
+            return
+        with open(env_file, "a", encoding="utf-8") as fh:   # append: other hooks write here too
+            fh.write(f"export {SESSION_ENV}={sid}\n")        # sid is SESSION_ID-shaped: nothing to quote
+    except Exception:  # noqa: BLE001 - never cost the owner a session
+        return
+
+
 def _entry(project: Path) -> dict | None:
     """This project's registry entry, None when unregistered; Unsafe when the entry is malformed."""
     e = projects().get(os.path.realpath(project))
     return None if e is None else checked(e)
 
 
-def steward_line(e: dict, agent: str) -> tuple[str | None, bool]:
+def steward_line(e: dict, agent: str, me: str | None = None) -> tuple[str | None, bool]:
     """The steward note for this session (0.8.3), and whether this session is the steward.
 
-    The session's own name comes from its environment (CONSOLE_KIT_AGENT, which
-    the hook inherits from the session), never from the repository.
+    The session's own name `me` is the one the user gave it (`whoami`: its
+    /console-kit:as, else CONSOLE_KIT_AGENT), never anything from the repository.
     """
     name = e.get(STEWARD)
     if not name:
         return None, True
-    me = os.environ.get(AGENT_ENV, "")
+    if me is None:
+        me = os.environ.get(AGENT_ENV, "")
     if is_name(me) and me == name:
         return (f"Owner console steward: this session is the steward, {name}. It alone runs `watch`, `synced` "
                 f"and the fold for this console. It may ask the owner live (AskUserQuestion), but mirrors each "
                 f"live answer to the console for the record: post the question with `{agent} ask FILE` and reply "
                 f"on its item with the owner's answer (`{agent} reply ITEM TEXT`)."), True
     you = f"--as {me}" if is_name(me) else "--as YOUR-NAME"
-    return (f"Owner console steward: {name} holds this console's doorbell, and this session is not it. Sign "
+    unnamed = ("" if is_name(me) else
+               f"This session is not named: the user names it by typing `/console-kit:as NAME` in it (the "
+               f"steward's name is {name}); tell the user so. ")
+    return (f"Owner console steward: {name} holds this console's doorbell, and this session is not it. {unnamed}Sign "
             f"every post with `{you}` (or start the session with {AGENT_ENV}=YOUR-NAME), and never run "
             f"`watch`, `synced` or the fold: they are refused here. AskUserQuestion is blocked in this session: "
             f"post each question with the console-ask skill (`{agent} {you} ask FILE...`); it reaches the owner's "
@@ -174,7 +347,7 @@ def _shown(value: object, shape: re.Pattern) -> str:
     return value if isinstance(value, str) and shape.match(value) else "?"
 
 
-def context(project: Path) -> str | None:
+def context(project: Path, sid: str | None = None) -> str | None:
     """The note for this session, or None when there is nothing to say."""
     try:
         e = _entry(project)
@@ -191,7 +364,7 @@ def context(project: Path) -> str | None:
     ask = ("Owner console: this project is registered. Post every question the owner must decide "
            f"to the console with the console-ask skill (`{agent} ask FILE...`); a question written "
            "only in a document never reaches the owner's inbox.")
-    steward, mine = steward_line(e, agent)
+    steward, mine = steward_line(e, agent, whoami(state, sid))
     if steward:
         ask += "\n\n" + steward
     if not wake:
@@ -219,8 +392,11 @@ def context(project: Path) -> str | None:
 
 
 def main() -> int:
+    project = Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
+    sid = session_id(read_input())
+    export_session(project, sid)
     try:
-        note = context(Path(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()))
+        note = context(project, sid)
     except Exception as e:  # a broken hook must never cost the owner a session
         note = f"Owner console: the SessionStart check failed ({type(e).__name__})."
     if note:

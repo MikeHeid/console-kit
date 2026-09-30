@@ -269,22 +269,33 @@ of them its **steward** in your own registry; only it watches, syncs and folds.
     python3 <kit>/agent.py --state <state> steward            # prints the steward, or "no steward"
     python3 <kit>/agent.py --state <state> steward --clear    # no lock: 0.8.2 behaviour
 
-It is written to every project registered on `<state>`. Then start the
-sessions, each with its own name in its environment:
+It is written to every project registered on `<state>`. Then name each
+session, in the session itself (0.8.4):
+
+    /console-kit:as agent-5      # typed in the steward's session
+    /console-kit:as agent-6      # typed in any other session
+
+The plugin records the session's id against the name in
+`<state>/sessions.jsonl`, and the SessionStart hook exports the id to the
+session's Bash as `CONSOLE_KIT_SESSION`, so the question hook knows the
+steward and every `agent.py` call is signed. The name lasts while the session
+id does: `--resume` and `--continue` keep it; `/clear` and `--fork-session`
+need the command again. Starting a session with its name in its environment
+still works, as the fallback:
 
     cd <project> && CONSOLE_KIT_AGENT=agent-5 claude      # the steward
     cd <worktree> && CONSOLE_KIT_AGENT=agent-6 claude     # any other session
 
-Claude Code hands its own environment to its hooks and to the session's Bash
-commands, so this one variable is how the question hook knows the steward and
-how every `agent.py` call is signed. The repository's `.console-kit.json`
-cannot set or change the steward.
+A name typed in the session wins over the variable. The repository's
+`.console-kit.json` cannot set or change the steward, and the sessions file
+cannot either: it only says which name a session goes by.
 
 **What changes:**
 
 - **`agent.py watch` or `synced` exits 1 with "refused: `watch` belongs to
   this console's steward, agent-5"**: the session is not the steward (its
-  `--as`, else `CONSOLE_KIT_AGENT`, is another name, or none). Nothing moved:
+  `--as`, else its `/console-kit:as` name, else `CONSOLE_KIT_AGENT`, is
+  another name, or none). Nothing moved:
   no heartbeat, no cursor. It should post with `ask`, `reply` and `working`,
   which stay open to everyone. `fold.py` (export and fold) refuses the same
   way. A non-steward's "agent active" marks are cleared only when they lapse
@@ -297,9 +308,12 @@ cannot set or change the steward.
   mirrors each live answer to the console: it posts the question with
   `agent.py ask`, and replies on its item with your answer, so the record
   holds it and you can lock it.
-- **The steward itself is refused**: its name did not reach the command. Run
-  `echo $CONSOLE_KIT_AGENT` in that session; if it is empty, restart the
-  session as above (or pass `--as agent-5` to every `agent.py` call).
+- **The steward itself is refused**: its name did not reach the command.
+  Type `/console-kit:as agent-5` in that session again (after `/clear` or a
+  fork it is a new session). If `agent.py` is still refused, run
+  `echo $CONSOLE_KIT_SESSION` there: empty means the SessionStart hook did not
+  export it (restart or resume the session), or pass `--as agent-5` to every
+  `agent.py` call.
 - **"the registry names more than one steward for the console at ..."**:
   two projects on one state carry different stewards (a hand edit). Run
   `agent.py --state <state> steward NAME` once to set one for all.

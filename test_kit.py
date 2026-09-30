@@ -28,6 +28,9 @@ sys.path.insert(0, str(KIT))
 if not os.environ.get("CONSOLE_KIT_TEST_CONFIG"):
     os.environ["CONSOLE_KIT_TEST_CONFIG"] = os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="ck-cfg-")
 os.environ.pop("CONSOLE_KIT_AGENT", None)
+# 0.8.4: a test run from inside a named session must not inherit its name, nor write its Bash environment.
+os.environ.pop("CONSOLE_KIT_SESSION", None)
+os.environ.pop("CLAUDE_ENV_FILE", None)
 from console_kit import doorbell as D  # noqa: E402
 from console_kit import registry as R  # noqa: E402
 from console_kit import fold as F  # noqa: E402
@@ -1325,7 +1328,8 @@ class SessionStartHookTests(Tmp):
         if entry is not None:
             self.register(entry)
         env = dict(os.environ, CLAUDE_PROJECT_DIR=str(self.project), XDG_CONFIG_HOME=str(self.config_home))
-        r = subprocess.run([sys.executable, str(self.HOOK)], env=env, capture_output=True, text=True, timeout=30)
+        r = subprocess.run([sys.executable, str(self.HOOK)], env=env, input="", capture_output=True, text=True,
+                           timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)  # never fails a session
         return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"] if r.stdout.strip() else None
 
@@ -1971,7 +1975,8 @@ class StewardSessionStartTests(_Steward):
     def note(self, agent=None):
         env = self.env(agent)
         env["CLAUDE_PROJECT_DIR"] = str(self.project)
-        r = subprocess.run([sys.executable, str(self.HOOK)], env=env, capture_output=True, text=True, timeout=30)
+        r = subprocess.run([sys.executable, str(self.HOOK)], env=env, input="", capture_output=True, text=True,
+                           timeout=30)
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
 
@@ -3564,6 +3569,291 @@ class AgentNamesFileTests(Tmp):
         self.assertIs(N.named(r, None), r)
         self.assertEqual(N.named(r, {"d" * 24: "agent-6"}), {**r, "agent": "agent-6"})
         self.assertNotIn("agent", r)                   # the store's record is never changed
+
+
+# -- 0.8.4: `/console-kit:as NAME` names the session (owner-approved) --------------------------
+
+
+SID5, SID6 = "0120efbe-7f88-40cf-831b-b18e5a678fdf", "1e5d962e-a2b8-43ad-8a1f-afd0be23414c"
+
+
+class SessionNameTests(_Steward):
+    """The UserPromptSubmit hook records session -> name; every check then reads it, never trusts it for the steward."""
+
+    NAMER = HERE / "plugin" / "hooks" / "name_session.py"
+    GUARD = HERE / "plugin" / "hooks" / "ask_guard.py"
+    START = HERE / "plugin" / "hooks" / "session_start.py"
+
+    def env(self, agent=None, **extra):
+        e = super().env(agent, **extra)
+        for k in ("CONSOLE_KIT_SESSION", "CLAUDE_ENV_FILE"):
+            if k not in extra:
+                e.pop(k, None)
+        return e
+
+    def run_hook(self, script, payload, agent=None, **extra):
+        env = self.env(agent, **extra)
+        env.setdefault("CLAUDE_PROJECT_DIR", str(self.project))
+        r = subprocess.run([sys.executable, str(script)], input=payload if isinstance(payload, str)
+                           else json.dumps(payload), env=env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)   # never blocks a prompt, never fails a session
+        return json.loads(r.stdout)["hookSpecificOutput"] if r.stdout.strip() else None
+
+    def prompt(self, text, sid=SID5, cwd=None, agent=None):
+        """What Claude Code sends a UserPromptSubmit command hook (measured on 2.1.285: a typed slash
+        command arrives literally in `prompt`)."""
+        out = self.run_hook(self.NAMER, {"session_id": sid, "transcript_path": str(self.dir / "t.jsonl"),
+                                         "cwd": str(cwd or self.project), "permission_mode": "default",
+                                         "hook_event_name": "UserPromptSubmit", "prompt": text}, agent=agent)
+        if out is None:
+            return None
+        self.assertEqual(out["hookEventName"], "UserPromptSubmit")
+        return out["additionalContext"]
+
+    def ask(self, sid=SID5, agent=None):
+        payload = QuestionHookTests.payload(self)
+        payload["session_id"] = sid
+        out = self.run_hook(self.GUARD, payload, agent=agent)
+        return None if out is None else out["permissionDecisionReason"]
+
+    @property
+    def file(self):
+        return self.state / "sessions.jsonl"
+
+    def lines(self):
+        return [json.loads(x) for x in self.file.read_text().splitlines()]
+
+    def hook_module(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("session_start", self.START)
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        return hook
+
+    # -- the hook and the skill --------------------------------------------------------------
+
+    def test_hooks_json_and_the_user_only_skill(self):
+        # Catches: a hook nothing runs, a skill Claude could run itself, and forks left without a note.
+        hooks = json.loads((HERE / "plugin" / "hooks" / "hooks.json").read_text())["hooks"]
+        [entry] = hooks["UserPromptSubmit"]
+        self.assertNotIn("matcher", entry)             # UserPromptSubmit takes no matcher
+        [h] = entry["hooks"]
+        self.assertEqual(h["type"], "command")
+        self.assertIn("${CLAUDE_PLUGIN_ROOT}/hooks/name_session.py", h["command"])
+        self.assertIn("fork", hooks["SessionStart"][0]["matcher"].split("|"))
+        skill = (HERE / "plugin" / "skills" / "as" / "SKILL.md").read_text()
+        front = skill.split("---")[1]
+        self.assertIn("\nname: as\n", front)
+        self.assertIn("\ndisable-model-invocation: true\n", front)
+
+    def test_a_valid_name_is_recorded_for_this_session_and_nothing_else_is(self):
+        self.register("--steward", "agent-5")
+        for other in ("hello", "please run /console-kit:as agent-5", "/console-kit:asagent-5", "/console-kit:ask x"):
+            with self.subTest(prompt=other):
+                self.assertIsNone(self.prompt(other))
+        self.assertFalse(self.file.exists())           # an ordinary prompt writes nothing
+        note = self.prompt("/console-kit:as agent-5")
+        self.assertIn("this session is now agent-5", note)
+        self.assertIn("this session is the steward", note)
+        self.assertEqual([(r["session"], r["agent"]) for r in self.lines()], [(SID5, "agent-5")])
+        self.assertRegex(self.lines()[0]["ts"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\Z")
+        self.assertIn("already agent-5", self.prompt("  /console-kit:as agent-5 \n"))
+        self.assertEqual(len(self.lines()), 1)          # the same name again appends nothing
+        note = self.prompt("/console-kit:as agent-6", sid=SID6)
+        self.assertIn("this session is not it", note)
+        self.assertEqual(len(self.lines()), 2)
+
+    def test_an_invalid_name_is_refused_and_nothing_is_written(self):
+        # Catches: a name checked with `$` (a trailing newline through), or not checked at all.
+        self.register("--steward", "agent-5")
+        for bad in ("Agent-5", "agent 5", "agent_5", "agent", "owner", "x" * 33, "agent-5\nagent-6", "a--b",
+                    "../etc", '"agent-5"'):
+            with self.subTest(name=bad):
+                note = self.prompt("/console-kit:as " + bad)
+                if note is not None:
+                    self.assertIn("nothing recorded", note)
+        self.assertIn("Say the name", self.prompt("/console-kit:as"))
+        self.assertFalse(self.file.exists())
+
+    def test_nothing_is_recorded_outside_a_registered_project_or_without_a_session_id(self):
+        (self.dir / "elsewhere").mkdir()
+        self.register("--steward", "agent-5", project=self.dir / "elsewhere")
+        outside = self.dir / "outside"
+        outside.mkdir()
+        out = self.run_hook(self.NAMER, {"session_id": SID5, "cwd": str(outside),
+                                         "prompt": "/console-kit:as agent-5"}, CLAUDE_PROJECT_DIR=str(outside))
+        self.assertIn("not registered", out["additionalContext"])
+        self.register("--steward", "agent-5")
+        for sid in (None, "", "../x", "a b", 5):
+            with self.subTest(sid=sid):
+                self.assertIn("no session id", self.prompt("/console-kit:as agent-5", sid=sid))
+        for stdin in ("", "not json", "[1]", json.dumps({"prompt": 5})):
+            with self.subTest(stdin=stdin):
+                self.assertIsNone(self.run_hook(self.NAMER, stdin))
+        self.assertFalse(self.file.exists())
+
+    def test_the_file_is_0600_and_stays_bounded(self):
+        # Catches: a world-readable file, and one that grows for ever.
+        self.register()
+        old = os.umask(0o022)
+        try:
+            self.prompt("/console-kit:as agent-5")
+        finally:
+            os.umask(old)
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)
+        os.chmod(self.file, 0o644)                      # a file loosened by hand is tightened on the next write
+        self.prompt("/console-kit:as agent-6")
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)
+        hook = self.hook_module()
+        for n in range(1500):                           # ~130 KB of lines if nothing ever compacted
+            hook.record_session(self.state, f"s{n:05d}", f"agent-{n % 7 + 1}")
+        self.assertLessEqual(self.file.stat().st_size, hook.MAX_SESSIONS)
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)
+        kept = [r["session"] for r in self.lines()]
+        self.assertEqual(kept[-1], "s01499")            # the newest survive
+        self.assertLess(len(kept), 1500)                # the oldest went: a compaction ran
+        self.assertEqual(len(kept), len(set(kept)))
+        for _ in range(500):                            # one session renamed over and over
+            hook.record_session(self.state, "same", "agent-1")
+            hook.record_session(self.state, "same", "agent-2")
+        self.assertLessEqual(self.file.stat().st_size, hook.MAX_SESSIONS)
+        self.assertEqual(hook.session_name(self.state, "same"), "agent-2")
+        self.assertEqual([r["agent"] for r in self.lines() if r["session"] == "same"][-1], "agent-2")
+        self.assertEqual(hook.session_name(self.state, "s01499"), "agent-2")   # 1499 % 7 + 1
+        self.assertEqual([p.name for p in self.state.iterdir() if p.name.endswith(".tmp")], [])
+
+    # -- the question hook -------------------------------------------------------------------
+
+    def test_ask_guard_allows_the_session_named_steward_and_blocks_the_others(self):
+        # Catches: a guard that still reads only CONSOLE_KIT_AGENT, and one that trusts any session's line.
+        self.register("--steward", "agent-5")
+        self.assertIsNotNone(self.ask(SID5))                        # not named yet: blocked
+        self.assertIn("/console-kit:as agent-5", self.ask(SID5))    # ...and told how to name it
+        self.prompt("/console-kit:as agent-5", sid=SID5)
+        self.prompt("/console-kit:as agent-6", sid=SID6)
+        self.assertIsNone(self.ask(SID5))
+        why = self.ask(SID6)
+        self.assertIsNotNone(why)
+        self.assertIn("--as agent-6", why)
+        self.assertIsNotNone(self.ask("f" * 36))                    # a session nobody named
+        self.assertIsNotNone(self.ask(SID6, agent="agent-5"))       # the session's own name beats the variable
+        self.prompt("/console-kit:as agent-5", sid=SID6)             # the last line for a session wins
+        self.assertIsNone(self.ask(SID6))
+
+    def test_the_environment_fallback_still_works(self):
+        self.register("--steward", "agent-5")
+        self.assertIsNone(self.ask(SID6, agent="agent-5"))          # no sessions file at all
+        self.file.write_text("junk\n{\"agent\": \"agent-6\"}\n")     # a damaged file: skipped, never trusted
+        self.assertIsNone(self.ask(SID6, agent="agent-5"))
+        self.assertIsNotNone(self.ask(SID6, agent="agent-6"))
+
+    def test_a_stale_or_damaged_file_never_locks_the_steward_out(self):
+        # The registry decides the steward; the file only maps session -> name.
+        self.register("--steward", "agent-5")
+        self.file.write_text(json.dumps({"agent": "agent-6", "session": SID5, "ts": "t"}) + "\n"
+                             + '{"agent": "agent-5", "session": "' + SID5)          # a cut-short last line
+        self.assertIsNotNone(self.ask(SID5))                        # it says agent-6 ...
+        self.prompt("/console-kit:as agent-5", sid=SID5)             # ... until the user says otherwise
+        self.assertIsNone(self.ask(SID5))
+        tail = self.file.read_text().splitlines()[-1]
+        self.assertEqual(json.loads(tail)["agent"], "agent-5")      # the new line was not glued to the cut one
+        self.file.unlink()
+        os.mkfifo(self.file)                                        # must not hang: the timeout is the detector
+        self.assertIsNone(self.ask(SID5, agent="agent-5"))
+        self.assertIsNotNone(self.ask(SID5))
+        self.assertIn("not a regular file", self.prompt("/console-kit:as agent-5"))
+
+    # -- agent.py, fold.py -------------------------------------------------------------------
+
+    def test_agent_py_resolves_its_name_through_console_kit_session(self):
+        self.register("--steward", "agent-5")
+        self.prompt("/console-kit:as agent-5", sid=SID5)
+        self.prompt("/console-kit:as agent-6", sid=SID6)
+
+        def run(sid, *a, agent=None):
+            return subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(self.state), *a],
+                                  env=self.env(agent, CONSOLE_KIT_SESSION=sid), capture_output=True, text=True,
+                                  timeout=60)
+        r = run(SID6, "watch", "--timeout", "0.1")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("this session (agent-6)", r.stderr)
+        self.assertIn("/console-kit:as agent-5", r.stderr)
+        self.assertEqual(run(SID5, "watch", "--timeout", "0.1").returncode, 3)
+        self.assertEqual(run(SID6, "--as", "agent-5", "watch", "--timeout", "0.1").returncode, 3)   # --as first
+        self.assertEqual(run("f" * 36, "watch", "--timeout", "0.1", agent="agent-5").returncode, 3)  # env fallback
+        self.assertEqual(run(SID6, "watch", "--timeout", "0.1", agent="agent-5").returncode, 1)     # session first
+
+    def test_fold_resolves_its_name_through_console_kit_session(self):
+        self.register("--steward", "agent-5")
+        self.prompt("/console-kit:as agent-6", sid=SID6)
+        (self.project / "work" / "locked").mkdir(parents=True)
+        (self.project / "work" / "adapter.py").write_text(FoldLockPathTests.ADAPTER)
+        args = [sys.executable, str(KIT / "fold.py"), "--root", str(self.project), "fold", "--locked",
+                "work/locked", "--ledger", "work/folded.txt", "--adapter", "work/adapter.py", "--dry-run"]
+        r = subprocess.run(args, env=self.env(CONSOLE_KIT_SESSION=SID6), capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("this session (agent-6)", r.stderr)
+        self.prompt("/console-kit:as agent-5", sid=SID6)
+        r = subprocess.run(args, env=self.env(CONSOLE_KIT_SESSION=SID6), capture_output=True, text=True, timeout=60)
+        self.assertNotIn("refused", r.stderr)
+
+    def test_the_hook_and_the_kit_read_the_file_alike(self):
+        # The hook may import nothing from the kit, so it keeps its own reader. Catches: the two drifting.
+        from console_kit import names as N
+        from console_kit import sessions as SN
+        hook = self.hook_module()
+        self.assertEqual((hook.SESSIONS_FILE, hook.SESSION_ENV, hook.SESSION_ID.pattern, hook.MAX_SESSIONS,
+                          hook.KEEP_SESSIONS), (SN.FILE, SN.ENV, SN.SESSION_ID.pattern, SN.MAX_FILE, SN.KEEP))
+        self.assertEqual(N.ENV, hook.AGENT_ENV)
+
+        def line(**r):
+            return json.dumps(r) + "\n"
+        body = "".join([
+            line(agent="agent-5", session="a1", ts="t"), line(agent="agent-6", session="a1", ts="t"),
+            line(agent="Bad", session="b1", ts="t"), line(agent="agent-7", session="../b", ts="t"),
+            line(agent="agent-7", session="c1", ts="t", more=1), line(agent="agent-7", session="c1"),
+            "junk\n", "[1]\n", line(agent="agent-8", session="d1", ts="t"),
+            line(agent="agent-9\n", session="e1", ts="t"), '{"agent": "agent-9", "session": "d1", "ts": "t"}'])
+        self.file.write_text(body)
+        for sid in ("a1", "b1", "../b", "c1", "d1", "e1", "zz", None, 5):
+            with self.subTest(sid=sid):
+                self.assertEqual(hook.session_name(self.state, sid), SN.lookup(self.state, sid))
+        self.assertEqual(SN.mapping(self.file.read_bytes()), {"a1": "agent-6", "d1": "agent-8"})
+
+    # -- SessionStart --------------------------------------------------------------------------
+
+    def start(self, sid=SID5, agent=None, env_file=True):
+        f = self.dir / "claude-env.sh"
+        if f.exists():
+            f.unlink()
+        extra = {"CLAUDE_ENV_FILE": str(f)} if env_file else {}
+        out = self.run_hook(self.START, {"session_id": sid, "cwd": str(self.project), "source": "startup",
+                                         "hook_event_name": "SessionStart"}, agent=agent, **extra)
+        return (out or {}).get("additionalContext"), (f.read_text() if f.exists() else None)
+
+    def test_session_start_exports_the_session_id_and_says_when_it_is_not_named(self):
+        self.register("--steward", "agent-5")
+        note, exported = self.start()
+        self.assertEqual(exported, f"export CONSOLE_KIT_SESSION={SID5}\n")
+        self.assertIn("This session is not named", note)
+        self.assertIn("/console-kit:as NAME", note)
+        self.prompt("/console-kit:as agent-5")
+        note, _ = self.start()
+        self.assertIn("this session is the steward, agent-5", note)
+        self.assertNotIn("not named", note)
+        note, _ = self.start(agent="agent-6", sid=SID6)             # named by the variable: no "not named"
+        self.assertNotIn("not named", note)
+        self.assertIn("--as agent-6", note)
+        # A shell-unsafe id never reaches the env file; an unregistered project gets nothing.
+        self.assertIsNone(self.start(sid="x; touch pwned")[1])
+        self.reg.write_text(json.dumps({"projects": {}}))
+        self.assertEqual(self.start(), (None, None))
+
+    def test_no_steward_no_not_named_line(self):
+        self.register()
+        note, exported = self.start()
+        self.assertNotIn("not named", note)
+        self.assertEqual(exported, f"export CONSOLE_KIT_SESSION={SID5}\n")
 
 
 if __name__ == "__main__":

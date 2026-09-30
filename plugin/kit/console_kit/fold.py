@@ -33,6 +33,7 @@ from . import anchors as A
 from . import names as N
 from . import registry as R
 from . import schema as S
+from . import sessions as SN
 from .store import Store
 
 
@@ -501,13 +502,19 @@ def _steward_refusal(a) -> str | None:
             states.setdefault(Path(hit[1]["state"]), f"{t} (in {hit[0]})")
     for state, what in states.items():
         name = R.steward_for_state(state)
-        if name is None or a.agent == name:
+        if name is None:
             continue
-        who = f"this session ({a.agent})" if a.agent else "this session (unnamed)"
+        me, where = SN.resolve(a.agent, state)   # 0.8.4: this session's /console-kit:as on THAT console
+        if me is not None and N.problem(me):
+            return f"agent name from {where}: {N.problem(me)}"
+        if me == name:
+            continue
+        who = f"this session ({me})" if me else "this session (unnamed)"
         return (f"refused: the fold belongs to this console's steward, {name}, and {who} is not it ({what} is "
                 f"on its console). Only the steward watches the doorbell, marks it synced and folds answers. "
                 f"Use `ask`, `reply` and `working` instead; the steward folds what the owner locks. (A session "
-                f"named {name} runs as it: --as {name}, or {N.ENV}={name}.)")
+                f"named {name} runs as it: --as {name}, /console-kit:as {name} typed in the session, or "
+                f"{N.ENV}={name}.)")
     return None
 
 
@@ -525,12 +532,13 @@ def main(argv: list[str] | None = None) -> int:
     fo.add_argument("--adapter", required=True)
     fo.add_argument("--dry-run", action="store_true")
     ap.add_argument("--as", dest="agent", metavar="NAME",
-                    help=f"this session's agent name (default: ${N.ENV}); checked against the console's steward")
+                    help=f"this session's agent name (default: this session's /console-kit:as, then ${N.ENV}); "
+                         f"checked against the console's steward")
     a = ap.parse_args(argv)
-    if a.agent is None and os.environ.get(N.ENV):
-        a.agent = os.environ[N.ENV]
-    if a.agent is not None and N.problem(a.agent):
-        print(f"fold: agent name: {N.problem(a.agent)}; nothing was done", file=sys.stderr)
+    # --as, else the environment; this session's /console-kit:as is looked up per console in _steward_refusal.
+    given = a.agent if a.agent is not None else (os.environ.get(N.ENV) or None)
+    if given is not None and N.problem(given):
+        print(f"fold: agent name: {N.problem(given)}; nothing was done", file=sys.stderr)
         return 2
     try:
         why = _steward_refusal(a)

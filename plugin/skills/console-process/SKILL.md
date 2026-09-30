@@ -40,7 +40,8 @@ no name, leave `--as` out. The other skills use the same `A`.
 
 **The steward (0.8.3).** If this project's registry entry names a `steward`,
 this skill is **the steward's alone**: only the session whose name
-(`CONSOLE_KIT_AGENT`, or `--as`) is the steward's runs it. `A watch`,
+(`--as`, else the one the user gave it by typing `/console-kit:as NAME`
+(0.8.4), else `CONSOLE_KIT_AGENT`) is the steward's runs it. `A watch`,
 `A synced` and the fold refuse any other session, naming the steward. If you
 are not the steward, do not run this skill: post questions with console-ask,
 answer on items with `A reply`, mark your work with `A working`, and leave the
