@@ -5,6 +5,10 @@ under it, every question and answer in that scope, and the threads there. The
 project's own sources (specs, findings) are found by the session from the item
 ids; this module knows nothing about any project.
 
+A follow-up on one locked answer (a fork with `about_qid`, 0.4.0) leads with
+that question: its text and options, every answer with the owner's own words,
+and which answer holds the lock. The item context follows.
+
 A bundle over MAX_BUNDLE bytes (64 KiB, §6.6) is refused by name, listing its
 largest parts, never trimmed (D14): a trimmed bundle would hand the committee a
 partial picture that looks whole.
@@ -44,6 +48,47 @@ def _quote(text: str) -> list[str]:
     return [f"> {line}" for line in text.splitlines()] or [">"]
 
 
+def about_qid(chain: list[dict]) -> str | None:
+    """The question a follow-up on one answer is about: the latest round's, else the nearest earlier one's."""
+    return next((m["about_qid"] for m in reversed(chain) if m.get("about_qid")), None)
+
+
+def _about_section(view: dict, qid: str) -> str:
+    """The question, every answer it got (oldest first, the owner's own words in full) and which one is locked."""
+    q = view["questions"].get(qid)
+    if q is None:  # the store refuses this on append; a hand-edited file is named, not guessed at
+        return f"`{qid}` is not in the console's store.\n"
+    rec = q["question"]
+    labels = {o["id"]: o["label"] for o in rec["options"]}
+    out = [f"On item `{rec['item']}`, now {V.STATE_WORDS[q['state']]}. Source: `{rec['source']}`.", ""]
+    out += _quote(rec["text"]) + [""]
+    if rec["options"]:
+        out.append("Options:")
+        for o in rec["options"]:
+            star = (" (★ recommended" + (f" by {rec['star_by']})" if rec.get("star_by") else ")")
+                    if o["id"] == rec.get("star") else "")
+            desc = f": {o['description']}" if o.get("description") else ""
+            out.append(f"- `{o['id']}` {o['label']}{star}{desc}")
+        out.append("")
+    for c in q["failing"]:
+        out.append(f"Stale because this no longer holds: {V.condition_words(c)}")
+    out.append("Every answer, oldest first:")
+    for n, a in enumerate(q["answers"], 1):
+        tag = "current" if n == len(q["answers"]) else "earlier"
+        lock = ", LOCKED" if a.get("locked") else ""
+        picks = ", ".join(labels.get(p, p) for p in a["picks"]) or "(no pick)"
+        out.append(f"{n}. {a['ts']} ({tag}{lock}): {picks}")
+        if a["own_text"].strip():
+            out.append("   The owner's own words:")
+            out += [f"   > {line}" for line in a["own_text"].splitlines()]
+        if a.get("reason"):
+            out.append(f"   Replaced the answer before it, because: {a['reason']}")
+    locked = [a for a in q["answers"] if a.get("locked")]
+    out += ["", f"The lock stands on answer {len(q['answers'])} (`{locked[-1]['id']}`)."
+            if locked and locked[-1] is q["answers"][-1] else "The current answer is not locked."]
+    return "\n".join(out)
+
+
 def fork_context(view: dict, items: Mapping[str, dict], fork_id: str, max_bytes: int = MAX_BUNDLE) -> str:
     if fork_id not in view["forks"]:
         raise KeyError(f"no fork {fork_id!r}")
@@ -52,7 +97,16 @@ def fork_context(view: dict, items: Mapping[str, dict], fork_id: str, max_bytes:
     item = fork["item"]
     scope = V.subtree(items, item)
     parts: list[tuple[str, str]] = []  # (what it is, its text), so a refusal can name the largest
-    head = [f"# Deliberation bundle: `{item}` and all under it", "",
+    about = about_qid(chain)
+    if about is not None:
+        # A follow-up on one answer (0.4.0) leads with that answer: the seats
+        # read what was decided before they read the item around it.
+        parts.append((f"the question `{about}`",
+                      f"# Follow-up bundle: the locked answer to `{about}`\n\n" + _about_section(view, about)))
+        title = f"## The request, then the item context: `{item}` and all under it"
+    else:
+        title = f"# Deliberation bundle: `{item}` and all under it"
+    head = [title, "",
             f"Round {len(chain)}, fork `{fork_id}`: mode {fork['mode']}, focus {fork.get('focus', 'whole')}, "
             f"seats: {_seats(fork)}.", ""]
     parts.append(("the request", "\n".join(head + _quote(fork["text"]))))

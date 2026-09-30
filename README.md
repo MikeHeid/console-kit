@@ -53,6 +53,13 @@ In a registered project the hook also tells every session to post the
 questions you must decide to the console (the **console-ask** skill), so a
 question an agent writes in a document still reaches your inbox.
 
+Each locked answer has a **Follow up** button beside it. Pick one to three
+seats (DevOps, UX, adversarial, security, architect, analyst, or a seat you
+name), a mode and an optional note, and those seats look at that one answer
+and bring any follow-up questions back to the same item. The locked answer
+stands; a seat that finds its premise false says so in a question, and only
+you supersede it.
+
 - **`server.py`** serves one page (yours) with the console injected. It
   refuses every request without a valid Access token, loopback included.
 - **`agent.py`** is the agent's side: `view`, `ask` (one question or a batch), `reply`, `inbox`,

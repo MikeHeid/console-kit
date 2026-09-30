@@ -791,7 +791,22 @@
         bodyEl.appendChild(renderAnswerForm(q, true, headAnswer.id));
       });
       actions.appendChild(changeBtn);
+      // Follow up on this locked answer with other seats (0.4.0).
+      const [fuBtn, fuSlot] = disclosure('⑂ Follow up…', 'ask-' + qData.qid, () => renderAnswerFollowUp(q));
+      fuBtn.setAttribute('aria-label', 'Follow up with other seats on: ' + truncText);
+      actions.appendChild(fuBtn);
       bodyEl.appendChild(actions);
+      bodyEl.appendChild(fuSlot);
+      const asked = Object.values(view.forks).filter(f => f.message.about_qid === qData.qid)
+        .sort((a, b) => b.message.seq - a.message.seq);
+      if (asked.length) {
+        const f = asked[0];
+        const who = (f.message.roles || []).map(r => ROSTER_LABEL[r] || r.replace(/^other:/, '')).join(', ');
+        bodyEl.appendChild(el('p', { className: 'ck-muted' }, [
+          '⑂ Follow-up with ' + who + ' ' + relTime(f.message.ts) + ': ' + (f.questions.length
+            ? f.questions.length + ' question' + (f.questions.length === 1 ? '' : 's') + ' back (' + f.questions.join(', ') + ').'
+            : 'waiting for the seats\' questions.')]));
+      }
     } else if (state === 'unlocked') {
       // Fix #4: Two-step locking — first show receipt and "Lock this answer..." button
       bodyEl.appendChild(renderReceipt(qData, headAnswer));
@@ -1341,6 +1356,108 @@
     return wrap;
   }
 
+  // The seat picker a follow-up uses (D13): 1 to 3 roster seats, or a typed
+  // "other" seat sent as other:<role>. roles() returns the list, or null after
+  // saying (visibly and to a screen reader) what is wrong with the pick.
+  function seatPicker(key, errEl) {
+    const picked = new Set();
+    const fs = el('fieldset', { className: 'ck-roster' }, [el('legend', {}, ['Seats (1 to 3)'])]);
+    const boxes = [];
+    const otherInput = el('input', { type: 'text', className: 'ck-input', maxlength: '40', id: key + '-other',
+      placeholder: 'e.g. Legal, Lighting designer' });
+    const sync = () => {
+      if (errEl) errEl.textContent = '';  // a changed pick clears the last complaint about it
+      const full = picked.size + (otherInput.value.trim() ? 1 : 0) >= MAX_ROLES;
+      for (const b of boxes) b.disabled = full && !b.checked;
+    };
+    for (const r of ROSTER) {
+      const b = el('input', { type: 'checkbox', value: r, name: key + '-seat' });
+      b.addEventListener('change', () => { if (b.checked) picked.add(r); else picked.delete(r); sync(); });
+      boxes.push(b);
+      fs.appendChild(el('label', { className: 'ck-option' }, [b, ' ' + ROSTER_LABEL[r]]));
+    }
+    otherInput.addEventListener('input', sync);
+    fs.appendChild(el('label', { for: key + '-other', className: 'ck-field-label' }, ['Other seat (optional)']));
+    fs.appendChild(otherInput);
+    const fail = msg => { if (errEl) errEl.textContent = msg; announce(msg); return null; };
+    const roles = () => {
+      const out = ROSTER.filter(r => picked.has(r));
+      const other = otherInput.value.trim();
+      if (other) {
+        if (!OTHER_ROLE.test(other)) return fail('The other seat takes letters, digits, spaces and hyphens, up to 40.');
+        out.push('other:' + other);
+      }
+      if (out.length < 1 || out.length > MAX_ROLES) return fail('Pick 1 to 3 seats.');
+      return out;
+    };
+    return { fieldset: fs, roles };
+  }
+
+  // Follow up on ONE locked answer (owner, 2026-09-29: "a button next to each
+  // locked answer"). One owner message: intent 'fork', about_qid naming the
+  // question, the seats picked here. The server checks the question is real,
+  // in scope and locked, and the seats; this form only shapes the request.
+  function renderAnswerFollowUp(q) {
+    const qData = q.question;
+    const key = 'ask-' + qData.qid;
+    const id = key.replace(/[^A-Za-z0-9_-]/g, '-');
+    const form = el('div', { className: 'ck-fork-form ck-followup', role: 'group', 'aria-labelledby': id + '-h' });
+    form.appendChild(el('div', { className: 'ck-confirm-heading', id: id + '-h' }, ['Follow up on this answer']));
+    form.appendChild(el('p', { className: 'ck-muted' }, [
+      'The seats you pick look at your locked answer to ' + qData.qid + ' and bring any follow-up questions back ' +
+      'here, on ' + qData.item + '. Your locked answer stays as it is.']));
+    const err = el('p', { className: 'ck-error-msg', role: 'status', 'aria-live': 'polite' });
+    const seats = seatPicker(id, err);
+    form.appendChild(seats.fieldset);
+
+    const modeName = id + '-mode';
+    const modeFs = el('fieldset', { className: 'ck-roster' }, [el('legend', {}, ['Mode'])]);
+    for (const m of ['tighten', 'explore']) {  // tighten first and default: the question is already answered
+      const r = el('input', { type: 'radio', name: modeName, value: m });
+      if (m === 'tighten') r.checked = true;
+      modeFs.appendChild(el('label', { className: 'ck-option' }, [r, m === 'tighten'
+        ? ' Tighten: test the answer and find what it leaves loose' : ' Explore: widen the options around it']));
+    }
+    form.appendChild(modeFs);
+
+    const noteId = id + '-note';
+    const text = el('textarea', { className: 'ck-textarea', rows: '2', id: noteId,
+      placeholder: 'e.g. Does this hold for the tour rig?' });
+    if (draftTexts[key] !== undefined) text.value = draftTexts[key];
+    text.addEventListener('input', () => { draftTexts[key] = text.value; });
+    form.appendChild(el('label', { for: noteId, className: 'ck-field-label' }, ['Note for the seats (optional)']));
+    form.appendChild(text);
+    form.appendChild(err);
+
+    const send = el('button', { className: 'ck-btn ck-btn-primary', type: 'button',
+      'aria-label': 'Send follow-up: ' + truncateText(qData.text, 40) }, ['Send']);
+    const cancel = el('button', { className: 'ck-btn', type: 'button' }, ['Cancel']);
+    cancel.addEventListener('click', () => { openForms.delete(key); renderPanel(); });
+    send.addEventListener('click', async () => {
+      err.textContent = '';
+      const roles = seats.roles();
+      if (!roles) return;
+      const mode = form.querySelector('input[name="' + modeName + '"]:checked').value;
+      const body = { item: qData.item, intent: 'fork', mode: mode, about_qid: qData.qid, roles: roles,
+        text: text.value.trim() || ('Follow up on the locked answer to ' + qData.qid + ' with ' +
+          roles.map(r => ROSTER_LABEL[r] || r.replace(/^other:/, '')).join(', ') + '.') };
+      send.disabled = true;
+      const result = await apiPost('/message', body, key);
+      send.disabled = false;
+      if (result.error) {
+        err.textContent = 'Not sent: ' + result.error;
+        announce('Error: ' + result.error);
+      } else {
+        delete draftTexts[key];
+        openForms.delete(key);
+        announce('Follow-up requested on ' + qData.qid + '.');
+        renderPanel();
+      }
+    });
+    form.appendChild(el('div', { className: 'ck-actions' }, [send, cancel]));
+    return form;
+  }
+
   // A deliberation request (§6, D13, D14). followUp is the fork being followed, or null for a first round.
   function renderForkForm(itemId, followUp) {
     const key = 'fork-' + itemId + (followUp ? '-' + followUp : '');
@@ -1350,28 +1467,8 @@
       : 'The default committee (architect, UX, security, and the project\'s own audit) deliberates on ' +
         itemId + ' and everything under it, and brings its questions back here.']));
 
-    const picked = new Set();
-    let otherInput = null;
-    if (followUp) {
-      const fs = el('fieldset', { className: 'ck-roster' }, [el('legend', {}, ['Seats (1 to 3)'])]);
-      const boxes = [];
-      const sync = () => {
-        const full = picked.size + (otherInput.value.trim() ? 1 : 0) >= MAX_ROLES;
-        for (const b of boxes) b.disabled = full && !b.checked;
-      };
-      for (const r of ROSTER) {
-        const b = el('input', { type: 'checkbox', value: r });
-        b.addEventListener('change', () => { if (b.checked) picked.add(r); else picked.delete(r); sync(); });
-        boxes.push(b);
-        fs.appendChild(el('label', { className: 'ck-option' }, [b, ' ' + ROSTER_LABEL[r]]));
-      }
-      otherInput = el('input', { type: 'text', className: 'ck-input', maxlength: '40', id: key + '-other',
-        placeholder: 'e.g. Legal, Lighting designer' });
-      otherInput.addEventListener('input', sync);
-      fs.appendChild(el('label', { for: key + '-other', className: 'ck-field-label' }, ['Other seat (optional)']));
-      fs.appendChild(otherInput);
-      form.appendChild(fs);
-    }
+    const seats = followUp ? seatPicker(key) : null;
+    if (seats) form.appendChild(seats.fieldset);
 
     const focusSel = el('select', { className: 'ck-select', id: key + '-focus' });
     for (const f of FOCUSES) focusSel.appendChild(el('option', { value: f }, [f === 'whole' ? 'the whole thing' : f]));
@@ -1399,13 +1496,8 @@
       const mode = form.querySelector('input[name="' + modeName + '"]:checked').value;
       const body = { item: itemId, intent: 'fork', mode: mode, focus: focusSel.value };
       if (followUp) {
-        const roles = [...picked];
-        const other = otherInput.value.trim();
-        if (other) {
-          if (!OTHER_ROLE.test(other)) { announce('The other seat takes letters, digits, spaces and hyphens, up to 40.'); return; }
-          roles.push('other:' + other);
-        }
-        if (roles.length < 1 || roles.length > MAX_ROLES) { announce('Pick 1 to 3 seats.'); return; }
+        const roles = seats.roles();
+        if (!roles) return;
         body.follow_up_of = followUp;
         body.roles = roles;
       }
@@ -1444,6 +1536,7 @@
       const t = el('div', { className: 'ck-message-text' });
       t.textContent = m.text;
       card.appendChild(t);
+      if (m.about_qid) card.appendChild(el('div', { className: 'ck-muted' }, ['Follow-up on the locked answer to ' + m.about_qid]));
       if (m.follow_up_of) card.appendChild(el('div', { className: 'ck-muted' }, ['Follow-up of ' + m.follow_up_of.slice(0, 8)]));
       const qs = f.questions.map(qid => view.questions[qid]).filter(Boolean);
       if (!qs.length) {

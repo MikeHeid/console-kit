@@ -70,7 +70,9 @@ of deciding it yourself.
 
 Every owner message with `intent: "fork"` that has no questions yet
 (`view.forks[<id>].questions` is empty) is a deliberation to run: use the
-**console-fork** skill for each. At most three forks in one session (§6.6);
+**console-fork** skill for each. That includes a follow-up on one locked
+answer, a fork that carries `about_qid` (its doorbell line carries it too);
+console-fork's section 6 covers it. At most three forks in one session (§6.6);
 past that, reply on the item that the rest wait for the next session, and
 leave them after the cursor.
 

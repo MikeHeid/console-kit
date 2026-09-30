@@ -28,7 +28,7 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
 from . import schema as S
 
@@ -49,15 +49,25 @@ def utc_now() -> str:
 
 
 class Store:
-    def __init__(self, path: Path, *, known_items: Iterable[str] | None = None,
+    def __init__(self, path: Path, *, known_items: Iterable[str] | Mapping[str, dict] | None = None,
                  clock: Callable[[], str] = utc_now) -> None:
         self.path = Path(path)
         self.known_items = None if known_items is None else frozenset(known_items)
+        # item -> parent, when the register is known as a mapping: a fork's scope is
+        # its item and everything under it (D14), which a flat id set cannot say.
+        self.item_parents: dict[str, str | None] | None = None
+        if isinstance(known_items, Mapping):
+            self.set_items(known_items)
         self.clock = clock
         self._lock = threading.Lock()
         self._records: list[dict] = []
         self._by_id: dict[str, dict] = {}
         self._load()
+
+    def set_items(self, items: Mapping[str, dict]) -> None:
+        """Take the register as it is now: the ids a write may name (R7) and each item's parent."""
+        self.known_items = frozenset(items)
+        self.item_parents = {i: (d.get("parent") if isinstance(d, Mapping) else None) for i, d in items.items()}
 
     # -- reading -------------------------------------------------------------
 
@@ -147,6 +157,8 @@ class Store:
                 raise StoreError(f"reply_to {rec['reply_to']!r} names no record")
             if "follow_up_of" in rec:
                 self._check_follow_up(rec)
+            if "about_qid" in rec:
+                self._check_about(rec)
         elif kind == "answer":
             self._check_answer(rec)
         elif kind == "lock":
@@ -193,6 +205,36 @@ class Store:
         if rounds >= MAX_ROUNDS:
             raise StoreError(f"this deliberation already has {rounds} rounds; the limit is {MAX_ROUNDS}. "
                              f"Start a new deliberation instead")
+
+    def _check_about(self, rec: dict) -> None:
+        """A follow-up on one answer names a question in the fork's scope whose current answer is locked (0.4.0).
+
+        The page is untrusted, so each of these is checked here, not assumed
+        from the button: the question exists, it sits on the fork's item or an
+        item under it (D14), and its current answer is locked. Seats and their
+        count are the schema's check, which `append` has already run.
+        """
+        qid = rec["about_qid"]
+        q = self.question(qid)
+        if q is None:
+            raise StoreError(f"about_qid {qid} names no question")
+        if not self._in_scope(q["item"], rec["item"]):
+            raise StoreError(f"about_qid {qid} is on item {q['item']!r}, outside this fork's scope "
+                             f"({rec['item']!r} and everything under it)")
+        head = self.head(qid)
+        if head is None or self.lock_of(head["id"]) is None:
+            raise StoreError(f"{qid} has no locked answer; a follow-up on an answer comes after it is locked")
+
+    def _in_scope(self, item: str, root: str) -> bool:
+        """Whether `item` is `root` or under it, walking `item_parents`; with no tree known, only `root` itself."""
+        seen: set[str] = set()
+        node: str | None = item
+        while node is not None and node not in seen:
+            if node == root:
+                return True
+            seen.add(node)
+            node = (self.item_parents or {}).get(node)
+        return False
 
     def _check_lock(self, rec: dict) -> None:
         a = self._by_id.get(rec["answer"])

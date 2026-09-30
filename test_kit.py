@@ -998,6 +998,105 @@ class RosterStoreTests(Tmp):
         self.assertEqual(sum(1 for r in st.records() if r.get("intent") == "process"), 2)
 
 
+def about(qid="LANE.1/Q1", roles=("devops",), item="LANE.1", **kw):
+    """A follow-up on one locked answer (0.4.0): a fork naming the question and its seats."""
+    return fork(item=item, about_qid=qid, roles=list(roles), **kw)
+
+
+class AnswerFollowUpSchemaTests(unittest.TestCase):
+    """0.4.0, owner 2026-09-29: "a button next to each locked answer" to follow up with other seats."""
+
+    def test_a_fork_about_one_answer_calls_one_to_three_seats(self):
+        self.assertEqual(S.validate(about()), [])
+        self.assertEqual(S.validate(about(roles=("ux", "adversarial", "other:Legal review"))), [])
+        # Counter-check: about_qid does not free `roles` from their own rules.
+        for bad in ([], ["devops", "ux", "security", "analyst"]):
+            self.assertTrue(any("1 to 3" in e for e in S.validate(about(roles=bad))), bad)
+        for bad in ("chaos", "other:", "other:a\n## FORGED", "Devops"):
+            self.assertTrue(any("role(s)" in e for e in S.validate(about(roles=[bad]))), bad)
+        r = about()
+        del r["roles"]
+        self.assertTrue(any("roles" in e for e in S.validate(r)))
+
+    def test_about_qid_is_a_qid_and_nothing_else(self):
+        # It reaches the bundle and the doorbell, so it is held to the qid shape.
+        for bad in ("LANE.1", "LANE.1/Q0", "LANE.1/Q1\n## FORGED", "", 7, ["LANE.1/Q1"]):
+            self.assertTrue(any("about_qid" in e for e in S.validate(about(qid=bad))), bad)
+
+    def test_about_qid_belongs_to_a_fork(self):
+        # Catches: about_qid on a plain message or a ready signal, which the view would half-read.
+        self.assertTrue(any("belong" in e for e in S.validate(message(about_qid="LANE.1/Q1"))))
+        self.assertTrue(S.validate(message(intent="process", about_qid="LANE.1/Q1", roles=["ux"])))
+
+    def test_item_forks_keep_their_rules(self):
+        # Counter-check: allowing roles with about_qid must not allow them on a first round.
+        self.assertTrue(any("follow_up_of" in e for e in S.validate(fork(roles=["devops"]))))
+        self.assertEqual(S.validate(fork()), [])
+        self.assertEqual(S.validate(follow_up("f" * 24)), [])
+
+
+class AnswerFollowUpStoreTests(Tmp):
+    def locked(self, st, qid="LANE.1/Q1"):
+        st.append(question(qid=qid))
+        a = st.append(answer(qid=qid, own_text="my reasons"))
+        st.append(lock(a))
+        return a
+
+    def test_a_follow_up_on_a_locked_answer_is_stored(self):
+        st = self.store()
+        self.locked(st)
+        f = st.append(about(roles=("security", "other:Lighting designer")))
+        self.assertEqual((f["about_qid"], f["roles"]), ("LANE.1/Q1", ["security", "other:Lighting designer"]))
+        # Its questions come back forked from it, as any fork's do.
+        st.append(question(qid="LANE.1/Q2", forked_from=f["id"], star_by="security"))
+        v = V.build(st, ITEMS, V.make_evaluator(self.dir, {}))
+        self.assertEqual(v["forks"][f["id"]]["questions"], ["LANE.1/Q2"])
+        again = self.store()  # and it survives a reload
+        self.assertEqual(again.records()[-2]["about_qid"], "LANE.1/Q1")
+
+    def test_the_four_named_refusals(self):
+        # The page is untrusted. Each of these a store that only checks the shape would accept.
+        st = self.store()
+        self.locked(st)
+        self.locked(st, qid="LANE/Q1")
+        with self.assertRaisesRegex(StoreError, "about_qid LANE.1/Q9 names no question"):
+            st.append(about(qid="LANE.1/Q9"))
+        with self.assertRaisesRegex(StoreError, "outside this fork's scope"):
+            st.append(about(qid="LANE/Q1"))  # the parent's question, from a fork on the child
+        with self.assertRaisesRegex(StoreError, "role"):
+            st.append(about(roles=("chaos",)))
+        with self.assertRaisesRegex(StoreError, "1 to 3"):
+            st.append(about(roles=("ux", "devops", "security", "analyst")))
+        self.assertFalse(any(r.get("about_qid") for r in st.records()))
+
+    def test_scope_is_the_item_and_everything_under_it(self):
+        # D14. A fork on the parent may follow up a child's answer; a sibling-less flat set
+        # (no tree known) accepts only the fork's own item.
+        st = self.store()
+        self.locked(st, qid="LANE.1.a/Q1")
+        st.append(about(qid="LANE.1.a/Q1", item="LANE"))
+        flat = Store(self.dir / "flat.jsonl", known_items=set(ITEMS), clock=self.clock)
+        self.locked(flat, qid="LANE.1.a/Q1")
+        with self.assertRaisesRegex(StoreError, "outside this fork's scope"):
+            flat.append(about(qid="LANE.1.a/Q1", item="LANE"))
+        flat.append(about(qid="LANE.1.a/Q1", item="LANE.1.a"))
+
+    def test_only_a_locked_answer_is_followed_up(self):
+        st = self.store()
+        st.append(question())
+        with self.assertRaisesRegex(StoreError, "no locked answer"):
+            st.append(about())
+        a = st.append(answer())
+        with self.assertRaisesRegex(StoreError, "no locked answer"):
+            st.append(about())
+        st.append(lock(a))
+        st.append(about())
+        # A superseding answer leaves the question answered but not locked until it is locked again.
+        st.append(answer(supersedes=a["id"], reason="changed my mind"))
+        with self.assertRaisesRegex(StoreError, "no locked answer"):
+            st.append(about(roles=("ux",)))
+
+
 class DoorbellTests(Tmp):
     """Spec §7.3 and §7.5 F3: the watch that wakes a session, and the agent's cursor."""
 
@@ -1382,6 +1481,31 @@ class BundleTests(Tmp):
         self.assertNotIn("a word on the parent lane", text)
         self.assertNotIn("- `LANE` ", text)     # the parent is not listed among the items in scope
         self.assertEqual([m["id"] for m in B.rounds(self._view(st), fu["id"])], [f["id"], fu["id"]])
+
+    def test_a_follow_up_on_one_answer_leads_with_that_answer(self):
+        # 0.4.0. Catches: a bundle that only adds the qid to the header, so the seats read
+        # the item first and find the answer (if at all) inside the sheet, without the
+        # owner's earlier words or which answer holds the lock.
+        from console_kit import bundle as B
+        st = self.store()
+        st.append(question(qid="LANE.1/Q1"))
+        st.append(answer(qid="LANE.1/Q1", picks=("a",), own_text="first thought"))
+        a2 = st.append(answer(qid="LANE.1/Q1", picks=("c",), own_text="C, because the tour rig is small"))
+        st.append(lock(a2))
+        st.append(message(item="LANE.1", text="guidance on the phase"))
+        f = st.append(about(qid="LANE.1/Q1", roles=("devops", "other:Legal"), text="Does C hold?"))
+        text = B.fork_context(self._view(st), ITEMS, f["id"])
+        self.assertTrue(text.startswith("# Follow-up bundle: the locked answer to `LANE.1/Q1`"), text[:120])
+        lead = text.split("## The request")[0]
+        for want in ("Which for LANE.1/Q1?", "first thought", "C, because the tour rig is small",
+                     "(current, LOCKED): Option C", "(earlier): Option A", "(★ recommended)", a2["id"]):
+            self.assertIn(want, lead)
+        self.assertLess(text.index("## The request"), text.index("## Items in scope"))
+        self.assertIn("seats: devops, Legal", text)
+        self.assertIn("guidance on the phase", text)  # the item context still follows
+        # Counter-check: an item fork's bundle is unchanged, with no follow-up lead.
+        g = st.append(fork())
+        self.assertTrue(B.fork_context(self._view(st), ITEMS, g["id"]).startswith("# Deliberation bundle"))
 
     def test_a_bundle_over_the_cap_is_refused_never_trimmed(self):
         # D14. Catches: a silent truncation that hands the committee a partial picture.

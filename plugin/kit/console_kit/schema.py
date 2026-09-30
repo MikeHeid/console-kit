@@ -59,7 +59,7 @@ REQUIRED = {
 # record that carries them BY NAME (`unknown field(s)`) rather than dropping them.
 OPTIONAL = {
     "question": frozenset({"forked_from", "star_by"}),
-    "message": frozenset({"reply_to", "intent", "focus", "mode", "roles", "follow_up_of"}),
+    "message": frozenset({"reply_to", "intent", "focus", "mode", "roles", "follow_up_of", "about_qid"}),
     "answer": frozenset({"supersedes", "reason"}),
     "lock": frozenset(),
 }
@@ -231,7 +231,7 @@ def _check_message(rec: dict) -> list[str]:
         if "mode" not in rec:
             errs.append("a fork says its mode: explore or tighten")
     else:
-        present = [f for f in ("focus", "mode", "roles", "follow_up_of") if f in rec]
+        present = [f for f in ("focus", "mode", "roles", "follow_up_of", "about_qid") if f in rec]
         if present:
             errs.append(f"{', '.join(present)} belong(s) to a fork: set intent 'fork' or leave them out")
     if "focus" in rec and rec["focus"] not in FOCUSES:
@@ -243,20 +243,27 @@ def _check_message(rec: dict) -> list[str]:
 
 
 def _check_follow_up(rec: dict) -> list[str]:
-    """A follow-up round names the fork it follows and the 1-3 seats it calls (D13, §7.5).
+    """A follow-up names what it follows and the 1-3 seats it calls (D13, §7.5).
 
-    The first round of a fork runs the default committee and names no seats,
-    so `roles` comes only with `follow_up_of`. That the named fork exists is
-    the STORE's check.
+    Two kinds of follow-up call seats: a later round of a fork (`follow_up_of`),
+    and a follow-up on ONE locked answer (`about_qid`, 0.4.0), which the owner
+    starts from that question's card. An item fork's first round runs the
+    default committee and names no seats, so `roles` comes only with one of the
+    two. That the named fork or question exists, is in the fork's scope and is
+    locked is the STORE's check.
     """
     errs = []
-    if "follow_up_of" in rec:
-        if not isinstance(rec["follow_up_of"], str) or not RECORD_ID.match(rec["follow_up_of"]):
-            errs.append("follow_up_of must be the id of the earlier fork message (24 lowercase hex)")
+    if "about_qid" in rec and (not isinstance(rec["about_qid"], str) or not QID.match(rec["about_qid"])):
+        errs.append(f"about_qid {rec['about_qid']!r} is not <itemId>/Q<n>")
+    if "follow_up_of" in rec and (not isinstance(rec["follow_up_of"], str)
+                                  or not RECORD_ID.match(rec["follow_up_of"])):
+        errs.append("follow_up_of must be the id of the earlier fork message (24 lowercase hex)")
+    if "follow_up_of" in rec or "about_qid" in rec:
         if "roles" not in rec:
             errs.append(f"a follow-up names the seats it calls: roles, 1 to {MAX_ROLES}")
     elif "roles" in rec:
-        errs.append("roles belong to a follow-up; the first round runs the default committee. Add follow_up_of")
+        errs.append("roles belong to a follow-up; the first round runs the default committee. "
+                    "Add follow_up_of, or about_qid for a follow-up on one answer")
     if "roles" in rec:
         roles = rec["roles"]
         if not isinstance(roles, list) or not 1 <= len(roles) <= MAX_ROLES:

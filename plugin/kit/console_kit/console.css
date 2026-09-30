@@ -751,3 +751,8 @@
   font: inherit; padding: 4px 12px; border-radius: 6px; cursor: pointer;
   border: 1px solid currentColor; background: transparent; color: inherit;
 }
+
+/* A follow-up on one locked answer (0.4.0): its error line takes no room until it says something. */
+.ck-followup .ck-error-msg:empty { display: none; }
+.ck-followup .ck-field-label { display: block; margin: 10px 0 4px; }
+.ck-followup .ck-input, .ck-followup .ck-textarea { box-sizing: border-box; max-width: 100%; }
