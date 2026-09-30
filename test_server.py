@@ -2169,6 +2169,13 @@ class UsageTests(_Live, unittest.TestCase):
             ({**GOOD_USAGE, "updated_at": "2026-09-30T18:00:00"}, "has no time zone"),
             ({**GOOD_USAGE, "updated_at": "<script>planted</script>"}, "is not a timestamp"),
             ({k: v for k, v in GOOD_USAGE.items() if k != "seven_day"}, "has no seven_day window"),
+            # Review of #16: each of these escaped as a 500 with a traceback before it was caught.
+            ({**GOOD_USAGE, "updated_at": "0001-01-01T00:00:00+05:00"}, "is out of range"),
+            ({**GOOD_USAGE, "five_hour": {"used_percentage": 1, "resets_at": "9999-12-31T23:59:59-05:00"}},
+             "is out of range"),
+            (b"[" * 10000, "is not JSON"),
+            (b'{"updated_at": ' + b"9" * 5000 + b"}", "is not JSON"),
+            (b"\xff\xfe not utf-8", "is not JSON"),
         ]
         for body, problem in cases:
             with self.subTest(problem=problem):
@@ -2177,6 +2184,14 @@ class UsageTests(_Live, unittest.TestCase):
                 self.assertIsNone(out["usage"])
                 self.assertIn(problem, out["usage_problem"])
                 self.assertNotIn("planted", json.dumps(out))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a FIFO")
+    def test_a_fifo_where_a_file_should_be_is_refused_without_blocking(self):
+        # Catches: open() on a FIFO with no writer, which holds a handler thread forever.
+        u, _ = self.configure(GOOD_USAGE)
+        u.unlink()
+        os.mkfifo(u)
+        self.assertEqual(self.usage()["usage_problem"], "the usage file is not a regular file")
 
     def test_a_missing_snapshot_says_so(self):
         # The status line writes the file only while a session runs: before its first write the
@@ -2199,7 +2214,8 @@ class UsageTests(_Live, unittest.TestCase):
     def test_an_unusable_account_file_shows_no_account(self):
         for doc in (b"{broken", [], {"oauthAccount": "x"}, {"oauthAccount": {"emailAddress": "no-at-sign"}},
                     {"oauthAccount": {"emailAddress": "a b@example.com"}},
-                    {"oauthAccount": {"emailAddress": "x@y\n<script>"}}):
+                    {"oauthAccount": {"emailAddress": "x@y\n<script>"}},
+                    b"[" * 100000, b'{"n": ' + b"9" * 5000 + b"}"):
             with self.subTest(doc=str(doc)[:40]):
                 self.configure(account=doc)
                 self.assertIsNone(self.usage()["account"])

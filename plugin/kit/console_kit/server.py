@@ -222,7 +222,11 @@ class UsageProblem(Exception):
 
 def _read_capped(path: Path, cap: int, what: str) -> bytes:
     try:
-        with open(path, "rb") as f:
+        # O_NONBLOCK: a FIFO put where the file should be must not hold a handler thread open.
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        with open(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                raise UsageProblem(f"the {what} is not a regular file")
             data = f.read(cap + 1)
     except FileNotFoundError:
         raise UsageProblem(f"the {what} does not exist yet") from None
@@ -243,7 +247,10 @@ def _iso(value, what: str) -> str:
         raise UsageProblem(f"the usage file's {what} is not a timestamp") from None
     if t.tzinfo is None:
         raise UsageProblem(f"the usage file's {what} has no time zone")
-    return t.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    try:  # a year-1 or year-9999 date overflows on the way to UTC
+        return t.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    except (OverflowError, ValueError):
+        raise UsageProblem(f"the usage file's {what} is out of range") from None
 
 
 def _window(raw, name: str) -> dict:
@@ -261,7 +268,7 @@ def _window(raw, name: str) -> dict:
 def usage_snapshot(path: Path) -> dict:
     try:
         doc = json.loads(_read_capped(path, USAGE_MAX_BYTES, "usage file"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (ValueError, RecursionError):  # bad JSON, bad UTF-8, a huge integer, deep nesting
         raise UsageProblem("the usage file is not JSON") from None
     if not isinstance(doc, dict):
         raise UsageProblem("the usage file is not a JSON object")
@@ -275,7 +282,7 @@ def account_email(path: Path) -> str | None:
     """The signed-in account's email, or None. Nothing else is taken from the file."""
     try:
         doc = json.loads(_read_capped(path, ACCOUNT_MAX_BYTES, "account file"))
-    except (UsageProblem, UnicodeDecodeError, json.JSONDecodeError):
+    except (UsageProblem, ValueError, RecursionError):
         return None
     acct = doc.get("oauthAccount") if isinstance(doc, dict) else None
     email = acct.get("emailAddress") if isinstance(acct, dict) else None
@@ -288,13 +295,21 @@ def account_email(path: Path) -> str | None:
 def read_usage(cfg: Config) -> dict:
     out = {"enabled": cfg.usage_file is not None or cfg.account_file is not None,
            "usage": None, "usage_problem": None, "account": None}
+    # Anything unforeseen in a file someone else writes becomes a fixed sentence, never a 500:
+    # the log names the exception's type only, so no file content reaches the journal either.
     if cfg.usage_file is not None:
         try:
             out["usage"] = usage_snapshot(cfg.usage_file)
         except UsageProblem as e:
             out["usage_problem"] = str(e)
+        except Exception as e:
+            sys.stderr.write(f"console usage: {type(e).__name__} reading the usage file\n")
+            out["usage_problem"] = "the usage file could not be read"
     if cfg.account_file is not None:
-        out["account"] = account_email(cfg.account_file)
+        try:
+            out["account"] = account_email(cfg.account_file)
+        except Exception as e:
+            sys.stderr.write(f"console usage: {type(e).__name__} reading the account file\n")
     return out
 
 
