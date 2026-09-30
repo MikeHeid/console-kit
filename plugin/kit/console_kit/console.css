@@ -511,7 +511,7 @@
 .ck-message-by[data-by="owner"] { background: var(--c-claimed-bg); color: var(--c-claimed); }
 .ck-message-by[data-by="agent"] { background: var(--c-accent); color: var(--c-accent-fg); }
 .ck-message-content { flex: 1; min-width: 0; }
-.ck-message-text { line-height: 1.5; }
+.ck-message-text { line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }  /* 0.8.4: keep the line breaks, as .ck-chat-text */
 .ck-message-time {
   font-size: 11px;
   color: var(--c-fg-muted);
