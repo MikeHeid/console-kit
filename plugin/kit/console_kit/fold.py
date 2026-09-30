@@ -31,6 +31,7 @@ from typing import Protocol
 
 from . import anchors as A
 from . import names as N
+from . import registry as R
 from . import schema as S
 from .store import Store
 
@@ -61,7 +62,7 @@ RECORD_ID = S.RECORD_ID
 # file is refused rather than bloating the record. Generous on purpose.
 MAX_EARLIER = 100
 MAX_FORK_QUESTIONS = 5  # the store's cap, re-checked across committed files (§6.6)
-TS = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+TS = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\Z")
 
 
 def locked_filename(qid: str) -> str:
@@ -474,6 +475,31 @@ def inside(root: Path, raw: str, what: str) -> Path:
     return Path(full)
 
 
+def _steward_refusal(a) -> str | None:
+    """The steward lock (0.8.3), as `agent.py` applies it to `watch` and `synced`.
+
+    `export` is checked against the console whose store it reads (the store's
+    directory is the console's state); `fold` against the console registered for
+    `--root`. A root nobody registered carries no lock, as the console-fold
+    skill stops there anyway.
+    """
+    if a.cmd == "export":
+        state = Path(a.store).resolve().parent
+    else:
+        e = R.lookup(a.root)
+        if e is None:
+            return None
+        state = Path(e["state"])
+    name = R.steward_for_state(state)
+    if name is None or a.agent == name:
+        return None
+    who = f"this session ({a.agent})" if a.agent else "this session (unnamed)"
+    return (f"refused: the fold belongs to this console's steward, {name}, and {who} is not it. Only the steward "
+            f"watches the doorbell, marks it synced and folds answers. Use `ask`, `reply` and `working` instead; "
+            f"the steward folds what the owner locks. (A session named {name} runs as it: --as {name}, or "
+            f"{N.ENV}={name}.)")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--root", type=Path, default=Path("."),
@@ -487,7 +513,22 @@ def main(argv: list[str] | None = None) -> int:
     fo.add_argument("--ledger", required=True)
     fo.add_argument("--adapter", required=True)
     fo.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--as", dest="agent", metavar="NAME",
+                    help=f"this session's agent name (default: ${N.ENV}); checked against the console's steward")
     a = ap.parse_args(argv)
+    if a.agent is None and os.environ.get(N.ENV):
+        a.agent = os.environ[N.ENV]
+    if a.agent is not None and N.problem(a.agent):
+        print(f"fold: agent name: {N.problem(a.agent)}; nothing was done", file=sys.stderr)
+        return 2
+    try:
+        why = _steward_refusal(a)
+    except R.RegistryError as err:
+        print(f"fold: {err}", file=sys.stderr)
+        return 1
+    if why:
+        print(f"fold: {why}", file=sys.stderr)
+        return 1
     try:
         if a.cmd == "export":
             a.out = inside(a.root, a.out, "--out")

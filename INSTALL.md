@@ -160,6 +160,19 @@ A 0.8.1 kit reads a store 0.8.2 wrote without a change: the names are kept
 beside it, in `<state>/names.jsonl`, and a 0.8.1 kit shows every agent as
 "agent" (`kit/docs/DEPLOY.md`, "Rollback").
 
+**Upgrading to 0.8.3.** Nothing to migrate, and nothing changes until you
+name a steward: `agent.py --state <state> steward agent-5` (README, "One
+steward, many sessions"). Then only the session started with
+`CONSOLE_KIT_AGENT=agent-5` may `watch`, `synced` or fold, and the plugin's
+new PreToolUse hook blocks `AskUserQuestion` in every other session of that
+project, pointing it at `agent.py ask`. Update the plugin for the hook and
+the skills. Every id-shaped field (item ids, qids, record ids, nonces,
+option ids, sources, cites and the like) now also refuses a trailing
+newline, which 0.8.2 let through; no honest client sends one. **Before going
+back to 0.8.2, clear the steward** (`agent.py steward --clear`): a 0.8.2
+SessionStart hook reads an entry with a `steward` key as malformed and says
+"not checked" instead of listing the owner's requests.
+
 **Going back to an older kit.** A 0.8.0 kit reads a store 0.8.1 wrote, but
 it looks for each visual 0.8.1 stored in its own checkout: it refuses the
 path by name (`not under visuals_dir`), or, if its `visuals_dir` is

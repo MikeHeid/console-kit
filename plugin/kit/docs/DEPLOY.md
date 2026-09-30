@@ -153,7 +153,19 @@ A kit installed by `deploy/install.sh` instead (copied to
    0.8.2's per-agent `working.json` shows no "agent active" marks until the
    next `working` (it skips entries it cannot read, and never fails on them).
 
-7. Never "roll back" by editing `store.jsonl`. Every line's `seq` and `id` are
+7. Rolling 0.8.3 back to **0.8.2** needs no store check: 0.8.3 writes
+   nothing new into the store or the state directory. It adds an optional
+   `steward` key to entries of YOUR registry
+   (`~/.config/console-kit/projects.json`), and a 0.8.2 plugin reads an entry
+   with that key as malformed: its SessionStart note says "not checked"
+   instead of listing the owner's requests. So clear it first:
+
+       python3 <vendored>/agent.py --state <state> steward --clear
+
+   (or delete the `"steward"` line by hand). A 0.8.2 plugin has no question
+   hook, so every session may ask live again.
+
+8. Never "roll back" by editing `store.jsonl`. Every line's `seq` and `id` are
    checked on load, and an edited line stops the server.
 
 ## Health

@@ -40,8 +40,8 @@ from .registry import RegistryError, read_regular
 
 FILE = ".console-kit.json"
 MAX_FILE = 64 * 1024
-DIR = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*(/[A-Za-z0-9_][A-Za-z0-9_.\-]*)*/?$")
-SKILL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:\-]{0,79}$")
+DIR = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*(/[A-Za-z0-9_][A-Za-z0-9_.\-]*)*/?\Z")
+SKILL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:\-]{0,79}\Z")
 
 
 class ConfigError(ValueError):

@@ -133,6 +133,40 @@ heartbeat `agent.py watch` writes while it waits (0.6.0).
   with `dir_fd`), so a folder swapped for a symlink mid-export cannot redirect
   a write.
 
+### One steward, many sessions (0.8.3)
+
+Owner decision, 2026-09-30: *"Lock + hook others ★"*.
+
+- **The steward.** The doorbell has one cursor, so one session holds it: the
+  steward, named in **your own registry**, never by the repository:
+
+      python3 <kit>/agent.py --state <state> steward agent-5     # or: register ... --steward agent-5
+      python3 <kit>/agent.py --state <state> steward --clear     # back to 0.8.2: no lock
+
+  It is set on every project registered on that state (several checkouts of
+  one project share one console, so they share its steward).
+- **Start the steward session with its name in the environment**:
+  `CONSOLE_KIT_AGENT=agent-5 claude`. Its `agent.py` calls then carry the
+  name, and the question hook recognises it. Start the others with names of
+  their own (`CONSOLE_KIT_AGENT=agent-6 claude`).
+- **The lock.** With a steward set, `agent.py watch`, `agent.py synced` and
+  `fold.py` (export and fold) refuse, exit 1, any session whose name
+  (`--as`, else `CONSOLE_KIT_AGENT`) is not the steward's, and the refusal
+  names the steward. `ask`, `reply` and `working` stay open to every
+  session, named or not.
+- **The question hook.** In a registered project with a steward, the plugin
+  blocks `AskUserQuestion` in every session but the steward's, and tells it
+  the full `agent.py ask` command instead, so its question reaches your
+  inbox. The steward may still ask you live, and mirrors each live answer
+  to the console (it posts the question and replies with your answer). The
+  hook fails open: if it cannot read your registry, the question goes
+  through.
+- **A guardrail, not a lock against an attacker.** Every session runs as you,
+  on the same socket and files; one that sets `CONSOLE_KIT_AGENT` to the
+  steward's name is the steward. It keeps your own cooperating sessions from
+  racing for the cursor, and nothing more.
+- With no steward set, everything is exactly as in 0.8.2.
+
 ## How it fits together
 
 ```
@@ -196,8 +230,8 @@ new record in the store, and nothing already written changes.
   `working` (shows you "agent active" on the items it has picked up),
   `synced`, `fork-context`, `check` (why each stale answer is stale), `reanchor`,
   `transcript` (a roar's transcript), `visual` (an answer to a visual request),
-  `visual-export`, and `register`, which **only you** run. `--as NAME` names
-  the session (0.8.2).
+  `visual-export`, and `register` and `steward`, which **only you** run.
+  `--as NAME` names the session (0.8.2).
 - **`fold.py`** writes locked answers into your project through the adapter.
 - **`plugin/`** holds the Claude Code plugin: the hook, the skills and the
   committee agents.
@@ -208,8 +242,8 @@ new record in the store, and nothing already written changes.
 
 - The plugin's hook runs in every project you open. It acts only in projects
   listed in `~/.config/console-kit/projects.json`, which only
-  `agent.py register` writes. A cloned repository's `.console-kit.json` is
-  never trusted by itself.
+  `agent.py register` and `agent.py steward` write. A cloned repository's
+  `.console-kit.json` is never trusted by itself, and cannot name a steward.
 - The kit never opens `~/.cloudflared/cert.pem` or a tunnel credentials file.
   It checks that the file exists, and nothing more.
 - Nothing onboarding writes is a secret. The AUD tag and team domain are what

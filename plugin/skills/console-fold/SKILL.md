@@ -25,6 +25,11 @@ console-process skill; if this project is not registered there, stop.
 Python and the fold runs it, which is why the fold only ever happens in a
 project the user registered.
 
+**Only the steward folds (0.8.3).** When the registry entry names a
+`steward`, `fold.py` (export and fold) refuses any session whose name
+(`--as NAME` before the subcommand, else `CONSOLE_KIT_AGENT`) is not the
+steward's. If you are not the steward, stop: the steward folds.
+
 1. **Branch.** Work on a branch of its own, never the main branch.
 2. **Export.**
 

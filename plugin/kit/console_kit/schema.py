@@ -89,7 +89,7 @@ MODES = ("explore", "tighten")
 # 1-40 characters of letters, digits, spaces and hyphens. It is shown on the
 # page and handed to an agent, so it is held to exactly this shape.
 ROSTER = ("devops", "ux", "adversarial", "security", "architect", "analyst")
-OTHER_ROLE = re.compile(r"^other:[A-Za-z0-9][A-Za-z0-9 \-]{0,39}$")
+OTHER_ROLE = re.compile(r"^other:[A-Za-z0-9][A-Za-z0-9 \-]{0,39}\Z")
 MAX_ROLES = 3
 # "roar" (0.8.0) is a seat of its own: a three-round panel (independent reads,
 # deliberation, synthesis) on ONE locked answer. It is called alone, only with
@@ -107,8 +107,8 @@ VISUAL_FORMATS = {"mermaid": ".mmd", "html": ".html"}
 MAX_VISUAL = 256 * 1024          # bytes of the file
 MAX_VISUAL_DOC = 4000            # characters of the doc the record carries
 MAX_VISUALS_PER_REQUEST = 3
-VISUAL_PATH = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*(/[A-Za-z0-9_][A-Za-z0-9_.\-]*)+$")
-SHA256 = re.compile(r"^[0-9a-f]{64}$")
+VISUAL_PATH = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*(/[A-Za-z0-9_][A-Za-z0-9_.\-]*)+\Z")
+SHA256 = re.compile(r"^[0-9a-f]{64}\Z")
 # Whose recommendation a forked question's ★ is: the whole panel, one of the
 # default committee's seats (§6.6), a roster seat (D13), or a typed `other:` seat.
 STAR_BY = ("panel", "architect", "ux", "security", "determinism", "devops", "adversarial", "analyst")
@@ -154,7 +154,7 @@ def secret_path(path: str) -> str | None:
         if kind == "name" and parts and fnmatch.fnmatchcase(parts[-1].lower(), pattern):
             return words
     return None
-CITE = re.compile(r"^(?P<path>[A-Za-z0-9_.\-/]+):(?P<a>[1-9][0-9]{0,6})(?:-(?P<b>[1-9][0-9]{0,6}))?$")
+CITE = re.compile(r"^(?P<path>[A-Za-z0-9_.\-/]+):(?P<a>[1-9][0-9]{0,6})(?:-(?P<b>[1-9][0-9]{0,6}))?\Z")
 
 # The fields the WRITER supplies; `id`, `seq` and `ts` belong to the store.
 REQUIRED = {
@@ -185,20 +185,23 @@ OPTIONAL = {
 }
 STORE_FIELDS = frozenset({"id", "seq", "ts", "schemaVersion", "type"})
 
-ITEM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
+# Every shape ends in `\Z`, never `$` (0.8.3): with `re.match`, `$` also matches
+# just before ONE trailing newline, so "LANE.1\n" passed as an item id. `\Z` is
+# the end of the string and nothing else. The same holds for every shape in the kit.
+ITEM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*\Z")
 # A store record id (`record_id`). A field holding one is printed inline in the
 # rulings record, so it is held to exactly this shape, never "any string".
-RECORD_ID = re.compile(r"^[0-9a-f]{24}$")
-QID = re.compile(r"^(?P<item>[A-Za-z0-9][A-Za-z0-9_.\-]*)/Q(?P<n>[1-9][0-9]*)$")
-OPTION_ID = re.compile(r"^[a-z][a-z0-9_]*$")
-NONCE = re.compile(r"^[A-Za-z0-9_\-]{8,64}$")
+RECORD_ID = re.compile(r"^[0-9a-f]{24}\Z")
+QID = re.compile(r"^(?P<item>[A-Za-z0-9][A-Za-z0-9_.\-]*)/Q(?P<n>[1-9][0-9]*)\Z")
+OPTION_ID = re.compile(r"^[a-z][a-z0-9_]*\Z")
+NONCE = re.compile(r"^[A-Za-z0-9_\-]{8,64}\Z")
 # `source` is a path, optionally with `:line` or `:line-line`. It is rendered
 # inline into the rulings record, so it must never carry markup or a newline.
 # It still allows `..`: it is NEVER opened as a filesystem path. The only use
 # of it as a path (anchors.cited_range, 0.5.0) string-compares its path part
 # with a condition's `path`, which the condition's own check has already
 # jailed (relative, no `..`, resolved inside the project root).
-SOURCE = re.compile(r"^[A-Za-z0-9_.\-/]+(:[0-9]+(-[0-9]+)?)?$")
+SOURCE = re.compile(r"^[A-Za-z0-9_.\-/]+(:[0-9]+(-[0-9]+)?)?\Z")
 MAX_TEXT = 20_000
 MAX_LINE = 300       # a label, a description, or any other one-line field
 MAX_OPTIONS = 12
@@ -279,7 +282,7 @@ def _check_question(rec: dict) -> list[str]:
     ids = []
     for o in opts:
         if not isinstance(o, dict) or not isinstance(o.get("id"), str) or not OPTION_ID.match(o["id"]):
-            errs.append(f"option {o!r} needs an id matching {OPTION_ID.pattern}")
+            errs.append(f"option {o!r} needs an id of lowercase letters, digits and _, starting with a letter")
             continue
         errs += one_line(o.get("label"), f"option {o['id']!r} label")
         if "description" in o:

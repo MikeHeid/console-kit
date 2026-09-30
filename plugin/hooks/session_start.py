@@ -6,7 +6,14 @@ opens. So it acts only in a project the user registered with `agent.py
 register`, which writes the user's own registry:
 
     ${XDG_CONFIG_HOME:-~/.config}/console-kit/projects.json
-    {"projects": {"<absolute project root>": {"state": "<absolute dir>", "kit": "<absolute dir>"}}}
+    {"projects": {"<absolute project root>": {"state": "<absolute dir>", "kit": "<absolute dir>",
+                                              "steward": "<agent name, optional (0.8.3)>"}}}
+
+When the entry names a steward, the note says so: the steward session (the one
+whose CONSOLE_KIT_AGENT is that name) is told it alone watches, syncs and folds,
+and mirrors live answers to the console; every other session is told to sign
+its posts, never to run those, and that its AskUserQuestion is blocked
+(`ask_guard.py`).
 
 In any other project it prints nothing and exits 0, whatever files the project
 carries: a clone's `.console-kit.json` or fake doorbell is never read. It
@@ -39,10 +46,15 @@ MAX_DOORBELL = 64 << 20                # console_kit/doorbell.py
 MAX_CURSOR = 4096                      # console_kit/doorbell.py
 REGISTRY_FILE = "projects.json"        # console_kit/registry.py
 MAX_REGISTRY = 1 << 20                 # console_kit/registry.py
-PLAIN_PATH = re.compile(r"^/[A-Za-z0-9_./\-]{0,511}$")   # console_kit/registry.py
+PLAIN_PATH = re.compile(r"^/[A-Za-z0-9_./\-]{0,511}\Z")   # console_kit/registry.py
 MAX_LISTED = 20                        # a long backlog is summarised, never pasted whole
-ITEM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}$")   # console_kit/schema.py ITEM_ID, length-capped
-TS = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+ITEM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}\Z")   # console_kit/schema.py ITEM_ID, length-capped
+TS = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
+AGENT_ENV = "CONSOLE_KIT_AGENT"                                      # console_kit/names.py ENV
+AGENT_NAME = re.compile(r"^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31}\Z")  # console_kit/names.py NAME
+MAX_NAME = 32                                                        # console_kit/names.py
+RESERVED = frozenset({"agent", "owner"})                            # console_kit/names.py
+STEWARD = "steward"                                                  # console_kit/registry.py (0.8.3)
 
 
 class Unsafe(ValueError):
@@ -71,25 +83,63 @@ def _registry_path() -> Path:
     return Path(base) / "console-kit" / REGISTRY_FILE
 
 
-def _entry(project: Path) -> dict | None:
-    """This project's registry entry, None when unregistered; Unsafe when the entry is malformed."""
+def is_name(v: object) -> bool:
+    """As console_kit/names.problem(v) is None: an agent name."""
+    return isinstance(v, str) and v not in RESERVED and len(v) <= MAX_NAME and AGENT_NAME.match(v) is not None
+
+
+def projects() -> dict:
+    """The registry's "projects" object ({} when there is no registry); Unsafe when it cannot be read."""
     raw = _read_regular(_registry_path(), MAX_REGISTRY)
     if raw is None:
-        return None
+        return {}
     try:
         doc = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         raise Unsafe("the registry is not JSON") from None
-    projects = doc.get("projects") if isinstance(doc, dict) else None
-    if not isinstance(projects, dict):
+    found = doc.get("projects") if isinstance(doc, dict) else None
+    if not isinstance(found, dict):
         raise Unsafe("the registry needs a \"projects\" object")
-    e = projects.get(os.path.realpath(project))
-    if e is None:
-        return None
-    if not (isinstance(e, dict) and set(e) == {"state", "kit"}
+    return found
+
+
+def checked(e: object) -> dict:
+    """A registry entry held to the kit's shape (console_kit/registry.entry_problems), or Unsafe."""
+    if not (isinstance(e, dict) and {"state", "kit"} <= set(e) <= {"state", "kit", STEWARD}
             and all(isinstance(e[k], str) and PLAIN_PATH.match(e[k]) for k in ("state", "kit"))):
-        raise Unsafe("this project's registry entry is not two absolute plain paths")
+        raise Unsafe("this project's registry entry is not two absolute plain paths (and an optional steward)")
+    if STEWARD in e and not is_name(e[STEWARD]):
+        raise Unsafe("this project's registry entry names a steward that is not an agent name")
     return e
+
+
+def _entry(project: Path) -> dict | None:
+    """This project's registry entry, None when unregistered; Unsafe when the entry is malformed."""
+    e = projects().get(os.path.realpath(project))
+    return None if e is None else checked(e)
+
+
+def steward_line(e: dict, agent: str) -> tuple[str | None, bool]:
+    """The steward note for this session (0.8.3), and whether this session is the steward.
+
+    The session's own name comes from its environment (CONSOLE_KIT_AGENT, which
+    the hook inherits from the session), never from the repository.
+    """
+    name = e.get(STEWARD)
+    if not name:
+        return None, True
+    me = os.environ.get(AGENT_ENV, "")
+    if is_name(me) and me == name:
+        return (f"Owner console steward: this session is the steward, {name}. It alone runs `watch`, `synced` "
+                f"and the fold for this console. It may ask the owner live (AskUserQuestion), but mirrors each "
+                f"live answer to the console for the record: post the question with `{agent} ask FILE` and reply "
+                f"on its item with the owner's answer (`{agent} reply ITEM TEXT`)."), True
+    you = f"--as {me}" if is_name(me) else "--as YOUR-NAME"
+    return (f"Owner console steward: {name} holds this console's doorbell, and this session is not it. Sign "
+            f"every post with `{you}` (or start the session with {AGENT_ENV}=YOUR-NAME), and never run "
+            f"`watch`, `synced` or the fold: they are refused here. AskUserQuestion is blocked in this session: "
+            f"post each question with the console-ask skill (`{agent} {you} ask FILE...`); it reaches the owner's "
+            f"inbox, and the steward, who asks the owner live, mirrors each live answer to the console."), False
 
 
 def _cursor(state: Path) -> int:
@@ -141,8 +191,14 @@ def context(project: Path) -> str | None:
     ask = ("Owner console: this project is registered. Post every question the owner must decide "
            f"to the console with the console-ask skill (`{agent} ask FILE...`); a question written "
            "only in a document never reaches the owner's inbox.")
+    steward, mine = steward_line(e, agent)
+    if steward:
+        ask += "\n\n" + steward
     if not wake:
         return ask
+    if not mine:  # the doorbell is the steward's: another session is told it waits, never how to take it
+        return (f"Owner console: {len(wake)} request{'' if len(wake) == 1 else 's'} from the owner waiting "
+                f"after doorbell seq {cursor}; the steward, {e[STEWARD]}, handles them.\n\n" + ask)
     lines = [f"Owner console: {len(wake)} request{'' if len(wake) == 1 else 's'} from the owner "
              f"waiting after doorbell seq {cursor}:"]
     for r in wake[:MAX_LISTED]:

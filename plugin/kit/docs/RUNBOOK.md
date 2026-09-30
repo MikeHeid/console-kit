@@ -255,8 +255,69 @@ names the file to move.
   line aside by hand, which only makes that record unnamed. Deleting the file
   unnames every record and loses nothing else.
 - **The doorbell cursor is still one for all sessions**: whichever session
-  runs `synced --through SEQ` moves it. Routing a request to one session is
-  not in 0.8.2.
+  runs `synced --through SEQ` moves it. From 0.8.3, name a steward so only
+  one session can ("The steward (0.8.3)" below).
+
+## The steward (0.8.3)
+
+The doorbell has one cursor. With several sessions on one console, name one
+of them its **steward** in your own registry; only it watches, syncs and folds.
+
+**Set it up** (you, in a terminal, never a session):
+
+    python3 <kit>/agent.py --state <state> steward agent-5
+    python3 <kit>/agent.py --state <state> steward            # prints the steward, or "no steward"
+    python3 <kit>/agent.py --state <state> steward --clear    # no lock: 0.8.2 behaviour
+
+It is written to every project registered on `<state>`. Then start the
+sessions, each with its own name in its environment:
+
+    cd <project> && CONSOLE_KIT_AGENT=agent-5 claude      # the steward
+    cd <worktree> && CONSOLE_KIT_AGENT=agent-6 claude     # any other session
+
+Claude Code hands its own environment to its hooks and to the session's Bash
+commands, so this one variable is how the question hook knows the steward and
+how every `agent.py` call is signed. The repository's `.console-kit.json`
+cannot set or change the steward.
+
+**What changes:**
+
+- **`agent.py watch` or `synced` exits 1 with "refused: `watch` belongs to
+  this console's steward, agent-5"**: the session is not the steward (its
+  `--as`, else `CONSOLE_KIT_AGENT`, is another name, or none). Nothing moved:
+  no heartbeat, no cursor. It should post with `ask`, `reply` and `working`,
+  which stay open to everyone. `fold.py` (export and fold) refuses the same
+  way. A non-steward's "agent active" marks are cleared only when they lapse
+  (an hour), since its `synced` is refused.
+- **`AskUserQuestion` is denied with "Owner console: AskUserQuestion is
+  blocked in this session"**: the plugin's PreToolUse hook
+  (`hooks/ask_guard.py`) does this in every session of a registered project
+  whose console has a steward, except the steward's. Its message carries the
+  full `agent.py ask` command. The steward asks you live as before, and
+  mirrors each live answer to the console: it posts the question with
+  `agent.py ask`, and replies on its item with your answer, so the record
+  holds it and you can lock it.
+- **The steward itself is refused**: its name did not reach the command. Run
+  `echo $CONSOLE_KIT_AGENT` in that session; if it is empty, restart the
+  session as above (or pass `--as agent-5` to every `agent.py` call).
+- **"the registry names more than one steward for the console at ..."**:
+  two projects on one state carry different stewards (a hand edit). Run
+  `agent.py --state <state> steward NAME` once to set one for all.
+- **`watch` says the registry "is not JSON"** (or another registry error):
+  the lock does not switch itself off when your registry breaks; fix the file.
+  The question hook, by contrast, fails open: while the registry is broken,
+  every session may ask live.
+
+**What it is not:** a security boundary. Every session runs as you, on the
+same socket and files, and any session that sets `CONSOLE_KIT_AGENT=agent-5`
+is the steward. It keeps your own cooperating sessions from racing for the
+cursor, and nothing more.
+
+**Why the lock is in `agent.py` and `fold.py`, not the server:** `watch`
+reads the doorbell file and writes its heartbeat without calling the server,
+`synced` moves the cursor file before its one POST, and the fold reads the
+store file directly. A server check would see only that POST, so the check
+sits where all three pass.
 
 ## Roar is refused (0.8.0)
 

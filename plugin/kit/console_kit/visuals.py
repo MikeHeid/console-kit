@@ -62,7 +62,7 @@ INDEX = "INDEX.md"
 MARK = "<!-- console-kit: generated from the console's store. Do not edit: the next visual rewrites it. -->"
 MAX_DOC_BYTES = 256 * 1024     # a doc is a title, at most MAX_VISUAL_DOC characters and the owner's request
 MAX_INDEX_BYTES = 4 << 20
-NAME = re.compile(r"^([0-9a-f]{8})-([0-9a-f]{12})(\.mmd|\.html)$")
+NAME = re.compile(r"^([0-9a-f]{8})-([0-9a-f]{12})(\.mmd|\.html)\Z")
 
 
 class VisualError(Exception):
