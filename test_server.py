@@ -1516,23 +1516,23 @@ class Phase4Tests(_Live, unittest.TestCase):
 
     # -- visuals -----------------------------------------------------------------------------
 
-    def test_a_visual_is_written_indexed_and_served_sandboxed(self):
+    def test_a_visual_is_stored_in_state_and_served_sandboxed(self):
         # Catches: a mock served as the console's own HTML (its script would run as the owner),
-        # a policy that lets it load anything, a route that skips the gate, and a file or index
-        # that is not where the doc says.
+        # a policy that lets it load anything, a route that skips the gate, and (0.8.1, (d)) a
+        # visual written into the project instead of the console's state, or an INDEX.md
+        # regenerated in the project.
         req = self.visual_request()
         self.assertEqual(self.doorbell()[-1]["intent"], "visual")
         code, out = self.post_visual(req["id"])
         self.assertEqual(code, 200, out)
         rec = out["record"]
         self.assertTrue(rec["path"].startswith("visuals/LANE.1/") and rec["path"].endswith(".html"))
-        self.assertEqual((self.root / rec["path"]).read_text(), MOCK)
-        doc = (self.root / rec["doc_path"]).read_text()
+        self.assertIn("visual-export", out["land"])
+        self.assertEqual((self.cfg.state / rec["path"]).read_text(), MOCK)
+        doc = (self.cfg.state / rec["doc_path"]).read_text()
         self.assertIn("The grid at phone width", doc)
         self.assertIn(rec["path"].rsplit("/", 1)[1], doc)
-        index = (self.root / "visuals/INDEX.md").read_text()
-        self.assertIn("Grid at 375 px", index)
-        self.assertIn(rec["path"][len("visuals/"):], index)
+        self.assertFalse((self.root / "visuals").exists())          # visuals_dir is a destination only
         code, h, body = self.raw(f"/api/visual?id={rec['id']}")
         self.assertEqual((code, body.decode()), (200, MOCK))
         self.assertTrue(h["content-type"].startswith("text/html"))
@@ -1572,13 +1572,23 @@ class Phase4Tests(_Live, unittest.TestCase):
         self.assertEqual(code, 413)
         self.assertIn("refused, not cut", out["error"])
         self.assertFalse((self.root / "visuals").exists())
+        self.assertFalse((self.cfg.state / "visuals").exists())
 
     def test_a_changed_or_escaped_file_is_not_served(self):
-        # Catches: serving whatever is at the path now (an edit, or a symlink swapped in that points
-        # outside the project, would reach the owner's page as the agent's visual).
+        # Catches (d): serving whatever is at the path now (an edit, or a symlink swapped in that
+        # points outside the state, would reach the owner's page as the agent's visual), and a
+        # server that falls back to reading the project checkout.
         req = self.visual_request()
         rec = self.post_visual(req["id"])[1]["record"]
-        p = self.root / rec["path"]
+        p = self.cfg.state / rec["path"]
+        in_checkout = self.root / rec["path"]                  # where 0.8.0 would have put it
+        in_checkout.parent.mkdir(parents=True)
+        in_checkout.write_text(MOCK)
+        p.rename(p.with_suffix(".away"))
+        code, out = self.get(f"/api/visual?id={rec['id']}")
+        self.assertEqual(code, 409)
+        self.assertIn("not in the console's state", out["error"])
+        p.with_suffix(".away").rename(p)
         p.write_text(MOCK.replace("Grid", "Evil"))
         code, out = self.get(f"/api/visual?id={rec['id']}")
         self.assertEqual(code, 409)
@@ -1594,11 +1604,16 @@ class Phase4Tests(_Live, unittest.TestCase):
         self.assertEqual(self.get("/api/visual?id=" + "0" * 24)[0], 404)
         self.assertEqual(self.get("/api/visual?id=../../etc/passwd")[0], 400)
 
-    def test_without_visuals_dir_a_visual_is_refused_by_name(self):
+    def test_without_visuals_dir_a_visual_is_stored_and_shown_but_not_exported(self):
+        # Catches: a visuals_dir still required to store (0.8.0), and an export with no destination.
         (self.root / ".console-kit.json").write_text(json.dumps({}))
         self.console.project = __import__("console_kit.projectcfg", fromlist=["load"]).load(self.root)
         req = self.visual_request()
         code, out = self.post_visual(req["id"])
+        self.assertEqual(code, 200, out)
+        self.assertIn("no visuals_dir", out["land"])
+        self.assertEqual(self.raw(f"/api/visual?id={out['record']['id']}")[2].decode(), MOCK)
+        code, out = self.agent_post("/visual-export", {"ids": []})
         self.assertEqual(code, 400)
         self.assertIn("no visuals_dir", out["error"])
 
@@ -1623,6 +1638,209 @@ class Phase4Tests(_Live, unittest.TestCase):
         r = subprocess.run([sys.executable, agent_py, "--state", str(self.cfg.state), "transcript", f["id"],
                             str(work / "t.md")], capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+# -- 0.8.1: the server never writes into the project's working tree ------------------------
+
+GIT_ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@example.com", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+AGENT_PY = str(Path(SV.__file__).resolve().parent.parent / "agent.py")
+
+
+def git(cwd, *args, check=True):
+    import subprocess
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, env=GIT_ENV, timeout=60)
+    if check and r.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)}: {r.stdout}{r.stderr}")
+    return r
+
+
+def snapshot(top: Path) -> dict:
+    """Every file and folder of a working tree, tracked or not, outside .git: path -> (kind, mode, bytes)."""
+    out = {}
+    for dirpath, dirnames, filenames in os.walk(top):
+        dirnames[:] = sorted(d for d in dirnames if not (Path(dirpath) == top and d == ".git"))
+        for name in dirnames + sorted(filenames):
+            p = Path(dirpath) / name
+            st = p.lstat()
+            rel = p.relative_to(top).as_posix()
+            if stat.S_ISLNK(st.st_mode):
+                out[rel] = ("link", os.readlink(p))
+            elif stat.S_ISDIR(st.st_mode):
+                out[rel] = ("dir", stat.S_IMODE(st.st_mode))
+            else:
+                out[rel] = ("file", stat.S_IMODE(st.st_mode), p.read_bytes())
+    return out
+
+
+class VisualLandingTests(_Live, unittest.TestCase):
+    """A service checkout that follows main, a console running from it, and an agent's own clone.
+
+    This is the defect's own shape: 0.8.0 wrote each visual and INDEX.md into
+    the service checkout, the agent landed the same paths by PR, and the
+    checkout's `git merge --ff-only` was then refused over untracked files.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name).resolve()
+        self.base = base
+        git(base, "init", "-q", "--bare", "-b", "main", "origin.git")
+        seedwt = base / "seed"
+        git(base, "clone", "-q", str(base / "origin.git"), "seed")
+        git(seedwt, "checkout", "-q", "-b", "main")
+        (seedwt / "page.html").write_text(PAGE)
+        (seedwt / ".console-kit.json").write_text(json.dumps({"visuals_dir": "architect/visuals/"}))
+        (seedwt / "architect").mkdir()
+        (seedwt / "architect/README.md").write_text("# architect\n")
+        git(seedwt, "add", "-A")
+        git(seedwt, "commit", "-qm", "seed")
+        git(seedwt, "push", "-q", "origin", "main")
+        self.svc = base / "svc"                       # the live service checkout the console runs from
+        git(base, "clone", "-q", "-b", "main", str(base / "origin.git"), "svc")
+        self.work = base / "agent"                    # the agent's own clone, on a branch
+        git(base, "clone", "-q", "-b", "main", str(base / "origin.git"), "agent")
+        git(self.work, "checkout", "-q", "-b", "visuals")
+        self.cfg = SV.Config(root=self.svc, page=self.svc / "page.html", state=base / "st", adapter=base / "x.py",
+                             team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="test")
+        self.console = SV.Console(self.cfg, FakeAdapter())
+        self.console.seed()
+        verify = SV.access_verifier(TEAM, AUD, key_for=lambda _t: KEY.public_key())
+        self.owner = SV.owner_server(self.console, verify, 0)
+        self.port = self.owner.server_address[1]
+        threading.Thread(target=self.owner.serve_forever, daemon=True).start()
+        self.agent = SV.agent_server(self.console)
+        threading.Thread(target=self.agent.serve_forever, daemon=True).start()
+
+    def cli(self, *args):
+        import subprocess
+        return subprocess.run([sys.executable, AGENT_PY, "--state", str(self.cfg.state), *args],
+                              capture_output=True, text=True, timeout=60, env=GIT_ENV)
+
+    def draw(self, fmt="mermaid", content="graph TD\n  A-->B\n", title="A to B"):
+        """The whole round trip as an agent runs it: the owner's request, then `agent.py visual`."""
+        req = self.owner_msg(item="LANE.1", intent="visual", text="Draw the flow")
+        work = self.base / "scratch"
+        work.mkdir(exist_ok=True)
+        f = work / ("v" + os.urandom(3).hex() + (".mmd" if fmt == "mermaid" else ".html"))
+        f.write_text(content)
+        (work / "doc.md").write_text("A flows to B.")
+        r = self.cli("visual", req["id"], "--format", fmt, "--file", str(f), "--doc", str(work / "doc.md"),
+                     "--title", title)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return json.loads(r.stdout)["record"]
+
+    def test_a_the_service_checkout_is_byte_for_byte_unchanged(self):
+        # (a) Catches: any write into the project's working tree: the visual, its doc, INDEX.md, a
+        # folder, or a tidy-up that deletes something (v0.8.0 fails: it wrote all three there).
+        before = snapshot(self.svc)
+        self.assertIn(".console-kit.json", before)
+        rec = self.draw()
+        self.draw(fmt="html", content=MOCK, title="Mock")
+        self.get("/api/view")                              # a page view too (tags, evidence reads)
+        self.assertEqual(self.raw_visual(rec["id"]), b"graph TD\n  A-->B\n")
+        self.assertEqual(snapshot(self.svc), before)
+        self.assertEqual(git(self.svc, "status", "--porcelain", "--untracked-files=all").stdout, "")
+
+    def raw_visual(self, rid):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("GET", f"/api/visual?id={rid}", headers={"Cf-Access-Jwt-Assertion": token()})
+        r = conn.getresponse()
+        body = r.read()
+        conn.close()
+        self.assertEqual(r.status, 200, body)
+        return body
+
+    def test_b_export_writes_into_the_agents_worktree_and_refuses_the_rest(self):
+        # (b) Catches: an export that lands in the server's checkout, one that overwrites a file it
+        # did not write, one that is not idempotent, and one that writes outside a git work tree.
+        rec = self.draw()
+        name = rec["path"].rsplit("/", 1)[1]
+        svc_before = snapshot(self.svc)
+        r = self.cli("visual-export", "--project", str(self.svc))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("the directory the console server runs from", r.stderr)
+        r = self.cli("visual-export", "--project", str(self.svc / "architect"))   # a folder inside it
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("inside the work tree", r.stderr)
+        self.assertEqual(snapshot(self.svc), svc_before)
+        plain = self.base / "not-git"
+        plain.mkdir()
+        r = self.cli("visual-export", "--project", str(plain))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not a git work tree", r.stderr)
+        self.assertEqual(list(plain.iterdir()), [])
+
+        r = self.cli("visual-export", "--project", str(self.work))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        out = json.loads(r.stdout)
+        dest = self.work / "architect/visuals"
+        self.assertEqual((dest / "LANE.1" / name).read_text(), "graph TD\n  A-->B\n")
+        self.assertIn("Draw the flow", (dest / "LANE.1" / (name[:-4] + ".md")).read_text())
+        index = (dest / "INDEX.md").read_text()
+        self.assertIn(f"[visual](LANE.1/{name})", index)
+        self.assertIn("A to B", index)
+        self.assertEqual(len(out["written"]), 3)
+        again = self.cli("visual-export", "--project", str(self.work))              # idempotent
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(json.loads(again.stdout)["written"], [])
+        self.assertEqual(len(json.loads(again.stdout)["unchanged"]), 3)
+        second = self.draw(title="Second")
+        r = self.cli("visual-export", "--project", str(self.work), "--visual", second["id"])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Second", (dest / "INDEX.md").read_text())
+        self.assertIn("A to B", (dest / "INDEX.md").read_text())       # the index covers what is in DIR
+        (dest / "LANE.1" / name).write_text("graph TD\n  mine\n")
+        r = self.cli("visual-export", "--project", str(self.work))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn(f"architect/visuals/LANE.1/{name} is already there with other content", r.stderr)
+        self.assertEqual((dest / "LANE.1" / name).read_text(), "graph TD\n  mine\n")
+        self.assertEqual(snapshot(self.svc), svc_before)
+
+    def test_c_the_service_checkout_fast_forwards_over_the_landed_visuals(self):
+        # (c) The defect reproduced: the console stores visuals while it runs, an agent lands the same
+        # paths by PR, and the checkout follows main with `git merge --ff-only` as a deploy does.
+        # v0.8.0 fails here: the untracked files it wrote block the merge ("would be overwritten").
+        # Round 1 lands the paths by hand, exactly as the 0.8.0 skill told an agent to (the visual,
+        # its doc and INDEX.md under visuals_dir), so this needs no 0.8.1 command to reproduce.
+        recs = [self.draw(), self.draw(fmt="html", content=MOCK, title="Mock")]
+        dest = self.work / "architect/visuals"
+        for rec in recs:
+            name = rec["path"].rsplit("/", 1)[1]
+            (dest / rec["item"]).mkdir(parents=True, exist_ok=True)
+            (dest / rec["item"] / name).write_bytes(self.raw_visual(rec["id"]))
+            (dest / rec["item"] / (name.rsplit(".", 1)[0] + ".md")).write_text("# doc\n")
+        (dest / "INDEX.md").write_text("# Visuals\n")
+        git(self.work, "add", "-A")
+        git(self.work, "commit", "-qm", "visuals")
+        git(self.work, "push", "-q", "origin", "visuals:main")        # the PR, merged
+        git(self.svc, "fetch", "-q", "origin")
+        r = git(self.svc, "merge", "--ff-only", "origin/main", check=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((self.svc / "architect/visuals/INDEX.md").is_file())
+        # Round 2 through `agent.py visual-export`, after another visual: the export overwrites
+        # nothing it did not generate, so it is told apart from the hand-landed files...
+        self.draw(title="Third")
+        r = self.cli("visual-export", "--project", str(self.work))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("is already there with other content", r.stderr)      # the hand-written docs
+        for rec in recs:
+            git(self.work, "rm", "-q", rec["doc_path"].replace("visuals/", "architect/visuals/", 1))
+        git(self.work, "commit", "-qm", "hand-landed docs out")
+        r = self.cli("visual-export", "--project", str(self.work))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("INDEX.md was not written by the kit", r.stderr)       # ...and the hand-written index
+        git(self.work, "rm", "-q", "architect/visuals/INDEX.md")
+        git(self.work, "commit", "-qm", "hand-landed index out")
+        r = self.cli("visual-export", "--project", str(self.work))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        git(self.work, "add", "-A")
+        git(self.work, "commit", "-qm", "more")
+        git(self.work, "push", "-q", "origin", "visuals:main")
+        git(self.svc, "fetch", "-q", "origin")
+        r = git(self.svc, "merge", "--ff-only", "origin/main", check=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(git(self.svc, "status", "--porcelain", "--untracked-files=all").stdout, "")
 
 
 if __name__ == "__main__":

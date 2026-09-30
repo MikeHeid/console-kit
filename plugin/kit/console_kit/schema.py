@@ -27,12 +27,22 @@ written changes meaning.
 
     transcript  agent   a roar panel's transcript, attached to the roar fork it ran (one per fork)
     visual      agent   a Mermaid block or an HTML mock answering an owner's visual request;
-                        the file lives under the project's `visuals_dir`, the record holds its hash
+                        the record holds its hash; see below for where the file lives
 
     - intent 'visual': the owner asks for a visual on an item;
     - seat 'roar': a follow-up on ONE answer run as a three-round panel, at most once per lock;
     - `step`: 'refine' or 'drill', a fork that runs the project's refine or drill skill on one
       locked answer (`about_qid`) or one round's answer set (`follow_up_of`).
+
+0.8.1 changes no shape and keeps SCHEMA_VERSION 1. A visual record's `path`
+and `doc_path` pass the same check; what they are relative to changed. 0.8.0
+wrote `<visuals_dir>/<item>/<name>`, relative to the project checkout; 0.8.1
+writes `visuals/<item>/<name>`, relative to the server's STATE directory. The
+0.8.1 server finds a file by the record's item and file name only, so it reads
+both. A 0.8.0 kit reading a 0.8.1 record validates it, then serves it only
+when a file at that path in its checkout still hashes to the record's sha256:
+unless its visuals_dir is `visuals`, it refuses the path by name ("not under
+visuals_dir"); it never shows other bytes.
 """
 
 from __future__ import annotations

@@ -2773,6 +2773,7 @@ class VisualMarkdownTests(Tmp):
         # doc, a heading carrying a second "# h" and an inline <b>.
         from console_kit import visuals as VIS
         rec = {"item": "LANE.1", "seq": 1, "ts": "2026-09-30T00:00:00Z", "title": self.EVIL, "format": "html",
+               "request": "a" * 24, "sha256": "b" * 64,
                "path": "visuals/LANE.1/aaaaaaaa-bbbbbbbbbbbb.html", "doc_path": "visuals/LANE.1/aaaaaaaa-bbbbbbbbbbbb.md"}
         index = VIS.index_markdown("visuals", [rec])
         doc = VIS.doc_markdown(self.EVIL, "LANE.1", "html", "aaaaaaaa-bbbbbbbbbbbb.html", "body", "draw it")
@@ -2803,37 +2804,158 @@ class VisualMarkdownTests(Tmp):
 
 
 class VisualFileTests(Tmp):
-    def test_writes_are_jailed_idempotent_and_reads_check_the_hash(self):
-        # Catches: an overwrite of a different file, a write or read through a symlink, a file
-        # shown after someone edited it, and an INDEX.md someone wrote by hand clobbered.
+    """0.8.1: visuals are stored under STATE/visuals/ and exported into an agent's worktree."""
+
+    def rec(self, content=b"<p>hi</p>", **over):
         from console_kit import visuals as VIS
-        rel, doc = VIS.paths("visuals", "LANE.1", "a" * 24, "html", "b" * 64)
-        self.assertEqual(rel, "visuals/LANE.1/aaaaaaaa-bbbbbbbbbbbb.html")
-        VIS.write(self.dir, "visuals", rel, doc, b"<p>hi</p>", "# doc\n")
-        VIS.write(self.dir, "visuals", rel, doc, b"<p>hi</p>", "# doc\n")      # a retry: same bytes, fine
+        sha = hashlib.sha256(content).hexdigest()
+        rel, doc = VIS.paths("LANE.1", "a" * 24, "html", sha)
+        r = {"id": "c" * 24, "seq": 1, "ts": "2026-09-30T00:00:00Z", "item": "LANE.1", "request": "a" * 24,
+             "format": "html", "title": "Grid", "text": "One column.", "path": rel, "doc_path": doc, "sha256": sha,
+             "bytes": len(content)}
+        r.update(over)
+        return r
+
+    def doc(self, r):
+        from console_kit import visuals as VIS
+        return VIS.doc_markdown(r["title"], r["item"], r["format"], r["path"].rsplit("/", 1)[1], r["text"], "draw")
+
+    def test_the_store_is_under_state_jailed_idempotent_and_reads_check_the_hash(self):
+        # Catches: an overwrite of a different file, a write or read through a symlink (the file
+        # or a folder on the way), a file shown after someone edited it, and a record whose path
+        # names a file other than the one its request and hash give.
+        from console_kit import visuals as VIS
+        state = self.dir / "state"
+        state.mkdir(mode=0o700)           # the server makes STATE before anything is stored
+        r = self.rec()
+        self.assertEqual(r["path"], f"visuals/LANE.1/aaaaaaaa-{r['sha256'][:12]}.html")
+        VIS.store(state, r["path"], r["doc_path"], b"<p>hi</p>", self.doc(r))
+        VIS.store(state, r["path"], r["doc_path"], b"<p>hi</p>", self.doc(r))    # a retry: same bytes, fine
         with self.assertRaisesRegex(VIS.VisualError, "other content"):
-            VIS.write(self.dir, "visuals", rel, doc, b"<p>other</p>", "# doc\n")
-        rec = {"path": rel, "sha256": hashlib.sha256(b"<p>hi</p>").hexdigest()}
-        self.assertEqual(VIS.read(self.dir, "visuals", rec), b"<p>hi</p>")
-        (self.dir / rel).write_bytes(b"<p>edited</p>")
+            VIS.store(state, r["path"], r["doc_path"], b"<p>other</p>", self.doc(r))
+        with self.assertRaisesRegex(VIS.VisualError, "not under visuals/"):
+            VIS.store(state, "elsewhere/LANE.1/x.html", r["doc_path"], b"x", "d")
+        self.assertEqual(VIS.read(state, r), b"<p>hi</p>")
+        self.assertEqual(VIS.read_doc(state, r, "draw"), self.doc(r))
+        with self.assertRaisesRegex(VIS.VisualError, "doc of .* changed"):
+            VIS.read_doc(state, r, "a different request")
+        with self.assertRaisesRegex(VIS.VisualError, "does not end in"):
+            VIS.read(state, {**r, "path": "visuals/LANE.1/ffffffff-ffffffffffff.html"})
+        p = state / r["path"]
+        p.write_bytes(b"<p>edited</p>")
         with self.assertRaisesRegex(VIS.VisualError, "changed since"):
-            VIS.read(self.dir, "visuals", rec)
-        (self.dir / rel).unlink()
+            VIS.read(state, r)
+        p.unlink()
         outside = self.dir / "outside.html"
         outside.write_bytes(b"<p>hi</p>")
-        (self.dir / rel).symlink_to(outside)
+        p.symlink_to(outside)
         with self.assertRaisesRegex(VIS.VisualError, "symlink"):
-            VIS.read(self.dir, "visuals", rec)
-        with self.assertRaisesRegex(VIS.VisualError, "not under visuals_dir"):
-            VIS.read(self.dir, "visuals", {"path": "other/x.html", "sha256": rec["sha256"]})
-        with self.assertRaisesRegex(VIS.VisualError, "no visuals_dir"):
-            VIS.read(self.dir, None, rec)
-        VIS.write_index(self.dir, "visuals", [])
-        self.assertTrue((self.dir / "visuals/INDEX.md").read_text().startswith(VIS.MARK))
-        (self.dir / "visuals/INDEX.md").write_text("# my own notes\n")
+            VIS.read(state, r)
+        p.unlink()
+        with self.assertRaisesRegex(VIS.VisualError, "not in the console's state"):
+            VIS.read(state, r)
+        # A folder on the way swapped for a symlink out: refused, never followed.
+        (state / "visuals/LANE.1/" ).rename(self.dir / "moved")
+        (state / "visuals/LANE.1").symlink_to(self.dir / "moved")
+        with self.assertRaisesRegex(VIS.VisualError, "symlink"):
+            VIS.store(state, r["path"], r["doc_path"], b"<p>hi</p>", self.doc(r))
+
+    def test_a_0_8_0_record_names_where_its_file_was_and_reads_once_moved(self):
+        # Catches: a 0.8.1 server that silently loses a 0.8.0 visual, or reads it from the checkout.
+        from console_kit import visuals as VIS
+        state = self.dir / "state"
+        old = self.rec(path="architect/visuals/LANE.1/aaaaaaaa-" + self.rec()["sha256"][:12] + ".html",
+                       doc_path="architect/visuals/LANE.1/aaaaaaaa-" + self.rec()["sha256"][:12] + ".md")
+        (self.dir / "architect/visuals/LANE.1").mkdir(parents=True)
+        (self.dir / old["path"]).write_bytes(b"<p>hi</p>")
+        with self.assertRaisesRegex(VIS.VisualError, "stored by 0.8.0 at architect/visuals/.*RUNBOOK"):
+            VIS.read(state, old)
+        (state / "visuals/LANE.1").mkdir(parents=True)
+        (state / "visuals/LANE.1" / old["path"].rsplit("/", 1)[1]).write_bytes(b"<p>hi</p>")
+        self.assertEqual(VIS.read(state, old), b"<p>hi</p>")
+
+    def test_export_writes_skips_identical_refuses_different_and_keeps_a_hand_index(self):
+        # Catches: an export that overwrites a file it did not write, one that is not idempotent,
+        # one that follows a symlink out of the destination, and an INDEX.md someone wrote clobbered.
+        from console_kit import visuals as VIS
+        dest = self.dir / "wt"
+        dest.mkdir()
+        r = self.rec()
+        entry = {**r, "content": "<p>hi</p>", "doc": self.doc(r)}
+        plan = VIS.export_plan(dest, "architect/visuals", [entry])
+        out = VIS.export_write(dest, "architect/visuals", plan, [r])
+        name = r["path"].rsplit("/", 1)[1]
+        self.assertEqual(sorted(out["written"]), sorted([f"architect/visuals/LANE.1/{name}",
+                                                         f"architect/visuals/LANE.1/{name[:-5]}.md",
+                                                         "architect/visuals/INDEX.md"]))
+        self.assertEqual((dest / "architect/visuals/LANE.1" / name).read_bytes(), b"<p>hi</p>")
+        index = (dest / "architect/visuals/INDEX.md").read_text()
+        self.assertTrue(index.startswith(VIS.MARK))
+        self.assertIn(f"[visual](LANE.1/{name})", index)
+        again = VIS.export_write(dest, "architect/visuals", VIS.export_plan(dest, "architect/visuals", [entry]), [r])
+        self.assertEqual(again["written"], [])
+        (dest / "architect/visuals/LANE.1" / name).write_bytes(b"<p>mine</p>")
+        with self.assertRaisesRegex(VIS.VisualError, f"LANE.1/{name} is already there with other content"):
+            VIS.export_plan(dest, "architect/visuals", [entry])
+        self.assertEqual((dest / "architect/visuals/LANE.1" / name).read_bytes(), b"<p>mine</p>")
+        (dest / "architect/visuals/INDEX.md").write_text("# my own notes\n")
         with self.assertRaisesRegex(VIS.VisualError, "not written by the kit"):
-            VIS.write_index(self.dir, "visuals", [])
-        self.assertEqual((self.dir / "visuals/INDEX.md").read_text(), "# my own notes\n")
+            VIS.check_index(dest, "architect/visuals")
+        other = self.dir / "wt2"
+        other.mkdir()
+        (self.dir / "elsewhere").mkdir()
+        (other / "architect").symlink_to(self.dir / "elsewhere")
+        with self.assertRaisesRegex(VIS.VisualError, "symlink"):
+            VIS.export_write(other, "architect/visuals", VIS.export_plan(other, "architect/visuals", [entry]), [r])
+        self.assertEqual(list((self.dir / "elsewhere").iterdir()), [])
+
+
+class GitReadOnlyTests(Tmp):
+    """0.8.1 (e): every git call the server makes in the project takes no optional locks."""
+
+    def calls(self, run):
+        from unittest import mock
+        seen = []
+
+        def fake(argv, **kw):
+            seen.append((list(argv), kw.get("env") or {}))
+            return subprocess.CompletedProcess(argv, 1, stdout="" if kw.get("text") else b"", stderr="")
+        with mock.patch("subprocess.run", side_effect=fake):
+            run()
+        return seen
+
+    def test_tags_and_anchors_pass_no_optional_locks_as_flag_and_env(self):
+        # Catches: a plain `git status` in the service checkout, which refreshes the index's stat
+        # cache and rewrites .git/index (a write into the tree the deploy fast-forwards), and a
+        # fix that sets only one of the two (a git started by an alias or hook reads the env).
+        from console_kit import tags as T
+        g = T._Git(self.dir)
+        seen = self.calls(lambda: (g.head(), g.edited_at("specs/a.md", (1, 1), "f" * 40)))
+        seen += self.calls(lambda: A.History(self.dir).versions("specs/a.md"))
+        self.assertGreaterEqual({a[2] for a, _ in seen}, {"rev-parse", "status", "log"})
+        for argv, env in seen:
+            with self.subTest(argv=argv):
+                self.assertEqual(argv[:2], ["git", "--no-optional-locks"])
+                self.assertEqual(env.get("GIT_OPTIONAL_LOCKS"), "0")
+
+    def test_git_status_through_tags_leaves_the_index_untouched(self):
+        # Catches the same, measured: with a stale stat cache, plain `git status` rewrites .git/index.
+        from console_kit import tags as T
+        if subprocess.run(["git", "--version"], capture_output=True).returncode != 0:
+            self.skipTest("git is not installed")
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@t"}
+        subprocess.run(["git", "init", "-q", str(self.dir)], check=True, env=env)
+        (self.dir / "specs").mkdir()
+        (self.dir / "specs/a.md").write_text("a\n")
+        subprocess.run(["git", "-C", str(self.dir), "add", "-A"], check=True, env=env)
+        subprocess.run(["git", "-C", str(self.dir), "commit", "-qm", "a"], check=True, env=env)
+        os.utime(self.dir / "specs/a.md", (1_700_000_000, 1_700_000_000))   # same bytes, stale stat cache
+        index = self.dir / ".git/index"
+        before = (index.read_bytes(), index.stat().st_mtime_ns)
+        g = T._Git(self.dir)
+        g.edited_at("specs/a.md", (1, 1), g.head())
+        self.assertEqual((index.read_bytes(), index.stat().st_mtime_ns), before)
 
 
 if __name__ == "__main__":

@@ -75,10 +75,18 @@ Read the live unit before changing anything:
 From 0.8.0 the server reads `specs_dir`, `visuals_dir` and `next_step` from
 the project's `.console-kit.json` when it starts (`kit/docs/ADAPTER.md`). A
 bad value stops it with `console: .console-kit.json: <key> ...` in the
-journal; fix the key and restart. The server writes visuals into
-`<project>/<visuals_dir>/`, so the unit's user must be able to write there;
-nothing else in the project is ever written. Its `/api/visual` route is behind
-the same Access gate as every other owner route.
+journal; fix the key and restart. Its `/api/visual` route is behind the same
+Access gate as every other owner route.
+
+**The server never writes into the project's working tree (0.8.1).** It
+stores visuals in `<state>/visuals/`, beside `store.jsonl`, and runs every git
+command in the project with `--no-optional-locks`, so even reading it never
+rewrites `.git/index`. That is what lets the service checkout keep following
+main with `git merge --ff-only`: a visual lands through an agent's own
+worktree and a pull request (`agent.py visual-export`), never by a file
+appearing in the checkout first. Keep `<state>` outside the project (the
+default `~/.local/state/...` is). Never run `visual-export` against the
+service checkout; it refuses to, naming why.
 
 From 0.7.0 an open tab keeps one long poll (`/api/wait`, 25 s) open to the
 server. The tunnel needs nothing for it: it is a plain GET behind Access, well
@@ -128,7 +136,14 @@ A kit installed by `deploy/install.sh` instead (copied to
    Anything but `0` means the store needs 0.8.0 or later. Files the server
    wrote under `visuals_dir` stay where they are; a 0.7.0 server ignores them.
 
-5. Never "roll back" by editing `store.jsonl`. Every line's `seq` and `id` are
+5. Rolling 0.8.1 back to **0.8.0** needs no store check: 0.8.1 adds no
+   record kind or field. A 0.8.0 server looks for each visual in the
+   checkout, so the ones 0.8.1 stored under `<state>/visuals/` are refused on
+   the page by name (`not under visuals_dir`) until you roll forward again;
+   they are not lost. A 0.8.0 server also starts writing into the checkout
+   again, which is the fast-forward defect 0.8.1 fixed.
+
+6. Never "roll back" by editing `store.jsonl`. Every line's `seq` and `id` are
    checked on load, and an edited line stops the server.
 
 ## Health

@@ -23,9 +23,15 @@
                                                 store a roar panel's transcript (Markdown, at most 48 KiB)
                                                 on the roar fork it ran; one per fork, refused if larger
     agent.py --state DIR visual REQUEST_ID --format mermaid|html --file FILE --doc DOC.md --title TITLE
-                                                answer an owner's visual request: the server writes FILE
-                                                and its doc under the project's visuals_dir and
-                                                regenerates its INDEX.md
+                                                answer an owner's visual request: the server stores FILE
+                                                and its doc in its STATE dir (never in the project) and
+                                                shows it on the item
+    agent.py --state DIR visual-export --project WORKTREE [--visual ID ...]
+                                                copy stored visuals (default: all; identical files are
+                                                skipped) into WORKTREE/<visuals_dir>/ and regenerate its
+                                                INDEX.md there, to land by PR. WORKTREE is your own
+                                                worktree on a branch, never the server's checkout; a
+                                                different file already at a target path is refused
     agent.py --state DIR next-step refine|drill --project DIR
                                                 print the installed user skill .console-kit.json's
                                                 `next_step` names for that kind; exit 1 naming why when
@@ -195,6 +201,73 @@ def _read_text(path: Path, what: str) -> str | None:
         return None
 
 
+def _git_top(d: Path) -> Path | None:
+    """The top of the git work tree holding `d`, or None when `d` is in none. Read-only: no optional locks."""
+    import os
+    import subprocess
+    try:
+        r = subprocess.run(["git", "--no-optional-locks", "-C", str(d), "rev-parse", "--is-inside-work-tree",
+                            "--show-toplevel"], capture_output=True, text=True, timeout=30, check=False,
+                           env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = r.stdout.splitlines()
+    if r.returncode != 0 or len(lines) != 2 or lines[0].strip() != "true":
+        return None
+    return Path(lines[1]).resolve()
+
+
+def _visual_export(state: Path, project: Path, ids: list[str]) -> int:
+    """Copy stored visuals into PROJECT/<visuals_dir>/ and regenerate its INDEX.md (0.8.1).
+
+    PROJECT is the agent's OWN worktree, on a branch, to be landed by PR. It
+    must be the top of a git work tree, and it is refused when it is the
+    directory the console server runs from (or that directory's work tree):
+    the server's checkout follows main and must never gain untracked files.
+    """
+    from console_kit import projectcfg as PC
+    from console_kit import visuals as VIS
+    dest = Path(project).resolve()
+    top = _git_top(dest)
+    if top is None:
+        print(f"refused: {project} is not a git work tree; export into your own worktree on a branch",
+              file=sys.stderr)
+        return 1
+    if top != dest:
+        print(f"refused: {project} is inside the work tree {top}; pass the top of your worktree, since "
+              f"visuals_dir is a path from the repository's top", file=sys.stderr)
+        return 1
+    try:
+        code, out = agent_request(state / "agent.sock", "POST", "/visual-export", {"ids": ids})
+    except OSError as e:
+        print(f"cannot reach the console server at {state / 'agent.sock'}: {e}", file=sys.stderr)
+        return 2
+    if code != 200:
+        print(f"refused: {out.get('error', out)}", file=sys.stderr)
+        return 1
+    server_root = Path(out["root"]).resolve()
+    server_top = _git_top(server_root)
+    if dest in (server_root, server_top):
+        print(f"refused: {project} is the directory the console server runs from ({server_root}). Its checkout "
+              f"follows main, and a file written there blocks the next fast-forward. Export into your own "
+              f"worktree on a branch (git worktree add ../visuals-branch -b visuals) and land it by PR",
+              file=sys.stderr)
+        return 1
+    try:
+        vdir = PC._dir(dest, out["visuals_dir"], "visuals_dir")   # the same jail, now against YOUR tree
+        plan = VIS.export_plan(dest, vdir, out["visuals"])
+        VIS.check_index(dest, vdir)
+        done = VIS.export_write(dest, vdir, plan, out["records"])
+    except (PC.ConfigError, VIS.VisualError, OSError) as e:
+        print(f"refused, nothing overwritten: {e}", file=sys.stderr)
+        return 1
+    for r in out["refused"]:
+        print(f"not exported: visual {r['id']}: {r['why']}", file=sys.stderr)
+    print(json.dumps({"project": str(dest), "visuals_dir": vdir, **done, "refused": out["refused"]},
+                     indent=2, ensure_ascii=False))
+    return 1 if out["refused"] else 0
+
+
 def _refused_note(files: list, n: int, why: str | None, rc: int = 1) -> int:
     """A batch ask stopped at files[n]: say what was posted and what was not, so a re-run sends only the rest."""
     if why:
@@ -244,6 +317,11 @@ def main(argv=None) -> int:
     s.add_argument("--file", type=Path, required=True)
     s.add_argument("--doc", type=Path, required=True)
     s.add_argument("--title", required=True)
+    s = sub.add_parser("visual-export")
+    s.add_argument("--project", type=Path, required=True,
+                   help="YOUR worktree (top of a git work tree), never the server's checkout")
+    s.add_argument("--visual", action="append", default=[], metavar="ID",
+                   help="a visual record id; repeat for more (default: every stored visual)")
     s = sub.add_parser("next-step")
     s.add_argument("kind", choices=("refine", "drill"))
     s.add_argument("--project", type=Path, required=True)
@@ -338,6 +416,8 @@ def _run(a, bell: Path) -> int:
         return _call(a.state, "POST", "/visual", {"request": a.request, "format": a.format, "title": a.title,
                                                   "content": content, "text": doc,
                                                   "nonce": secrets.token_urlsafe(12)})
+    if a.cmd == "visual-export":
+        return _visual_export(a.state, a.project, a.visual)
     if a.cmd == "ask":
         for n, f in enumerate(a.files):
             try:

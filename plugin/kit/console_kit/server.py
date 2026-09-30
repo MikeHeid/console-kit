@@ -31,6 +31,11 @@ in its own tab, and the page only ever shows it in an `<iframe sandbox="">`.
 The agent's door gains `POST /transcript` and `POST /visual`. `/api/view`
 also carries each question's and round's suggested next steps (`tags.py`).
 
+0.8.1: the server stores a visual in its STATE directory and serves it from
+there; it never writes into the project's working tree (`visuals.py`). The
+agent's door gains `POST /visual-export`, a read that hands stored visuals to
+`agent.py visual-export`, which writes them into the agent's own worktree.
+
 `/health` (0.6.0) is answered on the agent's door, and on a third door only
 when `--health-port` asks for one. It is NEVER answered on the owner's door
 without the Access token: that door keeps its rule that no path skips the
@@ -321,18 +326,16 @@ class Console:
     # -- visuals (0.8.0) -----------------------------------------------------------
 
     def add_visual(self, body: object) -> dict:
-        """Store an agent's visual: jail and write the file and its doc, append the record, regenerate the index.
+        """Store an agent's visual in STATE/visuals/ and append its record (0.8.1: never in the project).
 
         The request is checked against the store's rules on a trial copy
-        FIRST, so a visual the store would refuse writes no file.
+        FIRST, so a visual the store would refuse writes no file. No
+        `visuals_dir` is needed: that is only where `agent.py visual-export`
+        lands visuals by PR, and the server never writes into the project.
         """
         keys = {"request", "format", "title", "content", "text", "nonce"}
         if not isinstance(body, dict) or set(body) != keys:
             raise RequestError(400, f"visual takes exactly {', '.join(sorted(keys))}")
-        vdir = self.project.visuals_dir
-        if not vdir:
-            raise RequestError(400, "this project sets no visuals_dir in .console-kit.json, so a visual has "
-                                    "nowhere to be stored")
         fmt, content = body["format"], body["content"]
         if fmt not in S.VISUAL_FORMATS:
             raise RequestError(400, f"format {fmt!r} is not one of {', '.join(S.VISUAL_FORMATS)}")
@@ -349,7 +352,7 @@ class Console:
             if req is None or req["type"] != "message" or req.get("intent") != "visual":
                 raise RequestError(400, f"request {req_id!r} is not an owner visual request")
             sha = hashlib.sha256(data).hexdigest()
-            path, doc_path = VIS.paths(vdir, req["item"], req["id"], fmt, sha)
+            path, doc_path = VIS.paths(req["item"], req["id"], fmt, sha)
             rec = {"item": req["item"], "request": req["id"], "format": fmt, "title": body["title"],
                    "text": body["text"], "path": path, "doc_path": doc_path, "sha256": sha, "bytes": len(data),
                    "nonce": body["nonce"]}
@@ -362,26 +365,62 @@ class Console:
                     raise RequestError(400, str(e)) from None
             try:
                 name = path.rsplit("/", 1)[1]
-                VIS.write(self.cfg.root, vdir, path, doc_path, data,
+                VIS.store(self.cfg.state, path, doc_path, data,
                           VIS.doc_markdown(body["title"], req["item"], fmt, name, body["text"], req["text"]))
             except (VIS.VisualError, OSError) as e:
                 raise RequestError(409, f"the visual was not stored: {e}") from None
             stored = done or self._append("visual", rec, "agent", items)
-            try:
-                VIS.write_index(self.cfg.root, vdir, [r for r in self.store.records() if r["type"] == "visual"])
-            except (VIS.VisualError, OSError) as e:  # the visual stands; the index is named as not regenerated
-                return {"record": stored, "index": f"not regenerated: {e}"}
-        return {"record": stored, "index": f"{vdir}/{VIS.INDEX}"}
+        vdir = self.project.visuals_dir
+        land = (f"stored in the console's state; land it by PR with `agent.py visual-export --project "
+                f"YOUR_WORKTREE`, which writes it under {vdir}/ there" if vdir else
+                "stored in the console's state and shown in the console; this project sets no visuals_dir, "
+                "so it has nowhere to land in the repository")
+        return {"record": stored, "land": land}
 
     def visual(self, rid: str) -> tuple[bytes, str]:
-        """A stored visual's bytes and format, read and checked now; refused by name when it moved or changed."""
+        """A stored visual's bytes and format, read from STATE and checked now; refused by name when changed."""
         rec = self.store.get(rid)
         if rec is None or rec["type"] != "visual":
             raise RequestError(404, f"no visual {rid}")
         try:
-            return VIS.read(self.cfg.root, self.project.visuals_dir, rec), rec["format"]
+            return VIS.read(self.cfg.state, rec), rec["format"]
         except VIS.VisualError as e:
             raise RequestError(409, str(e)) from None
+
+    def visual_export(self, body: object) -> dict:
+        """Stored visuals for `agent.py visual-export`, each read from STATE and re-checked (0.8.1).
+
+        Writes nothing. `ids` names visual records; empty means every one. A
+        visual that fails its check is listed under `refused` with why, never
+        sent. `root` is the directory this server runs from, so the agent can
+        refuse to export into it; `records` is every visual record, for the
+        destination's INDEX.md.
+        """
+        if not isinstance(body, dict) or set(body) != {"ids"} or not isinstance(body["ids"], list) or not all(
+                isinstance(i, str) and S.RECORD_ID.match(i) for i in body["ids"]):
+            raise RequestError(400, "visual-export takes exactly ids: a list of visual record ids (may be empty)")
+        vdir = self.project.visuals_dir
+        if not vdir:
+            raise RequestError(400, "this project sets no visuals_dir in .console-kit.json, so a visual has "
+                                    "nowhere to land in the repository; it stays viewable in the console")
+        records = [r for r in self.store.records() if r["type"] == "visual"]
+        by_id = {r["id"]: r for r in records}
+        missing = [i for i in body["ids"] if i not in by_id]
+        if missing:
+            raise RequestError(404, f"no visual {', '.join(missing)}")
+        chosen = [by_id[i] for i in dict.fromkeys(body["ids"])] if body["ids"] else records
+        out, refused = [], []
+        for r in chosen:
+            req = self.store.get(r["request"]) or {}
+            try:
+                content = VIS.read(self.cfg.state, r).decode("utf-8")
+                doc = VIS.read_doc(self.cfg.state, r, req.get("text", ""))
+            except (VIS.VisualError, UnicodeDecodeError) as e:
+                refused.append({"id": r["id"], "why": str(e)})
+                continue
+            out.append({**r, "content": content, "doc": doc})
+        return {"root": str(Path(self.cfg.root).resolve()), "visuals_dir": vdir, "visuals": out,
+                "refused": refused, "records": records}
 
     @staticmethod
     def _status(items: dict[str, dict]) -> dict[str, str | None]:
@@ -1008,8 +1047,10 @@ class AgentHandler(_Handler):
                 return self._send(200, {"working": self.console.set_working(self._body())})
             if self.path == "/reanchor":
                 return self._send(200, self.console.reanchor(self._body()))
-            if self.path == "/visual":  # 0.8.0: the server writes the file, jailed under visuals_dir
+            if self.path == "/visual":  # 0.8.1: the server stores the file in STATE, never in the project
                 return self._send(200, self.console.add_visual(self._body()))
+            if self.path == "/visual-export":  # 0.8.1: a read; agent.py writes into the agent's own worktree
+                return self._send(200, self.console.visual_export(self._body()))
             kind = AGENT_ROUTES.get(self.path)
             if kind is None:
                 return self._send(404, {"error": "not found"})

@@ -136,7 +136,23 @@ server: it reads them at start, and refuses a bad one by name. A session's
 skills (console-fork's roar, refine and drill sections, and the new
 console-visual skill) answer them.
 
-**Going back to an older kit.** A 0.7.0 kit refuses a store that holds any
+**Upgrading to 0.8.1.** The server no longer writes visuals into the
+project's checkout: it stores them in its state directory
+(`<state>/visuals/<item>/`), and `visuals_dir` is only where an agent lands
+them by pull request, with `agent.py visual-export --project <its own
+worktree>`. The store is unchanged (schema 1, no new record kind). If a 0.8.0
+server already wrote visuals into the checkout, **the 0.8.1 server ignores
+them** and never deletes them: move them once, as `kit/docs/RUNBOOK.md`
+("Upgrading to 0.8.1") says, then restart. Update the plugin too, so the
+console-visual skill exports instead of copying from the checkout. A 0.8.1
+server also runs every git command in the project with
+`--no-optional-locks`, so reading it never rewrites `.git/index`.
+
+**Going back to an older kit.** A 0.8.0 kit reads a store 0.8.1 wrote, but
+it looks for each visual 0.8.1 stored in its own checkout: it refuses the
+path by name (`not under visuals_dir`), or, if its `visuals_dir` is
+`visuals`, shows it only when a file there still has the stored sha256.
+Nothing else changes meaning. A 0.7.0 kit refuses a store that holds any
 0.8.0 record, and names it (`unknown record type 'transcript'`, `unknown
 record type 'visual'`, `intent 'visual' is not one of fork, process, chat`,
 `role(s) ['roar'] are not one of ...`, `message: unknown field(s) step`). The

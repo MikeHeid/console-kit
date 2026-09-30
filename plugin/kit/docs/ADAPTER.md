@@ -36,7 +36,7 @@ roar). That is enough to trace the ruling to its transcript, which is the
 store's `transcript` record on the same fork id. The starter adapter prints
 "Asked by: a roar panel ... (fork `<id>`)" for such a ruling; a project's own
 adapter should print `forked_from` too. Visuals land in `visuals_dir` by their
-own pull request.
+own pull request, made with `agent.py visual-export` (below).
 
 ## The starter, and moving past it
 
@@ -95,11 +95,26 @@ starts, and nothing ever runs a path taken from them.
     went against the ★.
 
   Without `specs_dir`, only *deliberate* is ever suggested.
-- **`visuals_dir`**: where the server writes agent-drawn visuals, one folder
-  per item, plus a regenerated `INDEX.md` (it refuses to overwrite an
-  `INDEX.md` it did not write). Without it, "Request a visual" says there is
-  nowhere to store one, and `agent.py visual` is refused by name. Keep it
-  outside `specs_dir`.
+- **`visuals_dir`** (a destination, 0.8.1): the repository folder where
+  agent-drawn visuals **land by pull request**, one folder per item plus a
+  generated `INDEX.md`. The server only validates this key; it never writes
+  there. It stores every visual in its own state directory
+  (`<state>/visuals/<item>/`, beside `store.jsonl`) and shows it from there.
+  An agent lands them with
+
+      agent.py --state STATE visual-export --project <its own worktree> [--visual ID ...]
+
+  which copies stored visuals (by default every one; a file already there
+  with the same bytes is skipped, so in effect only those not yet exported
+  are written) into `<worktree>/<visuals_dir>/`, and regenerates
+  `<worktree>/<visuals_dir>/INDEX.md` from what is in that folder. It
+  refuses: a directory that is not the top of a git work tree; the directory
+  the console server runs from (or its work tree), naming why; a different
+  file already at a target path (by name; nothing is overwritten); an
+  `INDEX.md` it did not generate; and any path through a symlink or onto a
+  secrets file. **Without `visuals_dir`**, "Request a visual" still works and
+  the visual stays viewable in the console; only the landing step needs it,
+  and `visual-export` is refused by name. Keep it outside `specs_dir`.
 - **`next_step`**: the skill a session runs for each kind of fork, by name.
   The console-fork skill reads it; the server only checks its shape. **The
   name is resolved ONLY against the user's installed skills** (the user-level
@@ -119,9 +134,10 @@ Both folders must be relative paths of plain characters, at least one folder
 deep, with no part starting with `.`, and must resolve inside the project (no
 symlink out). A key that breaks a rule stops the server at start, by name.
 Every visual path the server writes or reads is jailed the same way as
-evidence: under `visuals_dir`, no `..`, never a secrets file, never through a
-symlink, at most 256 KiB, and read back only while its sha256 matches the
-store's record.
+evidence: under `<state>/visuals/`, no `..`, never a secrets file, never
+through a symlink (the file or any folder on the way), a regular file, at
+most 256 KiB, written once, and read back only while its sha256 matches the
+store's record. `visual-export` applies the same rules to the destination.
 
 ## The page
 

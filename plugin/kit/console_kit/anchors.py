@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -191,8 +192,10 @@ class History:
 
     def _git(self, args: list[str], data: bytes | None = None) -> bytes | None:
         try:
-            r = subprocess.run(["git", *args], cwd=self.root, input=data, capture_output=True,
-                               timeout=GIT_TIMEOUT, check=False)
+            # Read-only, like tags.py (0.8.1): no optional locks, so git never rewrites the index.
+            r = subprocess.run(["git", "--no-optional-locks", *args], cwd=self.root, input=data,
+                               capture_output=True, timeout=GIT_TIMEOUT, check=False,
+                               env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
         except (OSError, subprocess.SubprocessError):
             return None
         return r.stdout if r.returncode == 0 else None

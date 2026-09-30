@@ -137,26 +137,84 @@ outside the project through a symlink, a `visuals_dir` inside `specs_dir`, and
 a `next_step` that is not `{"refine"|"drill": "<skill name>"}`. Fix the key,
 then `systemctl --user restart <name>-console.service`.
 
+## Upgrading to 0.8.1: visuals a 0.8.0 server wrote into the checkout
+
+0.8.0 wrote each visual, its doc and `INDEX.md` under `<project>/<visuals_dir>/`
+in the service checkout, as untracked files. Once an agent landed the same
+paths by pull request, `git merge --ff-only` in the checkout was refused
+("untracked working tree files would be overwritten by merge") and the
+console stopped following main. **0.8.1 ignores those files**: it neither
+reads, imports nor deletes anything in the checkout. It looks for every
+visual, old or new, in `<state>/visuals/<item>/<name>`. Move them once:
+
+1. Stop the server: `systemctl --user stop <name>-console.service`.
+2. See what 0.8.0 left (untracked files only; tracked ones already landed):
+
+       git -C <project> status --porcelain --untracked-files=all -- <visuals_dir>
+
+3. Copy every item folder into the state, keeping the file names (not
+   `INDEX.md`, which is regenerated wherever visuals are exported). Landed
+   (tracked) visuals are copied too, since the server now serves only from
+   the state:
+
+       mkdir -p -m 700 <state>/visuals
+       for d in <project>/<visuals_dir>/*/; do
+         i=$(basename "$d"); mkdir -p "<state>/visuals/$i"
+         cp -n "$d"*.mmd "$d"*.html "$d"*.md "<state>/visuals/$i/" 2>/dev/null
+       done
+
+   `cp -n` never overwrites; a name the state already holds is kept. The
+   server re-checks each file's sha256 against the store when it shows it.
+4. Remove the **untracked** copies from the checkout, and nothing else. For
+   each untracked path step 2 listed, `rm <project>/<path>`; or, when every
+   file under `<visuals_dir>` is untracked (it never landed), preview and then
+   clean just that folder:
+
+       git -C <project> clean -n -- <visuals_dir>
+       git -C <project> clean -f -- <visuals_dir>
+
+   Visuals that are not yet in the repository are safe: they are in the state
+   now, and `agent.py visual-export --project <your worktree>` lands them.
+5. Start the server and check the checkout follows main again:
+
+       systemctl --user start <name>-console.service
+       git -C <project> status --porcelain --untracked-files=all    # prints nothing
+       git -C <project> pull --ff-only
+
+A visual 0.8.0 stored and you did not move shows "not in the console's
+state ... stored by 0.8.0 at <path> in the project's checkout": that message
+names the file to move.
+
 ## A visual does not show (0.8.0)
 
 - **"Not shown: ... changed since the agent stored it"** or a blank frame with
-  a 409 in the network log: someone edited the file under `visuals_dir` after
-  it was stored, or swapped it for a symlink. The console shows a visual only
-  while its sha256 matches the store. Restore the file from the pull request
-  that landed it, or ask for the visual again.
-- **"the file is not there any more"**: the server's checkout lost it (a
-  checkout, a clean). Restore it from its pull request.
+  a 409 in the network log: someone edited the file under `<state>/visuals/`
+  after it was stored, or swapped it (or a folder on its way) for a symlink.
+  The console shows a visual only while its sha256 matches the store. Restore
+  the file from the pull request that landed it (same name, into
+  `<state>/visuals/<item>/`), or ask for the visual again.
+- **"the visual is not in the console's state"**: the state lost it, or it is
+  a 0.8.0 visual still in the checkout (the message says so; see "Upgrading
+  to 0.8.1" above). Restore it from its pull request into
+  `<state>/visuals/<item>/`.
 - **An HTML mock shows unstyled or with gaps**: it loads something from
   outside itself. The mock's policy allows only inline styles and `data:`
   images; the agent should inline them (console-visual skill, step 2).
 - **A script or form in a mock does nothing**: by design. A mock runs in
   `<iframe sandbox="">` and is served with a `sandbox` Content-Security-Policy,
   so no script runs, even if its URL is opened in its own tab.
-- **`agent.py visual` says "this project sets no visuals_dir"**: add
-  `visuals_dir` to `.console-kit.json` and restart the server.
+- **`agent.py visual-export` says "this project sets no visuals_dir"**: the
+  visual is stored and shown; it only has nowhere to land. Add `visuals_dir`
+  to `.console-kit.json` (by pull request) and restart the server.
+- **`visual-export` says "the directory the console server runs from"**: by
+  design. Export into your own worktree on a branch
+  (`git worktree add ../visuals -b visuals origin/main`), then open a PR.
+- **`visual-export` says "... is already there with other content"**: a file
+  in your worktree at that path differs from the stored visual. Nothing was
+  written. Look at it; move it aside if it is stale, then export again.
 - **"INDEX.md was not written by the kit"**: a hand-written `INDEX.md` sits in
-  `visuals_dir`. The visual was still stored; move that file aside and the next
-  visual regenerates the index.
+  your worktree's `visuals_dir`. Nothing was written; move it aside and export
+  again.
 
 ## Roar is refused (0.8.0)
 
