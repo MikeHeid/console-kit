@@ -1847,5 +1847,71 @@ class ReanchorTests(Tmp):
         self.assertIn("appear 2 times", p["unresolved"][0]["why"])
 
 
+
+class AnchorExportTests(Tmp):
+    """0.5.0 review HIGH: an exported ruling says what the lock is actually checked against."""
+
+    V040_LOCKED_KEYS = {"answer_id", "picks", "picked_labels", "picked_star", "rejected_labels", "own_text",
+                        "by", "answered_at", "lock_id", "locked_by", "locked_at"}
+    HASH = {"kind": "file_sha256", "path": "spec.md", "sha256": "0" * 64}
+
+    def setUp(self):
+        super().setUp()
+        self.st = self.store()
+        self.st.append(question(valid_if=[self.HASH]))
+        self.a1 = self.st.append(answer())
+        self.lk1 = self.st.append(lock(self.a1))
+
+    def entry(self):
+        [(name, e)] = F.export(self.st).items()
+        self.assertEqual(F.check_entry(name, e, ITEMS), [])
+        return name, e
+
+    def fold_it(self):
+        out = self.dir / "locked"
+        F.write_export(F.export(self.st), out)
+        ad = FakeAdapter(ITEMS)
+        F.fold(out, self.dir / "ledger.txt", ad, dry_run=False)
+        return ad.recorded[0][0]
+
+    def test_a_plain_lock_exports_exactly_as_0_4_0_did(self):
+        _, e = self.entry()
+        self.assertEqual(set(e["locked"]), self.V040_LOCKED_KEYS)
+        self.assertEqual(e["valid_if"], [self.HASH])
+
+    def test_a_relocked_answer_exports_its_locks_anchors(self):
+        a2 = self.st.append(answer(supersedes=self.a1["id"], reason="still holds"))
+        self.st.append(lock(a2, anchors=[excerpt()]))
+        _, e = self.entry()
+        self.assertEqual((e["locked"]["anchored_by"], e["locked"]["anchors"]), ("lock", [excerpt()]))
+        self.assertEqual(e["valid_if"], [self.HASH])  # the question as put
+        self.assertEqual(set(e["history"][0]), self.V040_LOCKED_KEYS)  # the first lock had none
+        self.assertEqual(self.fold_it()["locked"]["anchors"], [excerpt()])
+
+    def test_a_reanchored_answer_exports_its_anchors_and_evidence(self):
+        rec = self.st.append({"type": "anchor", "schemaVersion": 1, "qid": "LANE.1/Q1", "lock": self.lk1["id"],
+                              "anchors": [excerpt()], "basis": "spec.md: lines 5-6 as locked (commit abc) unchanged",
+                              "by": "agent", "nonce": nonce()})
+        _, e = self.entry()
+        lk = e["locked"]
+        self.assertEqual((lk["anchored_by"], lk["anchors"], lk["anchor_id"], lk["anchor_basis"], lk["anchored_at"]),
+                         ("reanchor", [excerpt()], rec["id"], rec["basis"], rec["ts"]))
+        self.assertEqual(self.fold_it()["locked"]["anchor_id"], rec["id"])
+
+    def test_fold_refuses_malformed_anchor_fields(self):
+        self.st.append({"type": "anchor", "schemaVersion": 1, "qid": "LANE.1/Q1", "lock": self.lk1["id"],
+                        "anchors": [excerpt()], "basis": "evidence", "by": "agent", "nonce": nonce()})
+        name, e = self.entry()
+        for bad in ({"anchors": [excerpt(path="../x.md")]}, {"anchor_basis": ""}, {"anchor_id": "nope"},
+                    {"anchored_by": "question"}, {"anchored_at": "yesterday"}):
+            with self.subTest(bad=bad):
+                tampered = json.loads(json.dumps(e))
+                tampered["locked"].update(bad)
+                self.assertTrue(F.check_entry(name, tampered, ITEMS))
+        missing = json.loads(json.dumps(e))
+        del missing["locked"]["anchor_basis"]
+        self.assertTrue(F.check_entry(name, missing, ITEMS))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

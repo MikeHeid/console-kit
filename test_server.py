@@ -672,5 +672,30 @@ class ServerTests(unittest.TestCase):
         self.assertEqual([r for r in self.console.store.records() if r["type"] == "anchor"], [])
 
 
+    def test_reanchor_skips_when_the_file_changes_between_plan_and_write(self):
+        # Review MEDIUM: the plan reads the tree outside the write lock. Catches: an anchor written
+        # for cited text that was edited away after the plan read it.
+        from unittest import mock
+        spec, _, _ = self.locked_on_spec()
+        self.git("init", "-q")
+        self.git("add", "spec.md")
+        self.git("commit", "-qm", "v1")
+        spec.write_text("A new first line.\n" + self.SPEC)
+        self.git("commit", "-qam", "unrelated")
+        real = SV.A.plan_reanchor
+
+        def plan_then_edit(*a, **kw):
+            plan = real(*a, **kw)
+            spec.write_text(self.SPEC.replace("line two", "line 2"))
+            return plan
+        with mock.patch.object(SV.A, "plan_reanchor", plan_then_edit):
+            code, out = SV.agent_request(self.cfg.socket, "POST", "/reanchor", {"dry_run": False})
+        self.assertEqual(code, 200, out)
+        [p] = out["plan"]
+        self.assertIn("changed while this ran", p["skipped"])
+        self.assertEqual([r for r in self.console.store.records() if r["type"] == "anchor"], [])
+        self.assertEqual(self.state_of("LANE.1/Q2")["state"], "stale")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

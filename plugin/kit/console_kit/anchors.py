@@ -123,12 +123,22 @@ def conditions_for(store, q: dict) -> tuple[list[dict], str]:
     lk = store.lock_of(head["id"]) if head is not None else None
     if lk is None:
         return q["valid_if"], "question"
+    conds, origin, _ = lock_conditions(store, q, lk)
+    return conds, origin
+
+
+def lock_conditions(store, q: dict, lk: dict) -> tuple[list[dict], str, dict | None]:
+    """The conditions that decide one lock, where they came from, and the `anchor` record if one decides.
+
+    The same order everywhere, the view and the export alike: the lock's latest
+    `anchor` record, then the lock's own `anchors`, then the question's `valid_if`.
+    """
     a = store.anchor_of(lk["id"])
     if a is not None:
-        return a["anchors"], "reanchor"
+        return a["anchors"], "reanchor", a
     if "anchors" in lk:
-        return lk["anchors"], "lock"
-    return q["valid_if"], "question"
+        return lk["anchors"], "lock", None
+    return q["valid_if"], "question", None
 
 
 def fresh_anchors(base: list[dict], tree: Tree) -> list[dict]:
@@ -376,6 +386,18 @@ def plan_reanchor(store, root: Path, item_status: Mapping[str, str | None],
                      "changes": changes, "unresolved": kept,
                      "fresh": all(tree.holds(c) for c in new)})
     return plan
+
+
+def still_supported(entry: dict, tree: Tree) -> str | None:
+    """None when every replacement in a planned re-anchor still holds, exactly once, in `tree`; else why not."""
+    for ch in entry["changes"]:
+        to = ch["to"]
+        n = tree.norm(to["path"])
+        seen = 0 if n is None else n.count(normalise(to["text"]))
+        if seen != 1:
+            return (f"{to['path']} changed while this ran: the cited text is now there {seen} time(s); "
+                    f"nothing was written, run it again")
+    return None
 
 
 def _reanchor_one(c: dict, tree: Tree, history: History, source: str) -> tuple[dict | None, str]:

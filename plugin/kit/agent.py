@@ -128,12 +128,12 @@ def _reanchor(state: Path, dry_run: bool, as_json: bool) -> int:
         print(json.dumps(out, indent=2, ensure_ascii=False))
         return 0 if code == 200 else 1
     verb = "would re-anchor" if dry_run else "re-anchored"
-    done = [p for p in out["plan"] if p["changes"]]
+    not_done = {p["lock"] for p in out["plan"] if p.get("skipped") or p.get("error")}
+    done = [p for p in out["plan"] if p["changes"] and p["lock"] not in not_done]
     for p in out["plan"]:
         tail = "" if p["fresh"] else " (still stale)"
-        if p.get("skipped") or p.get("error"):
+        if p["lock"] in not_done:
             print(f"{p['qid']}: not re-anchored: {p.get('skipped') or p.get('error')}")
-            done.remove(p)
             continue
         for c in p["changes"]:
             print(f"{p['qid']}: {verb} {c['from']['path']}: {c['why']}{tail}")

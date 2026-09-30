@@ -207,6 +207,12 @@ class Console:
                         or A.conditions_for(self.store, self.store.question(p["qid"]))[0] != p["base"]):
                     p["skipped"] = "the answer or its anchors changed while this ran; run it again"
                     continue
+                # The plan read the files before this lock was taken: read them again, and
+                # write nothing a file changed in the meantime no longer supports.
+                why_not = A.still_supported(p, A.Tree(self.cfg.root, self._status(self.items())))
+                if why_not:
+                    p["skipped"] = why_not
+                    continue
                 basis = "; ".join(f"{c['from']['path']}: {c['why']}" for c in p["changes"])
                 try:
                     rec = self.store.append({"type": "anchor", "schemaVersion": S.SCHEMA_VERSION, "by": "agent",

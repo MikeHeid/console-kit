@@ -87,6 +87,10 @@ OPTION_ID = re.compile(r"^[a-z][a-z0-9_]*$")
 NONCE = re.compile(r"^[A-Za-z0-9_\-]{8,64}$")
 # `source` is a path, optionally with `:line` or `:line-line`. It is rendered
 # inline into the rulings record, so it must never carry markup or a newline.
+# It still allows `..`: it is NEVER opened as a filesystem path. The only use
+# of it as a path (anchors.cited_range, 0.5.0) string-compares its path part
+# with a condition's `path`, which the condition's own check has already
+# jailed (relative, no `..`, resolved inside the project root).
 SOURCE = re.compile(r"^[A-Za-z0-9_.\-/]+(:[0-9]+(-[0-9]+)?)?$")
 MAX_TEXT = 20_000
 MAX_LINE = 300       # a label, a description, or any other one-line field
@@ -186,11 +190,11 @@ def _check_question(rec: dict) -> list[str]:
     if star is not None and star not in ids:
         errs.append(f"star {star!r} is not one of the options")
     errs += _check_fork_fields(rec, star)
-    errs += _check_conditions(rec["valid_if"], "valid_if")
+    errs += check_conditions(rec["valid_if"], "valid_if")
     return errs
 
 
-def _check_conditions(vi: object, field: str, *, allow_empty: bool = True) -> list[str]:
+def check_conditions(vi: object, field: str, *, allow_empty: bool = True) -> list[str]:
     if not isinstance(vi, list):
         return [f"{field} must be a list"]
     if len(vi) > MAX_VALID_IF:
@@ -333,7 +337,7 @@ def _check_answer(rec: dict) -> list[str]:
 def _check_lock(rec: dict) -> list[str]:
     errs = [] if isinstance(rec["answer"], str) and rec["answer"] else ["answer must be the id of the answer being locked"]
     if "anchors" in rec:
-        errs += _check_conditions(rec["anchors"], "anchors", allow_empty=False)
+        errs += check_conditions(rec["anchors"], "anchors", allow_empty=False)
     return errs
 
 
@@ -343,7 +347,7 @@ def _check_anchor(rec: dict) -> list[str]:
         errs.append(f"qid {rec['qid']!r} is not <itemId>/Q<n>")
     if not isinstance(rec["lock"], str) or not RECORD_ID.match(rec["lock"]):
         errs.append("lock must be the id of the lock being re-anchored (24 lowercase hex)")
-    errs += _check_conditions(rec["anchors"], "anchors", allow_empty=False)
+    errs += check_conditions(rec["anchors"], "anchors", allow_empty=False)
     errs += _text(rec, "basis")
     return errs
 
