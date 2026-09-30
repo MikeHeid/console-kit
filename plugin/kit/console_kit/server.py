@@ -145,7 +145,7 @@ class Console:
     def items(self) -> dict[str, dict]:
         """The register as it is now. The store refuses writes to an item that is not in it (R7)."""
         items = self.adapter.items()
-        self.store.known_items = frozenset(items)
+        self.store.set_items(items)
         return items
 
     def seed(self) -> list[str]:
@@ -206,7 +206,7 @@ class Console:
     def _ring(self, rec: dict) -> None:
         line = {"seq": rec["seq"], "type": rec["type"], "ts": rec["ts"]}
         # `intent` lets the queue show a fork without reading the store (§6.3).
-        line.update({k: rec[k] for k in ("qid", "item", "intent") if k in rec})
+        line.update({k: rec[k] for k in ("qid", "item", "intent", "about_qid") if k in rec})
         with open(self.cfg.inbox, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(line, sort_keys=True) + "\n")
 

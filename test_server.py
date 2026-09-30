@@ -254,6 +254,33 @@ class ServerTests(unittest.TestCase):
                            tok=token())
         self.assertNotIn("intent", self.doorbell()[-1])
 
+    def test_a_follow_up_on_one_answer_rings_as_a_fork_and_is_checked_at_the_door(self):
+        # 0.4.0: the "Follow up" button on a locked answer. Catches: a server that trusts
+        # the page (an unlocked or unknown question accepted), and a doorbell line the
+        # agent's watch does not wake on, so the follow-up would sit unrun.
+        from console_kit import doorbell as D
+        body = {"item": "LANE.1", "text": "follow up", "intent": "fork", "mode": "tighten",
+                "about_qid": "LANE.1/Q1", "roles": ["devops", "other:Legal"], "nonce": "ownerabout01"}
+        code, got = self.req("POST", "/api/message", body, tok=token())
+        self.assertEqual(code, 400, got)
+        self.assertIn("no locked answer", got["error"])
+        code, a = self.req("POST", "/api/answer", self.answer(), tok=token())
+        self.assertEqual(code, 200, a)
+        code, _ = self.req("POST", "/api/lock", {"qid": "LANE.1/Q1", "answer": a["record"]["id"],
+                                                 "nonce": "ownerlock001"}, tok=token())
+        self.assertEqual(code, 200)
+        code, got = self.req("POST", "/api/message", dict(body, nonce="ownerabout02"), tok=token())
+        self.assertEqual(code, 200, got)
+        line = self.doorbell()[-1]
+        self.assertEqual((line["intent"], line["about_qid"]), ("fork", "LANE.1/Q1"))
+        self.assertEqual(D.pending(self.cfg.inbox, 0)[-1]["seq"], got["record"]["seq"])
+        view = self.console.payload()["view"]
+        self.assertEqual(view["forks"][got["record"]["id"]]["message"]["about_qid"], "LANE.1/Q1")
+        code, got = self.req("POST", "/api/message", dict(body, about_qid="LANE.1/Q77", nonce="ownerabout03"),
+                             tok=token())
+        self.assertEqual(code, 400, got)
+        self.assertIn("names no question", got["error"])
+
     def test_the_ready_signal_rings_once_per_press_and_only_the_owner_sends_it(self):
         # §7.3 and §7.5 F2. Catches: a ready signal the agent door accepts (so an agent could
         # start its own processing run), and a retried press that rings twice.

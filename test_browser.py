@@ -680,5 +680,92 @@ class LiveBoardTests(unittest.TestCase):
                 self.assertEqual(_Handler.board_hits, 0)
 
 
+def _locked_view() -> dict:
+    """/view with LANE.1/Q1 answered and locked, and LANE.1/Q2 still unanswered."""
+    import tempfile
+    from console_kit import view as V
+    from console_kit.store import Store
+    from test_kit import answer, lock, question
+    items = {"LANE.1": {"title": "first lane", "parent": None}}
+    with tempfile.TemporaryDirectory() as td:
+        st = Store(Path(td) / "store.jsonl", known_items=items)
+        st.append(question("LANE.1/Q1"))
+        st.append(question("LANE.1/Q2"))
+        st.append(lock(st.append(answer("LANE.1/Q1", own_text="B, for the small rig"))))
+        return {"view": V.build(st, items, lambda c: True), "items": items, "cursor": {}}
+
+
+class AnswerFollowUpTests(unittest.TestCase):
+    """0.4.0 (owner, 2026-09-29): a "Follow up" button beside each locked answer.
+
+    CONSOLE_KIT_SHOTS=<dir> also saves the open panel at desktop and phone width.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        DockTests.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        DockTests.tearDownClass.__func__(cls)
+
+    def _open(self, kind: str, width: int):
+        browser = getattr(self.pw, kind).launch()
+        self.addCleanup(browser.close)
+        page = browser.new_page(viewport={"width": width, "height": 900})
+        errors: list[str] = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        self.addCleanup(lambda: self.assertEqual(errors, [], f"{kind}: page errors"))
+        posted: list[dict] = []
+        view = json.dumps(_locked_view())
+        page.route("**/api/view*", lambda r: r.fulfill(status=200, content_type="application/json", body=view))
+
+        def on_message(route):
+            posted.append(route.request.post_data_json)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"record": {}}))
+        page.route("**/api/message", on_message)
+        page.goto(self.url)
+        page.click(".ck-item-btn")
+        page.wait_for_selector(".ck-question")
+        return page, posted
+
+    def test_only_a_locked_answer_offers_it_and_it_sends_one_scoped_fork(self):
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    page, posted = self._open(kind, width)
+                    btns = page.locator("button[aria-label^='Follow up with other seats on']")
+                    self.assertEqual(btns.count(), 1)  # Q1 is locked; Q2 is unanswered and offers none
+                    btns.focus()
+                    page.keyboard.press("Enter")  # keyboard, not a mouse
+                    self.assertEqual(btns.get_attribute("aria-expanded"), "true")
+                    form = page.locator(".ck-followup")
+                    self.assertTrue(form.locator("input[value='tighten']").is_checked())
+                    # No seat picked: refused on the page, named visibly, nothing sent.
+                    form.get_by_role("button", name="Send follow-up").click()
+                    self.assertIn("Pick 1 to 3 seats", form.locator(".ck-error-msg").text_content())
+                    self.assertEqual(posted, [])
+                    for label in ("DevOps", "Security"):
+                        form.get_by_label(label).focus()
+                        page.keyboard.press("Space")
+                    self.assertEqual(form.locator(".ck-error-msg").text_content(), "")  # a new pick clears it
+                    form.get_by_label("Other seat (optional)").fill("Legal")
+                    self.assertTrue(form.get_by_label("UX").is_disabled())  # three is the limit
+                    form.get_by_label("Note for the seats (optional)").fill("Does B hold on tour?")
+                    if os.environ.get("CONSOLE_KIT_SHOTS"):
+                        card = page.locator(".ck-question", has=page.locator(".ck-followup"))
+                        card.scroll_into_view_if_needed()
+                        card.screenshot(path=str(Path(os.environ["CONSOLE_KIT_SHOTS"]) / f"followup-{kind}-{width}.png"))
+                    self.assertFalse(page.evaluate("document.documentElement.scrollWidth > innerWidth"))
+                    form.get_by_role("button", name="Send follow-up").click()
+                    page.wait_for_function("document.querySelectorAll('.ck-followup').length === 0")
+                    self.assertEqual(len(posted), 1)
+                    body = dict(posted[0])
+                    self.assertTrue(body.pop("nonce"))
+                    self.assertEqual(body, {"item": "LANE.1", "intent": "fork", "mode": "tighten",
+                                            "about_qid": "LANE.1/Q1", "roles": ["devops", "security", "other:Legal"],
+                                            "text": "Does B hold on tour?"})
+
+
 if __name__ == "__main__":
     unittest.main()
