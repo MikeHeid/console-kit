@@ -932,7 +932,19 @@
     const key = 'lockall-' + itemId;
     const wrap = el('div', { className: 'ck-lock-answered' });
     if (lockAllError[itemId]) {
-      wrap.appendChild(el('div', { className: 'ck-error-msg', role: 'alert' }, [lockAllError[itemId]]));
+      // No role=alert: it re-announced on every live redraw. announce() says it once, and
+      // focus lands here after the run.
+      const err = el('div', { className: 'ck-error-msg ck-lock-answered-error' }, [lockAllError[itemId]]);
+      err.setAttribute('tabindex', '-1');
+      const dismiss = el('button', { className: 'ck-btn ck-btn-quiet', type: 'button' }, ['Dismiss']);
+      dismiss.addEventListener('click', () => {
+        delete lockAllError[itemId];
+        renderPanel();
+        const h = panelEl.querySelector('.ck-section-heading');
+        if (h) { h.setAttribute('tabindex', '-1'); h.focus(); }
+      });
+      err.appendChild(dismiss);
+      wrap.appendChild(err);
     }
     if (lockingAll === itemId) {
       wrap.appendChild(el('p', { className: 'ck-muted' }, ['Locking answers…']));
@@ -963,7 +975,12 @@
     const go = el('button', { className: 'ck-btn ck-btn-primary ck-lock-answered-go', type: 'button' },
       ['Lock all ' + ready.length + ' answers']);
     const cancel = el('button', { className: 'ck-btn', type: 'button' }, ['Cancel']);
-    cancel.addEventListener('click', () => { openForms.delete(key); renderPanel(); });
+    cancel.addEventListener('click', () => {
+      openForms.delete(key);
+      renderPanel();
+      const again = panelEl.querySelector('.ck-lock-answered-open');
+      if (again) again.focus();
+    });
     go.addEventListener('click', async () => {
       // The answers shown are the ones locked: taken now, not re-read after each reply.
       const todo = ready.map(q => ({ qid: q.question.qid, answer: q.answers[q.answers.length - 1].id }));
@@ -985,6 +1002,9 @@
         announce('Locked ' + done + ' answers.');
       }
       renderPanel();
+      // The button that was pressed is gone: land on what the run left behind.
+      const land = panelEl.querySelector('.ck-lock-answered-error') || panelEl.querySelector('.ck-section-heading');
+      if (land) { if (!land.hasAttribute('tabindex')) land.setAttribute('tabindex', '-1'); land.focus(); }
     });
     actions.appendChild(go);
     actions.appendChild(cancel);
@@ -1031,6 +1051,7 @@
       if (!onSheet) return showSheet(null, null);
       currentFork = null;
       currentMode = itemId ? 'item' : 'inbox';
+      if (!itemId) fromInbox = false;
       renderPanel();
       const h = panelEl.querySelector('.ck-title');
       if (h) { h.setAttribute('tabindex', '-1'); h.focus(); }

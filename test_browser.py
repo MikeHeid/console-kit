@@ -1415,6 +1415,40 @@ class LiveConsoleTests(unittest.TestCase):
                     self.assertEqual([b for b in self.bell() if b.get("intent") == "process"], [])
                     self.assert_not_reloaded(page)
 
+    def test_a_refused_lock_stops_the_run_names_it_and_can_be_dismissed(self):
+        # Catches: a run that goes on past a refusal, or stops silently; an error that does not
+        # name the question or the count; one that cannot be cleared; focus left on <body>.
+        def locks():
+            return sorted(b["qid"] for b in self.bell() if b.get("type") == "lock")
+
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                for n in (1, 2, 3):
+                    self.ask(n)
+                for n in (1, 2, 3):
+                    self.console.write("answer", {"qid": f"LANE.1/Q{n}", "picks": ["fix"], "own_text": "",
+                                                  "nonce": f"refusedans{n}"}, "owner")
+                page = self.page(kind, 1280, url, block_live=True)  # the confirm keeps the answers it showed
+                page.evaluate("window.ConsoleKit.open('LANE.1')")
+                page.click(".ck-lock-answered-open")
+                page.wait_for_selector(".ck-lock-answered .ck-confirm")
+                # Q2 is answered again after the owner saw it: its shown answer is no longer current.
+                self.console.write("answer", {"qid": "LANE.1/Q2", "picks": ["leave"], "own_text": "",
+                                              "nonce": "refusedans4"}, "owner")
+                page.click(".ck-lock-answered-go")
+                page.wait_for_selector(".ck-lock-answered-error", timeout=10000)
+                err = page.locator(".ck-lock-answered-error").text_content()
+                self.assertIn("Locked 1 of 3.", err)
+                self.assertIn("LANE.1/Q2 was not locked", err)
+                self.assertEqual(locks(), ["LANE.1/Q1"])  # stopped at Q2: Q3 was not tried
+                self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-lock-answered-error')"))
+                self.assertEqual(page.locator("[role='alert'].ck-lock-answered-error").count(), 0)
+                page.click(".ck-lock-answered-error button")
+                self.assertEqual(page.locator(".ck-lock-answered-error").count(), 0)
+                self.assertNotEqual(page.evaluate("document.activeElement.tagName"), "BODY")
+                self.assert_not_reloaded(page)
+
 
 # -- 0.8.0: the Next step menu, tag chips, roar, and visuals, against the REAL server ------
 
