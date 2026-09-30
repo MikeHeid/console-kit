@@ -172,6 +172,37 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   checked" (the owner's requests are not listed) until the steward is
   cleared (`kit/docs/DEPLOY.md`, "Rollback", step 7).
 
+### Name a session from inside it (0.8.4)
+
+- **`/console-kit:as NAME`.** Type it in a Claude Code session (e.g.
+  `/console-kit:as agent-5`) instead of starting the session as
+  `CONSOLE_KIT_AGENT=agent-5 claude`, which still works as the fallback. The
+  plugin's UserPromptSubmit hook records the session's id against the name in
+  `<state>/sessions.jsonl` (mode 0600, rewritten to its newest lines before it
+  passes 64 KiB) for the registered project the session works in. The skill
+  itself is user-only (`disable-model-invocation: true`): Claude cannot run it.
+- **It lasts as long as the session id.** `claude --resume` and `--continue`
+  keep the id, so the name; `/clear` and `--fork-session` start a new session,
+  which is named again. After `/clear`, forks and restarts the SessionStart
+  note says "This session is not named" when the console has a steward.
+- **Everything reads it the same way.** The question hook, the SessionStart
+  note, `agent.py` and `fold.py` take this session's name as: `--as` (the two
+  scripts), then the name recorded for this session, then
+  `CONSOLE_KIT_AGENT`. `agent.py` and `fold.py` find the session through
+  `CONSOLE_KIT_SESSION`, which the SessionStart hook exports into the
+  session's Bash environment (`CLAUDE_ENV_FILE`).
+- **The file only names sessions; your registry still names the steward.** A
+  stale or damaged line cannot make a session the steward the registry does
+  not name, and never locks the steward out: the last well-formed line for a
+  session wins, so typing the command again fixes it, and a file that cannot
+  be read gives no name (the hooks then fall back to `CONSOLE_KIT_AGENT`).
+- **Still a guardrail.** Any prompt submitted in the session fires the hook:
+  one you type, or one another plugin's SessionStart hook injects
+  (`initialUserMessage`). Claude calling a tool does not.
+- **Messages keep their line breaks.** Owner messages and agent replies in an
+  item's thread now render their newlines (`white-space: pre-wrap`), as chat
+  messages already did. The text is still set as text, never as HTML.
+
 ## How it fits together
 
 ```

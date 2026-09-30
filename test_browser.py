@@ -37,7 +37,7 @@ body{margin:0;font:14px sans-serif}</style></head><body>
 </body></html>"""
 
 
-def _view(owner_message: bool = False, second_lane: bool = False) -> dict:
+def _view(owner_message: bool = False, second_lane: bool = False, multiline: bool = False) -> dict:
     """/view exactly as the server builds it (server.py: view.build over a store),
     from two questions made by the kit tests' own fixture, so it cannot drift.
     owner_message adds one owner message on LANE.1 with no agent reply, which
@@ -57,10 +57,16 @@ def _view(owner_message: bool = False, second_lane: bool = False) -> dict:
             st.append(message(item="LANE.1"))
         if second_lane:
             st.append(message(item="LANE.2"))
+        if multiline:  # 0.8.4: an owner message and an agent reply, each over three lines
+            st.append(message(item="LANE.1", text=MULTILINE_OWNER))
+            st.append(message(item="LANE.1", by="agent", text=MULTILINE_REPLY))
         return {"view": V.build(st, items, lambda c: True), "items": items, "cursor": {}}
 
 
+MULTILINE_OWNER = "first owner line\nsecond owner line\nthird owner line"
+MULTILINE_REPLY = "Recorded.\n\n- one\n- two"
 VIEW = _view()
+VIEW_MULTILINE = _view(multiline=True)
 VIEW_AGENT = _view(owner_message=True)
 VIEW_AGENT2 = _view(owner_message=True, second_lane=True)
 assert VIEW_AGENT["view"]["awaiting_agent"] == ["LANE.1"], VIEW_AGENT["view"]["awaiting_agent"]
@@ -95,6 +101,7 @@ class _Handler(BaseHTTPRequestHandler):
     view_delay = 0.0   # seconds before /view answers (a slow server)
     view_fails = False  # /view answers 503 (a server that is down)
     view_agent = False  # /view carries one thread waiting on the agent
+    view_multiline = False  # /view carries a thread whose messages span several lines (0.8.4)
     view_working = False  # ...and the cursor says an agent is working on it
     view_listening = None  # the cursor's `listening`; None leaves it out, as a pre-0.6.0 server
     board: object = None   # what /api/board answers; None is 404, as a project with no board()
@@ -110,7 +117,8 @@ class _Handler(BaseHTTPRequestHandler):
             import time
             time.sleep(_Handler.view_delay)
             status = 503 if _Handler.view_fails else 200
-            payload = dict(VIEW_AGENT2 if _Handler.view_agent == 2 else VIEW_AGENT if _Handler.view_agent else VIEW)
+            payload = dict(VIEW_MULTILINE if _Handler.view_multiline else VIEW_AGENT2 if _Handler.view_agent == 2
+                           else VIEW_AGENT if _Handler.view_agent else VIEW)
             if _Handler.view_working:  # an agent has marked this item id as in hand
                 payload["cursor"] = {"working": {_Handler.view_working: "2026-09-29T10:00:00Z"}}
             if _Handler.view_listening is not None:  # the watch heartbeat, as the server judged it
@@ -187,7 +195,7 @@ class DockTests(unittest.TestCase):
 
     def setUp(self):
         _Handler.view_delay, _Handler.view_fails, _Handler.view_agent, _Handler.view_working = 0.0, False, False, False
-        _Handler.view_listening = None
+        _Handler.view_listening, _Handler.view_multiline = None, False
 
     def _page(self, kind: str, width: int, loaded: bool = True):
         browser = getattr(self.pw, kind).launch()
@@ -284,6 +292,29 @@ class DockTests(unittest.TestCase):
                 s = self._state(page)
                 self.assertEqual((s["panel"], s["modal"], s["backdrop"]), ([700, 1400], None, False), s)
                 self.assertEqual(page.get_attribute(".ck-panel", "aria-label"), "Console: LANE.1")
+
+    # 0.8.4, owner: messages and agent replies lost their line breaks. The text goes in by
+    # textContent (never HTML), so only CSS keeps its newlines: without `white-space: pre-wrap`
+    # three lines render as one. innerText follows the rendering, so it says which happened.
+    LINES = """() => Array.from(document.querySelectorAll('.ck-message-text')).map(e => {
+      const lh = parseFloat(getComputedStyle(e).lineHeight);
+      return { text: e.innerText, html: e.innerHTML, lines: Math.round(e.getBoundingClientRect().height / lh) }; })"""
+
+    def test_a_multi_line_message_keeps_its_line_breaks(self):
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                _Handler.view_multiline = True
+                page = self._page(kind, 1400, loaded=False)
+                page.wait_for_selector(".ck-item-btn")
+                page.click(".ck-item-btn")
+                page.wait_for_selector(".ck-message-text")
+                got = {g["text"]: g for g in page.evaluate(self.LINES)}
+                self.assertIn(MULTILINE_OWNER, got, list(got))
+                self.assertIn(MULTILINE_REPLY, got, list(got))
+                self.assertEqual(got[MULTILINE_OWNER]["lines"], 3, got)
+                self.assertEqual(got[MULTILINE_REPLY]["lines"], 4, got)   # the blank line is kept too
+                # Catches: a fix that turns the text into HTML (<br>) instead of styling it.
+                self.assertNotIn("<", got[MULTILINE_REPLY]["html"])
 
     def test_narrow_window_keeps_the_overlay(self):
         for kind in BROWSERS:

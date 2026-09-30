@@ -88,6 +88,12 @@ stay open to every session, named or not. The repository's `.console-kit.json`
 cannot set it. With no steward, everything is as in 0.8.2. It is a guardrail
 between cooperating sessions of one user, not a security boundary: any process
 running as that user can edit the registry or the cursor.
+
+**Session names (0.8.4).** The user may name a Claude Code session by typing
+`/console-kit:as agent-5` in it; the plugin records that session's id against
+the name in DIR/sessions.jsonl and puts the id in the session's Bash
+environment as CONSOLE_KIT_SESSION. This session's name is then, in order:
+`--as`, the name recorded for CONSOLE_KIT_SESSION, CONSOLE_KIT_AGENT.
 """
 
 import argparse
@@ -104,6 +110,7 @@ from console_kit import bundle as B  # noqa: E402
 from console_kit import doorbell as D  # noqa: E402
 from console_kit import names as N  # noqa: E402
 from console_kit import registry as R  # noqa: E402
+from console_kit import sessions as SN  # noqa: E402
 from console_kit import view as V  # noqa: E402
 from console_kit.server import agent_request  # noqa: E402
 
@@ -327,7 +334,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--state", type=Path, required=True)
     ap.add_argument("--as", dest="agent", metavar="NAME",
-                    help=f"this session's agent name, e.g. agent-6 (default: ${N.ENV}; none: unnamed, as in 0.8.1)")
+                    help=f"this session's agent name, e.g. agent-6 (default: this session's /console-kit:as, "
+                         f"then ${N.ENV}; none: unnamed, as in 0.8.1)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("inbox")
     g = s.add_mutually_exclusive_group()
@@ -393,11 +401,9 @@ def main(argv=None) -> int:
     g.add_argument("name", nargs="?", help="the steward's agent name, e.g. agent-5")
     g.add_argument("--clear", action="store_true", help="no steward: every session may watch, sync and fold")
     a = ap.parse_args(argv)
-    # The agent name (0.8.2): --as wins over the environment; an empty variable counts as unset.
-    if a.agent is None and os.environ.get(N.ENV):
-        a.agent, where = os.environ[N.ENV], N.ENV
-    else:
-        where = "--as"
+    # The agent name: --as, then this session's /console-kit:as (0.8.4), then CONSOLE_KIT_AGENT (0.8.2);
+    # an empty variable counts as unset.
+    a.agent, where = SN.resolve(a.agent, a.state)
     if a.agent is not None:
         why = N.problem(a.agent)
         if why:
@@ -433,7 +439,7 @@ def steward_refusal(state: Path, agent: str | None, what: str) -> str | None:
             f"watches the doorbell, marks it synced and folds answers. Use `ask`, `reply` and `working` instead, "
             f"signed with --as YOUR-NAME: the steward handles the owner's requests. (The steward is set in your "
             f"own registry, {R.location()}, with `agent.py steward`; a session named {name} runs as it: "
-            f"--as {name}, or {N.ENV}={name}.)")
+            f"--as {name}, /console-kit:as {name} typed in the session, or {N.ENV}={name}.)")
 
 
 def _run(a, bell: Path) -> int:
