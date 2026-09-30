@@ -435,6 +435,90 @@ def _reanchor_one(c: dict, tree: Tree, history: History, source: str) -> tuple[d
             f"lines {rng[0]}-{rng[1]} as locked (commit {commit[:12]}) are unchanged in the file now")
 
 
+# -- structured evidence (0.7.0) -------------------------------------------------------
+
+EVIDENCE_NOW_CHARS = 8000   # the current lines a review form is sent for one row, at most
+
+
+def _split(text: str) -> list[str]:
+    return text.replace("\r\n", "\n").split("\n")
+
+
+def fill_evidence(rows: list[dict], tree: Tree) -> tuple[list[dict], list[str]]:
+    """Read each row's cited lines from the tree, as the question is asked.
+
+    Returns the rows with `text` filled in, and every reason a row cannot be
+    read. A row that cites a missing file, lines past its end, or only blank
+    lines is refused by name: evidence that cites nothing is not evidence.
+    """
+    out, errs = [], []
+    for n, row in enumerate(rows, 1):
+        path, a, b = S.cite_parts(row["cite"])  # the schema has already checked the shape
+        status, text = tree.text(path)
+        if status != "ok":
+            errs.append(f"evidence row {n}: {path} is {'outside the project' if status == 'outside' else 'not in the project'}")
+            continue
+        lines = _split(text)
+        if b > len(lines):
+            errs.append(f"evidence row {n}: {row['cite']} runs past the end of {path} ({len(lines)} lines)")
+            continue
+        cited = "\n".join(lines[a - 1:b])
+        if not normalise(cited):
+            errs.append(f"evidence row {n}: {row['cite']} cites only blank lines")
+            continue
+        if len(cited) > S.MAX_EXCERPT:
+            errs.append(f"evidence row {n}: {row['cite']} is {len(cited)} characters, over the {S.MAX_EXCERPT} "
+                        f"a row may hold; cite fewer lines")
+            continue
+        out.append({**row, "text": cited})
+    return out, errs
+
+
+def evidence_now(rows: list[dict], tree: Tree) -> list[dict]:
+    """Each evidence row with the cited lines as they are now, and whether they changed since the question was asked.
+
+    `state` is `unchanged` (the cited lines read as they did), `moved` (the
+    same text is still in the file, elsewhere: `line` says where), `changed`
+    (the text is not in the file any more; `diff` shows the nearest region
+    when there is one) or `missing` (the file is gone). The comparison is the
+    `excerpt` check's: whitespace and line endings do not count.
+    """
+    out = []
+    for row in rows:
+        parts = S.cite_parts(row.get("cite"))
+        e = {k: row[k] for k in ("cite", "command", "result") if k in row}
+        asked = row.get("text") or ""
+        e["asked"] = asked
+        if parts is None:
+            out.append({**e, "state": "missing", "words": "This citation cannot be read."})
+            continue
+        path, a, b = parts
+        status, text = tree.text(path)
+        if status != "ok":
+            out.append({**e, "state": "missing", "words": f"{path} is gone: it was moved, renamed or deleted."})
+            continue
+        lines = _split(text)
+        now = "\n".join(lines[a - 1:b]) if a <= len(lines) else ""
+        if normalise(now) == normalise(asked):
+            out.append({**e, "state": "unchanged", "line": a, "now": now[:EVIDENCE_NOW_CHARS],
+                        "words": "Unchanged since the question was asked."})
+            continue
+        near = nearest(asked, text)
+        if normalise(asked) in normalise(text):
+            at = near["line"] if near else a
+            moved = "\n".join(lines[at - 1:at - 1 + (b - a + 1)])
+            out.append({**e, "state": "moved", "line": at, "now": moved[:EVIDENCE_NOW_CHARS],
+                        "words": f"Unchanged since the question was asked; it now starts at line {at}."})
+            continue
+        row_out = {**e, "state": "changed", "line": a, "now": now[:EVIDENCE_NOW_CHARS],
+                   "words": "Changed since the question was asked."}
+        if near:
+            row_out["diff"] = near["diff"]
+            row_out["words"] += f" The most similar text now starts at line {near['line']}."
+        out.append(row_out)
+    return out
+
+
 def evaluator(root: Path, item_status: Mapping[str, str | None], *,
               snapshot: bool = False) -> Callable[[dict], bool]:
     """A `holds(condition)` function; live by default, or over one reading of the tree (see `Tree`)."""

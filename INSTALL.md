@@ -116,7 +116,22 @@ and on a loopback port only if you pass `--health-port`), the "agent listening"
 line in the status bar, and `kit/tools/verify_vendor.py`. `kit/docs/DEPLOY.md`
 and `kit/docs/RUNBOOK.md` cover running it.
 
-**Going back to an older kit.** A 0.4.0 kit refuses a store that holds a
+**Upgrading to 0.7.0.** Nothing to migrate, and no new record kind. Two new
+record shapes, both optional: a chat message (an owner `message` on the
+reserved thread `@chat` with intent `chat`) and a question's `evidence`
+rows. The page starts its live loop by itself; restart the server so it
+serves the new page and routes (`/api/wait`, `/api/feed`, `/api/evidence`,
+`/api/lock-all`), all behind the Access gate. A session watching with
+`agent.py watch` now also wakes on a chat message; update the plugin so its
+console-process skill answers them.
+
+**Going back to an older kit.** A 0.6.0 kit refuses a store that holds a
+0.7.0 chat message or a question with evidence, and names what it cannot
+read (`intent 'chat' is not one of fork, process`, `item '@chat' is not an
+item id`, `question: unknown field(s) evidence`). The first such record is
+written when you send a chat message or an agent asks a question with
+evidence; after that, going back means 0.7.0 or later.
+A 0.4.0 kit refuses a store that holds a
 0.5.0 record, and names the line and the field (for example `lock: unknown
 field(s) anchors`). It never drops a field it does not know. The first such
 record appears when you re-lock an answer and it is re-anchored, or when

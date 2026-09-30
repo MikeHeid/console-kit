@@ -4,7 +4,7 @@
     agent.py --state DIR inbox [--since SEQ | --all]
                                                 the owner's writes from the doorbell, after the agent's cursor
     agent.py --state DIR watch [--since SEQ] [--timeout SECONDS]
-                                                block until the owner sends 'process' or 'fork', print it, exit (§7.3)
+                                                block until the owner sends 'process', 'fork' or 'chat', print it, exit
     agent.py --state DIR view                   print the current view as JSON
     agent.py --state DIR health                 the server's health as JSON; exit 0 healthy, 1 not, 2 unreachable
     agent.py --state DIR answers [--item ID] [--fork RECORD_ID] [--json]
@@ -240,7 +240,7 @@ def _run(a, bell: Path) -> int:
             for sig, h in old.items():
                 signal.signal(sig, h)
         if not found:
-            print(f"no 'process' or 'fork' signal after seq {since} within {a.timeout:g}s", file=sys.stderr)
+            print(f"no 'process', 'fork' or 'chat' signal after seq {since} within {a.timeout:g}s", file=sys.stderr)
             return 3
         for line in found:
             print(json.dumps(line, sort_keys=True))

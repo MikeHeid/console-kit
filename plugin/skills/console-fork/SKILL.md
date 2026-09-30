@@ -106,9 +106,33 @@ agent. Each question is a JSON file for `A ask FILE`:
   Paths are relative to the project root. Keep `source` as `path:start-end`
   on the same file: `agent.py reanchor` needs that range to re-anchor an old
   whole-file hash.
+- **`evidence`** (0.7.0; give it whenever a seat's finding rests on lines,
+  a command or a measurement): a list of 1 to 8 rows, each
+
+      {"cite": "path/to/file.py:120-134",
+       "command": "python3 -m unittest test_x -q",
+       "result": "Ran 12 tests ... FAILED (failures=1)"}
+
+  `cite` is required: a path relative to the project root with `:line` or
+  `:start-end`, at most 200 lines, inside the project (no `..`, no leading
+  `/`). `command` (one line, at most 300 characters) and `result` (at most
+  2000 characters, the output that matters, not a whole log) are optional.
+  **Never send `text`**: the server reads the cited lines itself when the
+  question is posted, and refuses a row that cites a missing file, lines past
+  its end, or only blank lines. The owner's review form shows each row, with
+  the cited lines as they are when they look, marked "unchanged" or "changed
+  since asked". Carry each seat's file:line citations into `evidence` rather
+  than only into the question's prose; one row per claim the owner should be
+  able to check.
 - **Tighten mode:** every finding is one question with exactly three options,
-  "Fix now", "Record in findings.md" and "Leave it" (D11). Nothing happens on
-  a pick alone: it acts only once the owner locks it and it is folded.
+  "Fix now", "Record in findings.md" and "Leave it" (D11), in that order and
+  with ids `fix`, `record` and `leave`: the owner's review form offers them as
+  keys 1, 2 and 3. Nothing happens on a pick alone: it acts only once the
+  owner locks it and it is folded.
+- **The round is one form.** Every question you post with this fork's
+  `forked_from` opens in the owner's inbox as one form, a question per step,
+  and is locked together with "Lock all & process". Write each question to
+  stand on its own: the owner sees one at a time.
 - **Nothing worth deciding:** still ask one question, "Close this fork with
   nothing to change?", so the round ends in a decision, not in prose.
 

@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -885,6 +886,385 @@ class WhyStaleTests(unittest.TestCase):
                     self.assertTrue(body.pop("nonce"))
                     self.assertEqual(body, {"qid": "LANE.1/Q1"})  # never anchors: the server computes them
                     self.assertEqual(errors, [], f"{kind}: page errors")
+
+
+# -- 0.7.0: a live console, against the REAL server --------------------------------------
+#
+# These run the kit's own server (Access gate, Origin check, store, doorbell) on
+# loopback. The page cannot hold an Access token, so a Playwright route adds the
+# header Cloudflare would, and the Origin the public hostname carries; nothing
+# else about a request is touched. The agent writes through its real socket.
+
+LIVE_ITEMS = {"LANE": {"title": "a lane", "parent": None, "status": "open"},
+              "LANE.1": {"title": "first lane", "parent": "LANE", "status": "open"}}
+LIVE_HOST = HOST.replace('<details id="item-LANE.1">', '<details id="item-LANE"><summary>LANE a lane</summary>'
+                         '</details>\n<details id="item-LANE.1">')
+OVERFLOW = "document.documentElement.scrollWidth > innerWidth"
+
+
+class _LiveAdapter:
+    def items(self):
+        return dict(LIVE_ITEMS)
+
+    def seed_questions(self):
+        return []
+
+    def record(self, entries, dry_run):
+        return []
+
+
+class LiveConsoleTests(unittest.TestCase):
+    """0.7.0: new activity without reload, the Feed, the review-round form and the chat."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not REQUIRED:
+            raise unittest.SkipTest("browser tests run only with CONSOLE_KIT_BROWSER=1")
+        sp = _playwright()
+        if sp is None:
+            raise RuntimeError("CONSOLE_KIT_BROWSER=1 but Playwright is not installed")
+        cls.pw = sp().start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.pw.stop()
+
+    # -- the real server ------------------------------------------------------------
+
+    def serve(self):
+        import tempfile
+        from console_kit import server as SV
+        from test_server import AUD, HOSTNAME, KEY, TEAM, token
+        td = tempfile.mkdtemp(prefix="ck-live-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(td, ignore_errors=True))
+        root = Path(td)
+        (root / "page.html").write_text(LIVE_HOST)
+        cfg = SV.Config(root=root, page=root / "page.html", state=root / "state", adapter=root / "unused.py",
+                        team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="live-test")
+        console = SV.Console(cfg, _LiveAdapter())
+        verify = SV.access_verifier(TEAM, AUD, key_for=lambda _t: KEY.public_key())
+        owner = SV.owner_server(console, verify, 0)
+        threading.Thread(target=owner.serve_forever, daemon=True).start()
+        agent = SV.agent_server(console)
+        threading.Thread(target=agent.serve_forever, daemon=True).start()
+        self.addCleanup(owner.server_close)
+        self.addCleanup(owner.shutdown)
+        self.addCleanup(agent.server_close)
+        self.addCleanup(agent.shutdown)
+        self.tok, self.origin = token(), f"https://{HOSTNAME}"
+        self.SV, self.console, self.cfg = SV, console, cfg
+        return f"http://127.0.0.1:{owner.server_address[1]}/"
+
+    def agent_post(self, path, body):
+        code, out = self.SV.agent_request(self.cfg.socket, "POST", path, body)
+        self.assertEqual(code, 200, out)
+        return out["record"]
+
+    def ask(self, n, item="LANE.1", **over):
+        body = {"qid": f"{item}/Q{n}", "item": item, "text": f"Question {n}: which way?", "kind": "single",
+                "options": [{"id": "fix", "label": "Fix now"}, {"id": "record", "label": "Record in findings.md"},
+                            {"id": "leave", "label": "Leave it"}],
+                "star": "fix", "source": "docs/spec.md:1", "valid_if": [], "nonce": f"liveq{n:04d}" + item.replace(".", "_")}
+        body.update(over)
+        return self.agent_post("/question", body)
+
+    def bell(self):
+        p = self.cfg.inbox
+        return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+
+    def page(self, kind, width, url, reduced=False, block_live=False):
+        browser = getattr(self.pw, kind).launch()
+        self.addCleanup(browser.close)
+        ctx = browser.new_context(viewport={"width": width, "height": 900},
+                                  reduced_motion="reduce" if reduced else "no-preference")
+        page = ctx.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        self.addCleanup(lambda: self.assertEqual(errors, [], f"{kind}: page errors"))
+        self.waits: list[float] = []
+
+        def through_access(route):
+            if "/api/wait" in route.request.url:
+                self.waits.append(time.monotonic())
+            h = {**route.request.headers, "cf-access-jwt-assertion": self.tok}
+            if route.request.method == "POST":
+                # A browser will not let a page's route rewrite Origin, so a write is
+                # re-sent from Playwright with the Origin the public hostname carries.
+                h["origin"] = self.origin
+                route.fulfill(response=route.fetch(headers=h))
+                return
+            route.continue_(headers=h)
+        page.route("**/*", through_access)
+        if block_live:  # routes run newest first: every long poll fails, so the page never updates itself
+            page.route("**/api/wait*", lambda route: route.abort())
+        page.goto(url)
+        page.wait_for_function("document.querySelector('.ck-inbox-count').textContent !== '?'")
+        page.evaluate("window.__notReloaded = true")
+        return page
+
+    def open_inbox(self, page, width):
+        page.click(".ck-dock-strip" if width >= 1024 else ".ck-inbox-btn")
+        page.wait_for_selector(".ck-tabs")
+
+    def assert_not_reloaded(self, page):
+        self.assertTrue(page.evaluate("window.__notReloaded === true"), "the page reloaded")
+
+    # -- tests -------------------------------------------------------------------------
+
+    def test_a_new_question_appears_without_reload_and_the_chip_counts_it(self):
+        # Catches: a page that only refreshes on open or on Refresh (the owner sees nothing
+        # new until they click); an unread chip that counts the owner's own writes; one that
+        # never clears once looked at; and an update done by reloading the page.
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    url = self.serve()
+                    self.ask(1)
+                    page = self.page(kind, width, url)
+                    chip = ".ck-dock-strip .ck-new-count" if width >= 1024 else ".ck-inbox-btn .ck-new-count"
+                    self.assertEqual(page.locator(chip).text_content(), "")  # a first visit starts at nothing new
+                    self.console.write("message", {"item": "LANE.1", "text": "owner note", "nonce": "ownernote01"},
+                                       "owner")
+                    page.wait_for_timeout(1500)
+                    self.assertEqual(page.locator(chip).text_content(), "")  # the owner's own write is not "new"
+                    self.ask(2)
+                    page.wait_for_function(f"document.querySelector('{chip}').textContent === '1 new'", timeout=10000)
+                    page.wait_for_function("document.querySelector('.ck-inbox-count').textContent === '2'")
+                    label = page.locator(".ck-dock-strip" if width >= 1024 else ".ck-inbox-btn").get_attribute("aria-label")
+                    self.assertIn("1 new since you last looked", label)
+                    self.open_inbox(page, width)
+                    page.wait_for_selector(".ck-inbox-item[data-qid='LANE.1/Q2']")
+                    page.wait_for_function(f"document.querySelector('{chip}').textContent === ''")
+                    # With the inbox open, the next question is drawn in place, and marked as arriving.
+                    self.ask(3)
+                    page.wait_for_selector(".ck-inbox-item[data-qid='LANE.1/Q3'].ck-arrived", timeout=10000)
+                    self.assertFalse(page.evaluate(OVERFLOW))
+                    self.assert_not_reloaded(page)
+
+    def test_the_feed_shows_events_as_they_happen_and_filters_them(self):
+        # Catches: a Feed fetched once and never again, one that loses its filter on a live
+        # update, and one built from the view (which has no lock records).
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    url = self.serve()
+                    self.ask(1)
+                    page = self.page(kind, width, url)
+                    self.open_inbox(page, width)
+                    page.click("#ck-tab-feed")
+                    page.wait_for_selector(".ck-feed-row[data-kind='question']")
+                    self.ask(2)
+                    page.wait_for_function(
+                        "(() => { const r = document.querySelector('.ck-feed-row');"
+                        " return r && r.textContent.includes('LANE.1/Q2') && r.dataset.kind === 'question'; })()",
+                        timeout=10000)
+                    self.assertEqual(page.locator(".ck-feed-row.ck-feed-new").count(), 1)  # Q2 arrived after opening
+                    a = self.console.write("answer", {"qid": "LANE.1/Q1", "picks": ["fix"], "own_text": "",
+                                                      "nonce": "feedanswer1"}, "owner")
+                    self.console.write("lock", {"qid": "LANE.1/Q1", "answer": a["id"], "nonce": "feedlock001"}, "owner")
+                    page.select_option("#ck-feed-kind", "lock")
+                    page.wait_for_function("document.querySelectorAll('.ck-feed-row').length === 1"
+                                           " && document.querySelector('.ck-feed-row').dataset.kind === 'lock'",
+                                           timeout=10000)
+                    self.ask(3)  # a live update keeps the filter: still only locks
+                    page.wait_for_timeout(1500)
+                    self.assertEqual(page.eval_on_selector_all(".ck-feed-row", "rs => rs.map(r => r.dataset.kind)"),
+                                     ["lock"])
+                    self.assertIn("not listed here", page.locator(".ck-feed-foot").text_content())
+                    self.assertFalse(page.evaluate(OVERFLOW))
+                    self.assert_not_reloaded(page)
+
+    def test_a_round_is_one_form_drafts_survive_and_lock_all_rings_once(self):
+        # Catches: a form that locks as you pick (nothing may lock before the review page);
+        # drafts lost on moving between questions, leaving the form or reloading; a review
+        # page that shows stale picks after a change; a Lock all that locks the questions
+        # left, or rings "process" once per question; and ←/→ or 1-9 keys that do nothing.
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    url = self.serve()
+                    spec = self.cfg.root / "docs" / "spec.md"
+                    spec.parent.mkdir(parents=True)
+                    spec.write_text("intro\nThe bundle cap is 64 KiB.\nend\n")
+                    f = self.console.write("message", {"item": "LANE.1", "text": "tighten this", "intent": "fork",
+                                                       "mode": "tighten", "nonce": "roundfork01"}, "owner")
+                    for n in (1, 2, 3):
+                        extra = {"evidence": [{"cite": "docs/spec.md:2", "command": "grep -n cap docs/spec.md",
+                                               "result": "2:The bundle cap is 64 KiB."}]} if n == 1 else {}
+                        self.ask(n, forked_from=f["id"], star_by="panel", **extra)
+                    spec.write_text("intro\nThe bundle cap is 32 KiB.\nend\n")  # changed since asked
+                    page = self.page(kind, width, url)
+                    self.open_inbox(page, width)
+                    page.click(".ck-round-card button")
+                    page.wait_for_selector(".ck-round-step")
+                    # Q1: evidence, read now, says the cited line changed.
+                    page.wait_for_selector(".ck-evidence-state[data-state='changed']")
+                    self.assertIn("32 KiB", page.locator(".ck-evidence-row .ck-evidence-lines").text_content())
+                    if os.environ.get("CONSOLE_KIT_SHOTS"):
+                        page.locator(".ck-panel").screenshot(
+                            path=str(Path(os.environ["CONSOLE_KIT_SHOTS"]) / f"round-step-{kind}-{width}.png"))
+                    page.keyboard.press("2")  # picks "Record in findings.md"
+                    self.assertTrue(page.locator(".ck-round-options input[value='record']").is_checked())
+                    page.fill("#ck-round-words", "Record it; the cap moves next quarter.")
+                    page.locator(".ck-round-options input[value='record']").focus()
+                    page.keyboard.press("ArrowRight")
+                    page.wait_for_function("document.querySelector('.ck-round-count').textContent.startsWith('Question 2 of 3')")
+                    page.keyboard.press("1")
+                    page.keyboard.press("ArrowLeft")  # back: the draft is still there
+                    page.wait_for_function("document.querySelector('.ck-round-count').textContent.startsWith('Question 1 of 3')")
+                    self.assertTrue(page.locator(".ck-round-options input[value='record']").is_checked())
+                    self.assertEqual(page.input_value("#ck-round-words"), "Record it; the cap moves next quarter.")
+                    self.assertEqual(self.console.store.head("LANE.1/Q1"), None)  # nothing written by a pick
+                    # Leave the form, come back, and reload: the drafts survive all three.
+                    page.click(".ck-panel .ck-back-btn" if width < 400 else ".ck-panel .ck-sheet-toggle")
+                    page.evaluate("ConsoleKit.openRound(%s)" % json.dumps(f["id"]))
+                    page.wait_for_selector(".ck-round-step")
+                    self.assertTrue(page.locator(".ck-round-options input[value='record']").is_checked())
+                    page.reload()
+                    page.wait_for_function("document.querySelector('.ck-inbox-count').textContent !== '?'")
+                    page.evaluate("ConsoleKit.openRound(%s)" % json.dumps(f["id"]))
+                    page.wait_for_selector(".ck-round-step")
+                    self.assertTrue(page.locator(".ck-round-options input[value='record']").is_checked())
+                    page.get_by_role("button", name="Review all").click()
+                    page.wait_for_selector(".ck-review-heading")
+                    rows = page.eval_on_selector_all(".ck-review-row", "rs => rs.map(r => r.dataset.status)")
+                    self.assertEqual(rows, ["picked", "picked", "left"])
+                    # Going back to change a pick before committing works.
+                    page.get_by_role("button", name="Change LANE.1/Q2").click()
+                    page.wait_for_selector(".ck-round-step")
+                    page.keyboard.press("3")
+                    page.get_by_role("button", name="Review all").click()
+                    self.assertIn("Leave it", page.locator(".ck-review-row").nth(1).text_content())
+                    if os.environ.get("CONSOLE_KIT_SHOTS"):
+                        page.locator(".ck-panel").screenshot(
+                            path=str(Path(os.environ["CONSOLE_KIT_SHOTS"]) / f"round-review-{kind}-{width}.png"))
+                    self.assertFalse(page.evaluate(OVERFLOW))
+                    self.assertEqual([b for b in self.bell() if b.get("intent") == "process"], [])
+                    page.click(".ck-lock-all")
+                    page.wait_for_selector(".ck-result-heading")
+                    st = self.console.store
+                    self.assertEqual((st.head("LANE.1/Q1")["picks"], st.head("LANE.1/Q1")["own_text"]),
+                                     (["record"], "Record it; the cap moves next quarter."))
+                    self.assertEqual(st.head("LANE.1/Q2")["picks"], ["leave"])
+                    self.assertIsNotNone(st.lock_of(st.head("LANE.1/Q1")["id"]))
+                    self.assertIsNotNone(st.lock_of(st.head("LANE.1/Q2")["id"]))
+                    self.assertIsNone(st.head("LANE.1/Q3"))  # left: still unanswered
+                    self.assertEqual(len([b for b in self.bell() if b.get("intent") == "process"]), 1)
+                    self.assertIsNone(page.evaluate("localStorage.getItem('ck:live-test:round:%s')" % f["id"]))
+
+    def test_a_refused_lock_all_locks_nothing_and_keeps_the_drafts(self):
+        # Catches: a form that locks the good half of a refused batch; one that clears the
+        # owner's drafts (and comments) on a refusal; one that reports success when the
+        # server locked nothing; and a refusal that does not say which question and why.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                f = self.console.write("message", {"item": "LANE.1", "text": "x", "intent": "fork", "mode": "explore",
+                                                   "nonce": "refusefork1"}, "owner")
+                self.ask(1, forked_from=f["id"], star_by="panel")
+                self.ask(2, forked_from=f["id"], star_by="panel")
+                # No live updates in this tab, so it still believes Q1 is open when it presses.
+                page = self.page(kind, 1280, url, block_live=True)
+                page.evaluate("ConsoleKit.openRound(%s)" % json.dumps(f["id"]))
+                page.wait_for_selector(".ck-round-step")
+                page.keyboard.press("1")
+                page.fill("#ck-round-words", "my reason for Q1")
+                page.locator(".ck-round-options input[value='fix']").focus()
+                page.keyboard.press("ArrowRight")
+                page.wait_for_function("document.querySelector('.ck-round-count').textContent.startsWith('Question 2 of 2')")
+                page.keyboard.press("2")
+                page.get_by_role("button", name="Review all").click()
+                # Meanwhile, another tab locks Q1 with a different answer.
+                a = self.console.write("answer", {"qid": "LANE.1/Q1", "picks": ["leave"], "own_text": "",
+                                                  "nonce": "othertab01"}, "owner")
+                self.console.write("lock", {"qid": "LANE.1/Q1", "answer": a["id"], "nonce": "othertab02"}, "owner")
+                seq = self.console.store.seq()
+                page.click(".ck-lock-all")
+                page.wait_for_selector(".ck-review-heading ~ [role='alert']")
+                self.assertIn("Nothing was locked", page.locator("[role='alert']").text_content())
+                self.assertIn("supersede", page.locator(".ck-review-row").nth(0).text_content())
+                self.assertEqual(self.console.store.seq(), seq)  # not Q2 either
+                self.assertIsNone(self.console.store.head("LANE.1/Q2"))
+                saved = json.loads(page.evaluate("localStorage.getItem('ck:live-test:round:%s')" % f["id"]))
+                self.assertEqual(saved["drafts"]["LANE.1/Q1"]["text"], "my reason for Q1")  # kept
+                self.assertEqual(saved["drafts"]["LANE.1/Q2"]["picks"], ["record"])
+                # Brought up to date, the form shows Q1 as locked, and Lock all locks the rest.
+                page.evaluate("ConsoleKit.refresh()")
+                page.wait_for_function("document.querySelector('.ck-review-row').dataset.status === 'locked'")
+                page.click(".ck-lock-all")
+                page.wait_for_selector(".ck-result-heading")
+                self.assertEqual(self.console.store.head("LANE.1/Q2")["picks"], ["record"])
+                self.assertEqual(self.console.store.head("LANE.1/Q1")["picks"], ["leave"])  # never superseded here
+                self.assertEqual(len([b for b in self.bell() if b.get("intent") == "process"]), 1)
+
+    def test_a_chat_message_wakes_the_watch_and_the_reply_appears(self):
+        # Catches: a chat that is stored but rings nothing (no session would wake), and an
+        # agent reply that only shows after a reload.
+        from console_kit import doorbell as D
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    url = self.serve()
+                    page = self.page(kind, width, url)
+                    self.open_inbox(page, width)
+                    page.click("#ck-tab-chat")
+                    page.fill("#ck-chat-input", "Is the gradiance build green?")
+                    page.keyboard.press("Enter")
+                    page.wait_for_selector(".ck-chat-msg[data-by='owner']")
+                    woke = D.watch(self.cfg.inbox, 0, poll=0.05, timeout=5)
+                    self.assertEqual([(w["intent"], w["item"]) for w in woke], [("chat", "@chat")])
+                    msg = [r for r in self.console.store.records() if r["type"] == "message"][-1]
+                    self.assertEqual((msg["by"], msg["intent"], msg["text"]),
+                                     ("owner", "chat", "Is the gradiance build green?"))
+                    self.agent_post("/message", {"item": "@chat", "text": "Green at abc123.", "reply_to": msg["id"],
+                                                 "nonce": "chatreply01"})
+                    page.wait_for_selector(".ck-chat-msg[data-by='agent']", timeout=10000)
+                    self.assertIn("Green at abc123.", page.locator(".ck-chat-msg[data-by='agent']").text_content())
+                    page.wait_for_function("!document.querySelector('#ck-tab-chat .ck-tab-note')")  # no longer waiting
+                    self.assertFalse(page.evaluate(OVERFLOW))
+                    if os.environ.get("CONSOLE_KIT_SHOTS"):
+                        page.locator(".ck-panel").screenshot(
+                            path=str(Path(os.environ["CONSOLE_KIT_SHOTS"]) / f"chat-{kind}-{width}.png"))
+                    self.assert_not_reloaded(page)
+
+    def test_polling_pauses_when_hidden_and_backs_off_on_errors(self):
+        # Catches: a loop that keeps polling in a background tab (a thread held open for
+        # nothing), and one that retries a failing server in a tight loop.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                page = self.page(kind, 1280, url)
+                page.wait_for_timeout(500)
+                page.evaluate("Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'hidden'});"
+                              "document.dispatchEvent(new Event('visibilitychange'))")
+                page.wait_for_timeout(300)
+                n = len(self.waits)
+                self.ask(1)  # a change while hidden starts no poll
+                page.wait_for_timeout(2500)
+                self.assertEqual(len(self.waits), n)
+                page.evaluate("Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => 'visible'});"
+                              "document.dispatchEvent(new Event('visibilitychange'))")
+                page.wait_for_function("document.querySelector('.ck-inbox-count').textContent === '1'", timeout=10000)
+                # A server that fails: the loop backs off (2 s, 4 s, ...), never a tight loop.
+                page.route("**/api/wait*", lambda r: r.fulfill(status=503, body="{}", content_type="application/json"))
+                page.wait_for_timeout(300)
+                start = len(self.waits)
+                page.wait_for_timeout(5000)
+                self.assertLessEqual(len(self.waits) - start, 3)
+
+    def test_motion_is_off_under_reduced_motion(self):
+        # Catches: animations that ignore the owner's reduced-motion setting.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                page = self.page(kind, 1280, url, reduced=True)
+                self.ask(1)
+                page.wait_for_function("document.querySelector('.ck-dock-strip .ck-new-count').textContent === '1 new'",
+                                       timeout=10000)
+                names = page.evaluate("""() => [document.querySelector('.ck-dock-strip .ck-new-count'),
+                    document.querySelector('.ck-item-btn .ck-ring-arc')].map(e => {
+                      const s = getComputedStyle(e); return [s.animationName, s.transitionDuration]; })""")
+                self.assertEqual(names, [["none", "0s"], ["none", "0s"]])
 
 
 if __name__ == "__main__":

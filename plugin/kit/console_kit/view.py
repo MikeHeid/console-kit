@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from . import anchors as A
+from . import schema as S
 from .store import Store
 
 STATES = ("awaiting_you", "unlocked", "locked", "stale")
@@ -99,6 +100,12 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
             own[item]["awaiting_agent"] += 1
             waiting_agent.append(item)
 
+    # The chat (0.7.0) is not a register item, so it is never in `own`: whether
+    # it waits on an agent is said on its own, never folded into an item's count.
+    chat = threads.get(S.CHAT_ITEM, [])
+    chat_owner = max((m["seq"] for m in chat if m["by"] == "owner"), default=0)
+    chat_agent = max((m["seq"] for m in chat if m["by"] == "agent"), default=0)
+
     total = _roll_up(items, own)
     # A question whose item left the register (a rename with no alias yet, R7) is
     # named under `orphaned` rather than counted: the Inbox badge counts only
@@ -115,7 +122,89 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
         "inbox": [q["question"]["qid"] for q in inbox],
         "awaiting_agent": sorted(waiting_agent),
         "orphaned": orphaned,
+        "chat": {"item": S.CHAT_ITEM, "awaiting_agent": chat_owner > chat_agent, "messages": len(chat)},
+        # The store's sequence number this view was built at (0.7.0): the page's
+        # live loop and unread count compare against it.
+        "seq": recs[-1]["seq"] if recs else 0,
     }
+
+
+# -- the Feed (0.7.0) ----------------------------------------------------------------
+#
+# A view over the store, newest first, never stored. Folds and PR merges are
+# not store records (a fold lands through a PR the store never sees), so they
+# are not in the feed; the page says so and links out.
+
+FEED_KINDS = ("question", "answer", "lock", "reanchor", "fork", "process", "chat", "reply", "note")
+FEED_MAX = 200
+FEED_DEFAULT = 50
+FEED_SNIPPET = 240
+
+
+def _snip(text: str) -> str:
+    t = " ".join((text or "").split())
+    return t if len(t) <= FEED_SNIPPET else t[:FEED_SNIPPET - 1] + "…"
+
+
+def feed_event(rec: dict, qitems: Mapping[str, str], relocks: set[str]) -> dict:
+    """One store record as a feed event: what happened, where, and a short line of what was said."""
+    t = rec["type"]
+    ev = {"seq": rec["seq"], "ts": rec["ts"], "by": rec["by"], "id": rec["id"]}
+    if t == "question":
+        ev.update(kind="question", item=rec["item"], qid=rec["qid"], text=_snip(rec["text"]))
+        if "forked_from" in rec:
+            ev["round"] = rec["forked_from"]
+    elif t == "answer":
+        ev.update(kind="answer", item=qitems.get(rec["qid"]), qid=rec["qid"], picks=rec["picks"],
+                  text=_snip(rec["own_text"]), supersedes="supersedes" in rec)
+        if "reason" in rec:
+            ev["reason"] = _snip(rec["reason"])
+    elif t == "lock":
+        ev.update(kind="lock", item=qitems.get(rec["qid"]), qid=rec["qid"], relock=rec["id"] in relocks)
+    elif t == "anchor":
+        ev.update(kind="reanchor", item=qitems.get(rec["qid"]), qid=rec["qid"], text=_snip(rec["basis"]))
+    else:  # message
+        intent = rec.get("intent")
+        kind = (intent if intent in ("fork", "process", "chat")
+                else "chat" if rec["item"] == S.CHAT_ITEM
+                else "reply" if rec["by"] == "agent" else "note")
+        ev.update(kind=kind, item=rec["item"], text=_snip(rec["text"]))
+        for k in ("mode", "focus", "roles", "about_qid", "follow_up_of", "reply_to"):
+            if k in rec:
+                ev[k] = rec[k]
+    return ev
+
+
+def feed(store: Store, items: Mapping[str, dict], *, kinds: set[str] | None = None, item: str | None = None,
+         before: int | None = None, limit: int = FEED_DEFAULT) -> dict:
+    """The newest `limit` events (optionally of `kinds`, on `item` and all under it, before seq `before`).
+
+    `next_before` is the seq to pass as `before` for the page after this one,
+    or None when there is nothing older.
+    """
+    recs = store.records()
+    qitems = {r["qid"]: r["item"] for r in recs if r["type"] == "question"}
+    relocks, seen = set(), set()
+    for r in recs:  # a lock on a question that was locked before is a re-lock
+        if r["type"] == "lock":
+            (relocks.add(r["id"]) if r["qid"] in seen else seen.add(r["qid"]))
+    scope = (subtree(items, item) if item in items else {item}) if item is not None else None
+    out: list[dict] = []
+    more = None
+    for r in reversed(recs):
+        if before is not None and r["seq"] >= before:
+            continue
+        ev = feed_event(r, qitems, relocks)
+        if kinds is not None and ev["kind"] not in kinds:
+            continue
+        if scope is not None and ev.get("item") not in scope:
+            continue
+        if len(out) == limit:
+            more = out[-1]["seq"]
+            break
+        out.append(ev)
+    return {"events": out, "next_before": more, "kinds": list(FEED_KINDS),
+            "seq": recs[-1]["seq"] if recs else 0}
 
 
 def subtree(items: Mapping[str, dict], root: str) -> set[str]:

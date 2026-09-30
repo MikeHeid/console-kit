@@ -2035,5 +2035,125 @@ class AnchorExportTests(Tmp):
         self.assertTrue(F.check_entry(name, missing, ITEMS))
 
 
+# -- 0.7.0: chat, evidence, the trial store, the feed -------------------------------------
+
+EVIDENCE_ROW = {"cite": "docs/spec.md:2-3", "command": "grep -n cap docs/spec.md", "result": "2:the cap",
+                "text": "the cap\nis 64 KiB"}
+
+
+class LiveSchemaTests(unittest.TestCase):
+    def test_a_chat_message_is_the_owners_on_the_chat_thread_only(self):
+        # Catches: "chat" usable on a register item (it would wake the agent for a thread no
+        # skill answers), an agent that could write its own wake-up, and an owner message on
+        # the chat with no intent (it would never ring).
+        self.assertEqual(S.validate(message(item=S.CHAT_ITEM, intent="chat")), [])
+        self.assertEqual(S.validate(message(item=S.CHAT_ITEM, by="agent", text="a reply")), [])
+        self.assertTrue(S.validate(message(item="LANE.1", intent="chat")))
+        self.assertTrue(S.validate(message(item=S.CHAT_ITEM, by="agent", intent="chat")))
+        self.assertTrue(S.validate(message(item=S.CHAT_ITEM)))
+        self.assertTrue(S.validate(message(item=S.CHAT_ITEM, intent="chat", text="x" * (S.MAX_CHAT + 1))))
+        self.assertEqual(S.validate(message(item=S.CHAT_ITEM, by="agent", text="x" * (S.MAX_CHAT + 1))), [])
+        self.assertTrue(S.validate(message(item=S.CHAT_ITEM, intent="fork", mode="explore")))
+        self.assertIsNone(S.ITEM_ID.match(S.CHAT_ITEM))  # no register item can share the chat's thread
+
+    def test_stored_evidence_carries_the_text_the_server_read(self):
+        # Catches: a store that loads evidence with no record of the lines it cited (the form
+        # could then never say whether they changed), and a request that brings its own text.
+        self.assertEqual(S.validate(question(evidence=[EVIDENCE_ROW])), [])
+        no_text = {k: v for k, v in EVIDENCE_ROW.items() if k != "text"}
+        self.assertTrue(S.validate(question(evidence=[no_text])))
+        self.assertEqual(S.check_evidence([no_text], stored=False), [])
+        self.assertTrue(S.check_evidence([EVIDENCE_ROW], stored=False))
+        for bad in ([], [EVIDENCE_ROW] * (S.MAX_EVIDENCE + 1), "x", [{"text": "t"}]):
+            with self.subTest(bad=bad):
+                self.assertTrue(S.validate(question(evidence=bad)))
+
+    def test_a_cite_is_a_relative_path_and_a_bounded_range(self):
+        for cite in ("docs/a.md:1", "a.md:3-3", "a/b_c-d.e:1-200"):
+            self.assertIsNotNone(S.cite_parts(cite), cite)
+        for cite in ("/abs.md:1", "../a.md:1", "a/../b.md:1", "a//b.md:1", "a.md", "a.md:0", "a.md:1-",
+                     "a md:1", "a.md:1\n", "a.md:x"):
+            self.assertIsNone(S.cite_parts(cite), cite)
+        self.assertTrue(S.check_evidence([{"cite": "a.md:1-201"}], stored=False))
+        self.assertTrue(S.check_evidence([{"cite": "a.md:5-4"}], stored=False))
+
+
+class OlderKitRefusesTests(unittest.TestCase):
+    """0.7.0 adds no record kind, and a 0.6.0 kit refuses each new shape BY NAME (the kit's rule)."""
+
+    def test_the_last_release_names_what_it_cannot_read(self):
+        # Catches: a new field or intent a 0.6.0 kit would silently accept or drop, which would
+        # let a rollback lose the owner's chat or a question's evidence without a word.
+        try:
+            src = subprocess.run(["git", "show", "v0.6.0:plugin/kit/console_kit/schema.py"], cwd=HERE,
+                                 capture_output=True, text=True, timeout=20, check=True).stdout
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("the v0.6.0 tag is not in this checkout")
+        import types
+        old = types.ModuleType("schema_060")
+        exec(compile(src, "schema_060", "exec"), old.__dict__)  # noqa: S102 - our own tagged release
+        chat = old.validate(message(item=S.CHAT_ITEM, intent="chat"))
+        self.assertTrue(any("'chat'" in e for e in chat), chat)
+        self.assertTrue(any("@chat" in e for e in chat), chat)
+        ev = old.validate(question(evidence=[EVIDENCE_ROW]))
+        self.assertTrue(any("unknown field(s) evidence" in e for e in ev), ev)
+
+
+class TrialStoreTests(Tmp):
+    def test_a_trial_checks_every_rule_and_writes_nothing(self):
+        # Catches: a dry run that writes (the batch would land before it was approved) and one
+        # that skips the rules needing earlier records of the same batch (a lock of its answer).
+        st = self.store()
+        st.append(question())
+        before = self.path.read_bytes()
+        t = st.trial()
+        a = t.append(answer())
+        t.append(lock(a))
+        with self.assertRaises(StoreError):
+            t.append(lock(a))  # already locked, in the trial
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertIsNone(st.head("LANE.1/Q1"))
+        self.assertEqual(st.seq(), 1)
+        self.assertEqual(Store(self.path, known_items=ITEMS).seq(), 1)
+
+    def test_the_chat_thread_is_admitted_without_being_a_register_item(self):
+        # Catches: R7 refusing the chat (not in the register), and R7 relaxed for anything else.
+        st = self.store()
+        st.append(message(item=S.CHAT_ITEM, intent="chat"))
+        with self.assertRaises(StoreError):
+            st.append(message(item="NOT.AN.ITEM"))
+        v = V.build(st, ITEMS, lambda c: True)
+        self.assertTrue(v["chat"]["awaiting_agent"])
+        self.assertEqual(v["awaiting_agent"], [])
+        self.assertEqual(v["seq"], 1)
+
+
+class FeedViewTests(Tmp):
+    def test_a_relock_is_marked_and_a_follow_up_is_a_fork(self):
+        # Catches: every lock shown alike (the owner cannot tell a re-lock in the feed), and a
+        # follow-up on one answer shown as a plain note.
+        st = self.store()
+        st.append(question())
+        a1 = st.append(answer())
+        st.append(lock(a1))
+        a2 = st.append(answer(picks=["a"], supersedes=a1["id"], reason="changed my mind"))
+        st.append(lock(a2))
+        st.append(message(intent="fork", mode="tighten", about_qid="LANE.1/Q1", roles=["ux"]))
+        out = V.feed(st, ITEMS)
+        kinds = [(e["kind"], e.get("relock")) for e in out["events"]]
+        self.assertEqual(kinds, [("fork", None), ("lock", True), ("answer", None), ("lock", False),
+                                 ("answer", None), ("question", None)])
+        self.assertEqual(out["events"][0]["about_qid"], "LANE.1/Q1")
+        self.assertTrue(out["events"][2]["supersedes"])
+        self.assertEqual(out["events"][2]["reason"], "changed my mind")
+
+    def test_long_text_is_cut_to_one_line_in_the_feed(self):
+        st = self.store()
+        st.append(message(text="word " * 400))
+        ev = V.feed(st, ITEMS)["events"][0]
+        self.assertLessEqual(len(ev["text"]), V.FEED_SNIPPET)
+        self.assertNotIn("\n", ev["text"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

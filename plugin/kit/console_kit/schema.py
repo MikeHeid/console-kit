@@ -14,6 +14,10 @@ There are five kinds of record, and each has fixed writers (spec R4):
     lock      owner   locks one answer; a later answer SUPERSEDES it, never undoes it (D3)
     anchor    agent   re-anchors the CURRENT lock's conditions, with evidence (0.5.0, `agent.py reanchor`);
                       the server computes it, and no route takes one from a writer
+
+0.7.0 adds no kind. It adds two optional shapes, each of which a 0.6.0 kit
+refuses by name: a chat message (a `message` on the reserved thread CHAT_ITEM
+with intent 'chat') and a question's `evidence` rows.
 """
 
 from __future__ import annotations
@@ -33,10 +37,18 @@ WRITERS = {
     "anchor": frozenset({"agent"}),
 }
 QUESTION_KINDS = ("single", "multi", "free")
-# The owner's two requests to the agent: "fork" asks it to deliberate (§6), and
-# "process" says the answers are in and it should process them (§7.3).
-INTENTS = ("fork", "process")
+# The owner's requests to the agent: "fork" asks it to deliberate (§6),
+# "process" says the answers are in and it should process them (§7.3), and
+# "chat" (0.7.0) is a general message in the inbox's chat, which whichever
+# session is watching answers (owner, 2026-09-29).
+INTENTS = ("fork", "process", "chat")
 OWNER_INTENTS = frozenset(INTENTS)
+# The chat's thread (0.7.0). It is not a register item: it can never be one,
+# because ITEM_ID refuses a leading "@", so no project item can share its
+# thread. A kit before 0.7.0 refuses a store holding it BY NAME (the item id
+# and the intent), rather than reading the chat as some item's thread.
+CHAT_ITEM = "@chat"
+MAX_CHAT = 4000          # characters in one chat message: a question, not a document
 FOCUSES = ("code", "design", "ui", "backend", "whole")
 MODES = ("explore", "tighten")
 # The seats a follow-up round may call (D13), and a typed seat: `other:<role>`,
@@ -54,6 +66,15 @@ VALID_IF_KINDS = ("file_sha256", "item_status", "excerpt")
 # by accident; too long, and it is a whole-file hash by another name.
 MIN_EXCERPT = 8        # characters, after normalising
 MAX_EXCERPT = 4000     # characters, as written
+# Structured evidence on a question (0.7.0): each row cites lines, and may say
+# the command that was run and what it printed. The SERVER reads the cited
+# lines when the question is asked and stores them as the row's `text`, so the
+# review form can say later whether they changed; a writer never supplies it.
+MAX_EVIDENCE = 8               # rows on one question
+MAX_EVIDENCE_LINES = 200       # lines one row may cite
+MAX_EVIDENCE_RESULT = 2000     # characters of a row's `result`
+EVIDENCE_FIELDS = frozenset({"cite", "command", "result", "text"})
+CITE = re.compile(r"^(?P<path>[A-Za-z0-9_.\-/]+):(?P<a>[1-9][0-9]{0,6})(?:-(?P<b>[1-9][0-9]{0,6}))?$")
 
 # The fields the WRITER supplies; `id`, `seq` and `ts` belong to the store.
 REQUIRED = {
@@ -67,7 +88,8 @@ REQUIRED = {
 # every existing record stays valid, and a kit from before them refuses a
 # record that carries them BY NAME (`unknown field(s)`) rather than dropping them.
 OPTIONAL = {
-    "question": frozenset({"forked_from", "star_by"}),
+    # 0.7.0: `evidence`. A kit before it refuses a question carrying it, by name.
+    "question": frozenset({"forked_from", "star_by", "evidence"}),
     "message": frozenset({"reply_to", "intent", "focus", "mode", "roles", "follow_up_of", "about_qid"}),
     "answer": frozenset({"supersedes", "reason"}),
     # 0.5.0: the conditions a RE-lock was taken against, computed by the server.
@@ -191,6 +213,62 @@ def _check_question(rec: dict) -> list[str]:
         errs.append(f"star {star!r} is not one of the options")
     errs += _check_fork_fields(rec, star)
     errs += check_conditions(rec["valid_if"], "valid_if")
+    if "evidence" in rec:
+        errs += check_evidence(rec["evidence"], stored=True)
+    return errs
+
+
+def cite_parts(cite: object) -> tuple[str, int, int] | None:
+    """(path, first line, last line) of a well-formed evidence `cite`, or None."""
+    m = CITE.fullmatch(cite) if isinstance(cite, str) and len(cite) <= MAX_LINE else None
+    if not m:
+        return None
+    path, a = m.group("path"), int(m.group("a"))
+    b = int(m.group("b") or a)
+    if path.startswith("/") or ".." in path.split("/") or "" in path.split("/"):
+        return None
+    return path, a, b
+
+
+def check_evidence(ev: object, *, stored: bool) -> list[str]:
+    """Check a question's `evidence` rows (0.7.0).
+
+    `stored` is True for a record as the store holds it, where every row
+    carries the `text` the server read; False for a writer's request, which
+    must NOT carry one (the server reads the lines itself).
+    """
+    if not isinstance(ev, list) or not 1 <= len(ev) <= MAX_EVIDENCE:
+        return [f"evidence must be a list of 1 to {MAX_EVIDENCE} rows"]
+    errs: list[str] = []
+    for n, row in enumerate(ev, 1):
+        where = f"evidence row {n}"
+        if not isinstance(row, dict) or "cite" not in row:
+            errs.append(f"{where} must be an object with a cite")
+            continue
+        extra = sorted(set(row) - EVIDENCE_FIELDS)
+        if extra:
+            errs.append(f"{where}: unknown field(s) {', '.join(extra)}")
+        parts = cite_parts(row["cite"])
+        if parts is None:
+            errs.append(f"{where}: cite {row['cite']!r} must be a relative path inside the project with "
+                        f":line or :start-end, no '..'")
+        elif parts[2] < parts[1] or parts[2] - parts[1] + 1 > MAX_EVIDENCE_LINES:
+            errs.append(f"{where}: cite {row['cite']!r} must name 1 to {MAX_EVIDENCE_LINES} lines, start before end")
+        if "command" in row:
+            errs += one_line(row["command"], f"{where} command")
+        if "result" in row:
+            r = row["result"]
+            if not isinstance(r, str) or not r.strip():
+                errs.append(f"{where} result must be a non-empty string")
+            elif len(r) > MAX_EVIDENCE_RESULT:
+                errs.append(f"{where} result is {len(r)} characters; the limit is {MAX_EVIDENCE_RESULT}")
+        if stored:
+            t = row.get("text")
+            if not isinstance(t, str) or not t.strip() or len(t) > MAX_EXCERPT:
+                errs.append(f"{where}: text must be the cited lines as read when asked, 1 to {MAX_EXCERPT} "
+                            f"characters")
+        elif "text" in row:
+            errs.append(f"{where}: text is the server's to read from the cited lines, not the writer's")
     return errs
 
 
@@ -246,7 +324,8 @@ def _check_condition(c: object) -> list[str]:
 
 def _check_message(rec: dict) -> list[str]:
     errs = _text(rec, "text")
-    if not isinstance(rec["item"], str) or not ITEM_ID.match(rec["item"]):
+    chat = rec["item"] == CHAT_ITEM
+    if not chat and (not isinstance(rec["item"], str) or not ITEM_ID.match(rec["item"])):
         errs.append(f"item {rec['item']!r} is not an item id")
     if "reply_to" in rec and not isinstance(rec["reply_to"], str):
         errs.append("reply_to must be a record id")
@@ -257,6 +336,14 @@ def _check_message(rec: dict) -> list[str]:
     if isinstance(intent, str) and intent in OWNER_INTENTS and rec["by"] != "owner":
         # An agent that could write either could start its own deliberation or processing run.
         errs.append(f"intent {intent!r} is the owner's request; only the owner writes it")
+    # The chat (0.7.0): the owner's messages there all carry intent 'chat', so each
+    # one wakes a watching session, and 'chat' is said nowhere else.
+    if intent == "chat" and not chat:
+        errs.append(f"intent 'chat' belongs to the chat thread, item {CHAT_ITEM!r}")
+    if chat and rec["by"] == "owner" and intent != "chat":
+        errs.append(f"an owner message on {CHAT_ITEM} carries intent 'chat'")
+    if chat and rec["by"] == "owner" and isinstance(rec["text"], str) and len(rec["text"]) > MAX_CHAT:
+        errs.append(f"a chat message is {len(rec['text'])} characters; the limit is {MAX_CHAT}")
     if intent == "fork":
         if "mode" not in rec:
             errs.append("a fork says its mode: explore or tighten")

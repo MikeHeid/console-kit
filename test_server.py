@@ -864,5 +864,492 @@ class HealthTests(unittest.TestCase):
         self.assertTrue(json.loads(out)["ok"])
 
 
+# -- 0.7.0: a live console ---------------------------------------------------------------
+
+
+class _Live:
+    """Shared setup for the 0.7.0 routes: the real server, the real gate, a real store."""
+
+    setUp, tearDown, req, doorbell = ServerTests.setUp, ServerTests.tearDown, ServerTests.req, ServerTests.doorbell
+    agent_cli, answer = ServerTests.agent_cli, ServerTests.answer
+
+    @staticmethod
+    def seed_q(**over):
+        """The seed question as an agent would post it (no `by`: the server stamps it)."""
+        return {**{k: v for k, v in SEED[0].items() if k != "by"}, **over}
+
+    def agent_post(self, path, body):
+        return SV.agent_request(self.cfg.socket, "POST", path, body)
+
+    def owner_msg(self, **body):
+        body.setdefault("nonce", "own" + os.urandom(6).hex())
+        code, out = self.req("POST", "/api/message", body, tok=token())
+        self.assertEqual(code, 200, out)
+        return out["record"]
+
+    def fork(self, mode="tighten"):
+        return self.owner_msg(item="LANE.1", text="deliberate", intent="fork", mode=mode)
+
+    def round_q(self, fork_id, n, **over):
+        body = {"qid": f"LANE.1/Q{n}", "item": "LANE.1", "text": f"Finding {n}?", "kind": "single",
+                "options": [{"id": "fix", "label": "Fix now"}, {"id": "record", "label": "Record in findings.md"},
+                            {"id": "leave", "label": "Leave it"}],
+                "star": "fix", "star_by": "panel", "forked_from": fork_id,
+                "source": "architect/40-specs/owner-console.md:1", "valid_if": [], "nonce": f"roundq{n}{fork_id[:6]}"}
+        body.update(over)
+        code, out = self.agent_post("/question", body)
+        self.assertEqual(code, 200, out)
+        return out["record"]
+
+    def get(self, path, tok=True):
+        return self.req("GET", path, tok=token() if tok else None)
+
+
+class LiveWaitTests(_Live, unittest.TestCase):
+    """GET /api/wait: the long poll the page's live loop runs on."""
+
+    def seq_ver(self):
+        code, out = self.get("/api/wait?since=0&timeout=0")
+        self.assertEqual(code, 200, out)
+        return out["seq"], out["ver"]
+
+    def test_wait_is_behind_the_gate(self):
+        # Catches: the new route answered before _gate(), so anyone reaching the port could
+        # learn the store's size and the agent's state, and hold server threads open.
+        t0 = time.monotonic()
+        self.assertEqual(self.req("GET", "/api/wait?since=0")[0], 403)
+        self.assertEqual(self.req("GET", "/api/wait?since=0", tok=token(key=OTHER))[0], 403)
+        self.assertLess(time.monotonic() - t0, 5)  # refused at once, never parked on the condition
+
+    def test_a_page_behind_the_store_is_answered_at_once(self):
+        # Catches: a wait that always parks for the full timeout, so a page that missed a
+        # write (opened mid-change, or after a sleep) waits 25 s to catch up.
+        t0 = time.monotonic()
+        code, out = self.get("/api/wait?since=0&timeout=20")
+        self.assertEqual(code, 200, out)
+        self.assertLess(time.monotonic() - t0, 3)
+        self.assertEqual((out["seq"], out["changed"]), (1, True))
+        self.assertRegex(out["ver"], r"^[0-9a-f]{8}\.[0-9]+$")
+        self.assertIn("listening", out["cursor"])
+
+    def test_nothing_changed_times_out_with_changed_false(self):
+        # Catches: a wait that returns at once when nothing changed (the page would then spin,
+        # hammering the server), and one that ignores its timeout.
+        seq, ver = self.seq_ver()
+        t0 = time.monotonic()
+        code, out = self.get(f"/api/wait?since={seq}&ver={ver}&timeout=0.4")
+        took = time.monotonic() - t0
+        self.assertEqual(code, 200, out)
+        self.assertFalse(out["changed"])
+        self.assertGreaterEqual(took, 0.35)
+        self.assertLess(took, 5)
+
+    def _wait_in_thread(self, seq, ver, timeout=10):
+        got = {}
+
+        def run():
+            t0 = time.monotonic()
+            got["resp"] = self.get(f"/api/wait?since={seq}&ver={ver}&timeout={timeout}")
+            got["took"] = time.monotonic() - t0
+        th = threading.Thread(target=run)
+        th.start()
+        time.sleep(0.3)
+        return th, got
+
+    def test_an_agent_question_wakes_a_waiting_page(self):
+        # Catches: a wait that only polls (sleeping out its timeout) and one woken only by OWNER
+        # writes: a new question comes through the agent's door, and must appear without reload.
+        seq, ver = self.seq_ver()
+        th, got = self._wait_in_thread(seq, ver)
+        code, out = self.agent_post("/question", self.seed_q(qid="LANE.1/Q2", nonce="wakeq00002"))
+        self.assertEqual(code, 200, out)
+        th.join(10)
+        code, body = got["resp"]
+        self.assertEqual(code, 200, body)
+        self.assertLess(got["took"], 5)
+        self.assertEqual((body["seq"], body["changed"]), (seq + 1, True))
+
+    def test_the_agent_marking_work_wakes_a_page_with_no_store_change(self):
+        # Catches: a wait keyed on the store seq alone: "agent active" is not a store record,
+        # so the chip would lag by a whole poll.
+        seq, ver = self.seq_ver()
+        th, got = self._wait_in_thread(seq, ver)
+        self.assertEqual(self.agent_post("/working", {"items": ["LANE.1"]})[0], 200)
+        th.join(10)
+        code, body = got["resp"]
+        self.assertEqual(code, 200, body)
+        self.assertLess(got["took"], 5)
+        self.assertFalse(body["changed"])           # the store did not move...
+        self.assertNotEqual(body["ver"], ver)       # ...but the version did
+        self.assertIn("LANE.1", body["cursor"]["working"])
+
+    def test_a_retried_write_wakes_nobody(self):
+        # Catches: a bump on every append call, so a flaky network's retry re-renders every tab.
+        self.assertEqual(self.req("POST", "/api/answer", self.answer(), tok=token())[0], 200)
+        seq, ver = self.seq_ver()
+        th, got = self._wait_in_thread(seq, ver, timeout=1)
+        self.assertEqual(self.req("POST", "/api/answer", self.answer(), tok=token())[0], 200)  # same nonce
+        th.join(10)
+        self.assertFalse(got["resp"][1]["changed"])
+        self.assertEqual(got["resp"][1]["ver"], ver)
+
+    def test_bad_wait_parameters_are_refused_by_name(self):
+        # Catches: an unbounded timeout (a thread parked for an hour) and loose parsing.
+        for q in ("", "?since=-1", "?since=x", "?since=0&timeout=26", "?since=0&timeout=1e3",
+                  "?since=0&other=1", "?since=0&since=1", "?since=0&ver=../etc"):
+            with self.subTest(q=q):
+                code, body = self.get("/api/wait" + q)
+                self.assertEqual(code, 400, body)
+
+    def test_too_many_open_polls_are_told_to_back_off(self):
+        # Catches: an unbounded number of parked threads: the page backs off on 429.
+        self.console._waiters = SV.MAX_WAITERS
+        seq, ver = self.seq_ver()  # behind-the-store answers never park, so they are not counted
+        code, body = self.get(f"/api/wait?since={seq}&ver={ver}&timeout=1")
+        self.assertEqual(code, 429, body)
+
+
+class FeedTests(_Live, unittest.TestCase):
+    """GET /api/feed: every store record as an event, newest first, filterable."""
+
+    def build(self):
+        a = self.req("POST", "/api/answer", self.answer(), tok=token())[1]["record"]
+        self.req("POST", "/api/lock", {"qid": "LANE.1/Q1", "answer": a["id"], "nonce": "locknonce01"}, tok=token())
+        f = self.fork()
+        self.round_q(f["id"], 2)
+        self.agent_post("/message", {"item": "LANE.1", "text": "a reply", "nonce": "agentreply1"})
+        self.owner_msg(item="LANE", text="a note on the lane")
+        self.owner_msg(item="@chat", text="hello?", intent="chat")
+        self.owner_msg(item="LANE.1", text="Answers are in", intent="process")
+        return f
+
+    def test_feed_is_behind_the_gate(self):
+        self.assertEqual(self.req("GET", "/api/feed")[0], 403)
+
+    def test_every_kind_appears_newest_first(self):
+        # Catches: a feed built from the view (which drops locks, anchors and chat) instead of
+        # the store, and one in oldest-first order.
+        self.build()
+        code, out = self.get("/api/feed")
+        self.assertEqual(code, 200, out)
+        kinds = [e["kind"] for e in out["events"]]
+        self.assertEqual(kinds, ["process", "chat", "note", "reply", "question", "fork", "lock", "answer", "question"])
+        seqs = [e["seq"] for e in out["events"]]
+        self.assertEqual(seqs, sorted(seqs, reverse=True))
+        lock = next(e for e in out["events"] if e["kind"] == "lock")
+        self.assertEqual((lock["item"], lock["qid"], lock["relock"]), ("LANE.1", "LANE.1/Q1", False))
+        self.assertIsNone(out["next_before"])
+
+    def test_filters_by_kind_and_by_item_subtree(self):
+        # Catches: an item filter that matches the exact id only (LANE's feed would miss its
+        # phase's events), and a kind filter applied after the page is cut (short pages).
+        self.build()
+        _, out = self.get("/api/feed?kind=lock,answer")
+        self.assertEqual([e["kind"] for e in out["events"]], ["lock", "answer"])
+        _, out = self.get("/api/feed?item=LANE")
+        self.assertIn("note", [e["kind"] for e in out["events"]])
+        self.assertIn("lock", [e["kind"] for e in out["events"]])  # LANE.1 is under LANE
+        _, out = self.get("/api/feed?item=LANE.1")
+        self.assertNotIn("note", [e["kind"] for e in out["events"]])  # LANE's own note is not LANE.1's
+        _, out = self.get("/api/feed?item=@chat")
+        self.assertEqual([e["kind"] for e in out["events"]], ["chat"])
+
+    def test_pages_older_events_with_before(self):
+        # Catches: pagination that repeats or skips an event at the page boundary.
+        self.build()
+        _, first = self.get("/api/feed?limit=4")
+        self.assertEqual(len(first["events"]), 4)
+        _, rest = self.get(f"/api/feed?limit=50&before={first['next_before']}")
+        _, whole = self.get("/api/feed")
+        self.assertEqual([e["seq"] for e in first["events"] + rest["events"]], [e["seq"] for e in whole["events"]])
+
+    def test_bad_feed_parameters_are_refused(self):
+        for q in ("?kind=merge", "?limit=0", "?limit=201", "?item=../x", "?before=0", "?x=1"):
+            with self.subTest(q=q):
+                self.assertEqual(self.get("/api/feed" + q)[0], 400)
+
+
+class EvidenceTests(_Live, unittest.TestCase):
+    """Structured evidence on a question: cited lines read by the server, and checked again for the form."""
+
+    SPEC = "docs/spec.md"
+
+    def write_spec(self, text):
+        p = self.cfg.root / self.SPEC
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+
+    def ask(self, evidence, n=2):
+        return self.agent_post("/question", self.seed_q(qid=f"LANE.1/Q{n}", nonce=f"evidq{n:04d}x",
+                                                        evidence=evidence))
+
+    def test_the_server_reads_the_cited_lines_when_asked(self):
+        # Catches: storing whatever `text` the writer sends (an agent could claim lines say
+        # something they do not), and a question stored with no record of what it cited.
+        self.write_spec("line one\nThe cap is 64 KiB.\nline three\n")
+        code, out = self.ask([{"cite": f"{self.SPEC}:2", "command": "wc -c bundle", "result": "65536"}])
+        self.assertEqual(code, 200, out)
+        self.assertEqual(out["record"]["evidence"], [{"cite": f"{self.SPEC}:2", "command": "wc -c bundle",
+                                                      "result": "65536", "text": "The cap is 64 KiB."}])
+        code, out = self.ask([{"cite": f"{self.SPEC}:2", "text": "forged"}], n=3)
+        self.assertEqual(code, 400)
+        self.assertIn("server's to read", out["error"])
+
+    def test_evidence_paths_stay_inside_the_project(self):
+        # Catches: an evidence cite that reads outside the tree (the form shows the lines, so
+        # this would be a file-read primitive for anyone who can post a question).
+        self.write_spec("a\nb\n")
+        outside = Path(self.tmp.name).parent / "secret.txt"
+        for cite in ("../secret.txt:1", "/etc/passwd:1", f"{self.SPEC}/../../x:1", "docs//spec.md:1",
+                     f"{self.SPEC}:0", f"{self.SPEC}:2-1", f"{self.SPEC}:1-201", f"{self.SPEC}", "a b.md:1"):
+            with self.subTest(cite=cite):
+                code, out = self.ask([{"cite": cite}])
+                self.assertEqual(code, 400, out)
+        self.assertFalse(outside.exists())
+
+    def test_symlinks_out_of_the_project_are_refused(self):
+        # Catches: a relative path that resolves outside the root through a symlink.
+        target = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(target))
+        (target / "secret.txt").write_text("the owner's secret line\n")
+        (self.cfg.root / "link").symlink_to(target)
+        code, out = self.ask([{"cite": "link/secret.txt:1"}])
+        self.assertEqual(code, 400, out)
+        self.assertIn("outside the project", out["error"])
+
+    def test_caps_and_shapes(self):
+        # Catches: unbounded rows, a multi-line command (rendered inline), a huge result.
+        self.write_spec("x" * 20 + "\n")
+        row = {"cite": f"{self.SPEC}:1"}
+        cases = {"rows": [row] * 9, "command": [{**row, "command": "a\nb"}],
+                 "result": [{**row, "result": "r" * 2001}], "blank": [{"cite": f"{self.SPEC}:2"}],
+                 "missing": [{"cite": "docs/nope.md:1"}], "past end": [{"cite": f"{self.SPEC}:5"}],
+                 "extra": [{**row, "url": "x"}], "empty": []}
+        for name, ev in cases.items():
+            with self.subTest(name=name):
+                code, out = self.ask(ev)
+                self.assertEqual(code, 400, (name, out))
+        self.assertEqual(len(self.console.store.records()), 1)  # nothing got in
+
+    def test_the_form_learns_whether_cited_lines_changed(self):
+        # Catches: a form that shows the lines as asked and calls them current, and one that
+        # calls a moved paragraph "changed" (the 0.5.0 excerpt rule: moving is not changing).
+        self.write_spec("intro\nThe cap is 64 KiB.\nThe seats run in parallel.\nend\n")
+        ev = [{"cite": f"{self.SPEC}:2"}, {"cite": f"{self.SPEC}:3"}, {"cite": f"{self.SPEC}:4"}]
+        self.assertEqual(self.ask(ev)[0], 200)
+        code, out = self.get("/api/evidence?qid=LANE.1/Q2")
+        self.assertEqual([r["state"] for r in out["evidence"]], ["unchanged"] * 3)
+        self.write_spec("new first line\nintro\nThe cap is 64 KiB.\nThe seats run one at a time.\nend\n")
+        code, out = self.get("/api/evidence?qid=LANE.1/Q2")
+        self.assertEqual(code, 200, out)
+        got = {r["cite"]: r for r in out["evidence"]}
+        self.assertEqual(got[f"{self.SPEC}:2"]["state"], "moved")
+        self.assertEqual(got[f"{self.SPEC}:2"]["line"], 3)
+        self.assertEqual(got[f"{self.SPEC}:3"]["state"], "changed")
+        self.assertIn("one at a time", got[f"{self.SPEC}:3"]["diff"])
+        self.assertEqual(got[f"{self.SPEC}:4"]["state"], "moved")
+        (self.cfg.root / self.SPEC).unlink()
+        _, out = self.get("/api/evidence?qid=LANE.1/Q2")
+        self.assertEqual({r["state"] for r in out["evidence"]}, {"missing"})
+
+    def test_a_question_without_evidence_has_none(self):
+        # Old questions keep working: the form shows their text.
+        code, out = self.get("/api/evidence?qid=LANE.1/Q1")
+        self.assertEqual((code, out["evidence"]), (200, []))
+        self.assertEqual(self.get("/api/evidence?qid=LANE.1/Q9")[0], 404)
+        self.assertEqual(self.get("/api/evidence?qid=../x")[0], 400)
+        self.assertEqual(self.req("GET", "/api/evidence?qid=LANE.1/Q1")[0], 403)
+
+
+class ChatTests(_Live, unittest.TestCase):
+    """The inbox's chat: an owner message on @chat that wakes a watching session."""
+
+    def chat(self, text="is the build green?", nonce=None):
+        body = {"item": "@chat", "text": text, "intent": "chat", "nonce": nonce or "chat" + os.urandom(6).hex()}
+        return self.req("POST", "/api/message", body, tok=token())
+
+    def test_a_chat_message_rings_the_doorbell_and_wakes_a_watch(self):
+        # Catches: a chat stored but not rung (no session would ever wake), and a ring the
+        # watch does not count as a wake line.
+        from console_kit import doorbell as D
+        code, out = self.chat()
+        self.assertEqual(code, 200, out)
+        bell = self.doorbell()
+        self.assertEqual((bell[-1]["item"], bell[-1]["intent"]), ("@chat", "chat"))
+        woke = D.watch(self.cfg.inbox, 0, poll=0.05, timeout=2)
+        self.assertEqual([w["intent"] for w in woke], ["chat"])
+        rc, printed, _ = self.agent_cli("watch", "--since", "0", "--timeout", "2", "--poll", "0.05")
+        self.assertEqual(rc, 0)
+        self.assertIn('"chat"', printed)
+
+    def test_the_agent_replies_in_the_same_thread(self):
+        # Catches: a chat reply refused because @chat is not a register item, and a chat that
+        # stays "waiting on an agent" after the agent answered.
+        code, out = self.chat()
+        _, view = self.get("/api/view")
+        self.assertTrue(view["view"]["chat"]["awaiting_agent"])
+        rc, printed, err = self.agent_cli("reply", "@chat", "Yes, green at abc123.", "--reply-to", out["record"]["id"])
+        self.assertEqual(rc, 0, err + printed)
+        _, view = self.get("/api/view")
+        self.assertFalse(view["view"]["chat"]["awaiting_agent"])
+        self.assertEqual([m["by"] for m in view["view"]["threads"]["@chat"]], ["owner", "agent"])
+        self.assertNotIn("@chat", view["view"]["awaiting_agent"])  # never counted as a register item
+
+    def test_chat_is_only_the_owners_and_only_on_the_chat_thread(self):
+        # Catches: an agent that could ring its own wake-ups, and "chat" smuggled onto an item.
+        self.assertEqual(self.req("POST", "/api/message", {"item": "@chat", "text": "x", "nonce": "plainchat1"},
+                                  tok=token())[0], 400)
+        self.assertEqual(self.req("POST", "/api/message", {"item": "LANE.1", "text": "x", "intent": "chat",
+                                                           "nonce": "itemchat01"}, tok=token())[0], 400)
+        self.assertEqual(self.agent_post("/message", {"item": "@chat", "text": "x", "intent": "chat",
+                                                 "nonce": "agentchat1"})[0], 400)
+        self.assertEqual(self.agent_post("/question", self.seed_q(qid="@chat/Q1", item="@chat",
+                                                                          nonce="chatquest1"))[0], 400)
+
+    def test_chat_is_size_capped_and_rate_limited(self):
+        # Catches: an unbounded chat (each message wakes an agent run), and a limiter that also
+        # refuses a retry of a message already stored (the owner would think it was lost).
+        self.assertEqual(self.chat("x" * 4001)[0], 400)
+        for n in range(SV.CHAT_PER_MINUTE):
+            self.assertEqual(self.chat(f"q{n}", nonce=f"chatrate{n:02d}")[0], 200)
+        code, out = self.chat("one more")
+        self.assertEqual(code, 429, out)
+        self.assertIn("Nothing you typed was lost", out["error"])
+        self.assertEqual(self.chat("q0", nonce="chatrate00")[0], 200)  # a retry of one already stored
+        lines = [b for b in self.doorbell() if b.get("intent") == "chat"]
+        self.assertEqual(len(lines), SV.CHAT_PER_MINUTE)
+
+
+class LockAllTests(_Live, unittest.TestCase):
+    """POST /api/lock-all: one press answers and locks a round's drafts, then sends one process request."""
+
+    def setUp(self):
+        _Live.setUp(self)
+        self.f = self.fork()
+        self.qs = [self.round_q(self.f["id"], n) for n in (2, 3, 4)]
+
+    def lock_all(self, entries, nonce="lockallnonce1", origin=True):
+        return self.req("POST", "/api/lock-all", {"fork": self.f["id"], "entries": entries, "nonce": nonce},
+                        tok=token(), origin=origin)
+
+    def entry(self, n, pick="fix", text=""):
+        return {"qid": f"LANE.1/Q{n}", "picks": [pick], "own_text": text}
+
+    def processes(self):
+        return [b for b in self.doorbell() if b.get("intent") == "process"]
+
+    def state(self, qid):
+        return self.get("/api/view")[1]["view"]["questions"][qid]["state"]
+
+    def test_lock_all_is_gated_and_needs_the_origin(self):
+        # Catches: a batch write reachable without Access, or from another site's form.
+        self.assertEqual(self.req("POST", "/api/lock-all", {}, tok=None)[0], 403)
+        self.assertEqual(self.lock_all([self.entry(2)], origin=False)[0], 403)
+        self.assertEqual(self.state("LANE.1/Q2"), "awaiting_you")
+
+    def test_it_locks_each_drafted_answer_and_rings_process_once(self):
+        # Catches: a batch that locks but sends no process request (the agent never learns),
+        # one that sends a process request per question, and one that touches a left question.
+        code, out = self.lock_all([self.entry(2, text="Fix it now, it is small."), self.entry(3, "record")])
+        self.assertEqual(code, 200, out)
+        self.assertEqual([r["status"] for r in out["results"]], ["locked", "locked"])
+        self.assertEqual((self.state("LANE.1/Q2"), self.state("LANE.1/Q3"), self.state("LANE.1/Q4")),
+                         ("locked", "locked", "awaiting_you"))
+        self.assertEqual(len(self.processes()), 1)
+        self.assertEqual(out["process"]["item"], "LANE.1")
+        self.assertIn("LANE.1/Q2, LANE.1/Q3", out["process"]["text"])
+        own = self.console.store.head("LANE.1/Q2")["own_text"]
+        self.assertEqual(own, "Fix it now, it is small.")  # the comment is the answer's own words
+
+    def test_an_unlocked_answer_the_draft_keeps_is_locked_not_answered_again(self):
+        # Catches: a second, identical answer written on top of the owner's (noise in the record).
+        self.req("POST", "/api/answer", {"qid": "LANE.1/Q2", "picks": ["leave"], "own_text": "", "nonce": "earlyans01"},
+                 tok=token())
+        code, out = self.lock_all([self.entry(2, "leave")])
+        self.assertEqual(code, 200, out)
+        self.assertEqual(len(self.console.store.answers("LANE.1/Q2")), 1)
+        self.assertEqual(self.state("LANE.1/Q2"), "locked")
+
+    def test_one_refusal_refuses_the_whole_batch_and_names_it(self):
+        # Catches: a batch that locks the good ones and drops the bad one silently ("nothing
+        # locked halfway"), and a refusal that does not say which question.
+        seq = self.console.store.seq()
+        bell = len(self.doorbell())
+        code, out = self.lock_all([self.entry(2), self.entry(3, "no_such_option"), self.entry(4)])
+        self.assertEqual(code, 409, out)
+        self.assertIn("nothing was locked", out["error"])
+        by = {r["qid"]: r for r in out["results"]}
+        self.assertEqual(by["LANE.1/Q3"]["status"], "refused")
+        self.assertIn("no_such_option", by["LANE.1/Q3"]["error"])
+        self.assertEqual((by["LANE.1/Q2"]["status"], by["LANE.1/Q4"]["status"]), ("ready", "ready"))
+        self.assertEqual((self.console.store.seq(), len(self.doorbell())), (seq, bell))
+
+    def test_a_question_from_another_round_is_refused(self):
+        # Catches: a form that could lock any question by qid (the seed is not in this round).
+        code, out = self.lock_all([self.entry(2), {"qid": "LANE.1/Q1", "picks": ["a"], "own_text": ""}])
+        self.assertEqual(code, 409, out)
+        self.assertEqual(self.state("LANE.1/Q2"), "awaiting_you")
+
+    def test_locked_since_drafting_is_refused_unless_it_is_the_same_answer(self):
+        # Catches: a batch that silently supersedes a lock (D3 needs the owner's reason), and one
+        # that refuses a question already locked exactly as drafted (so a retry could never finish).
+        a = self.req("POST", "/api/answer", {**self.entry(2, "leave"), "nonce": "otherans01"}, tok=token())[1]["record"]
+        self.req("POST", "/api/lock", {"qid": "LANE.1/Q2", "answer": a["id"], "nonce": "otherlock1"}, tok=token())
+        code, out = self.lock_all([self.entry(2, "fix"), self.entry(3)])
+        self.assertEqual(code, 409, out)
+        self.assertIn("supersede", out["results"][0]["error"])
+        code, out = self.lock_all([self.entry(2, "leave"), self.entry(3)])
+        self.assertEqual(code, 200, out)
+        self.assertEqual([r["status"] for r in out["results"]], ["already_locked", "locked"])
+
+    def test_a_failure_part_way_is_reported_and_resumes(self):
+        # Catches: a partial write reported as success or as a blanket failure (the owner could
+        # not tell what landed), and a retry that double-locks, double-rings or gives up.
+        real = self.console.store._write
+        calls = []
+
+        def flaky(rec):
+            calls.append(rec["type"])
+            if len(calls) == 3:  # Q2's answer and lock land; Q3's answer does not
+                raise OSError(28, "No space left on device")
+            real(rec)
+        self.console.store._write = flaky
+        body = [self.entry(2), self.entry(3), self.entry(4)]
+        code, out = self.lock_all(body)
+        self.assertEqual(code, 500, out)
+        self.assertEqual([r["status"] for r in out["results"]], ["locked", "not_written", "not_written"])
+        self.assertIn("No space left", out["results"][1]["error"])
+        self.assertEqual(self.processes(), [])  # no process request for a batch that did not finish
+        self.console.store._write = real
+        code, out = self.lock_all(body)
+        self.assertEqual(code, 200, out)
+        self.assertEqual([r["status"] for r in out["results"]], ["already_locked", "locked", "locked"])
+        self.assertEqual(len(self.processes()), 1)
+        self.assertEqual(len(self.console.store.locks("LANE.1/Q2")), 1)
+
+    def test_pressing_again_after_success_changes_nothing(self):
+        # Catches: a double press that writes a second process request and wakes the agent twice.
+        body = [self.entry(2), self.entry(3)]
+        self.assertEqual(self.lock_all(body)[0], 200)
+        seq = self.console.store.seq()
+        code, out = self.lock_all(body)
+        self.assertEqual(code, 200, out)
+        self.assertEqual([r["status"] for r in out["results"]], ["already_locked", "already_locked"])
+        self.assertEqual((self.console.store.seq(), len(self.processes())), (seq, 1))
+
+    def test_bad_batches_are_refused_before_the_store_is_read(self):
+        for body in ({}, {"fork": self.f["id"], "entries": [], "nonce": "lockallnonce1"},
+                     {"fork": "x", "entries": [self.entry(2)], "nonce": "lockallnonce1"},
+                     {"fork": self.f["id"], "entries": [self.entry(2), self.entry(2)], "nonce": "lockallnonce1"},
+                     {"fork": self.f["id"], "entries": [{**self.entry(2), "extra": 1}], "nonce": "lockallnonce1"},
+                     {"fork": self.f["id"], "entries": [self.entry(2)], "nonce": "n" * 49}):
+            with self.subTest(body=body):
+                self.assertEqual(self.req("POST", "/api/lock-all", body, tok=token())[0], 400)
+        seed = next(r for r in self.console.store.records() if r["type"] == "question")
+        code, _ = self.req("POST", "/api/lock-all", {"fork": seed["id"], "entries": [self.entry(2)],
+                                                     "nonce": "lockallnonce1"}, tok=token())
+        self.assertEqual(code, 400)  # the id of a question, not of a fork message
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

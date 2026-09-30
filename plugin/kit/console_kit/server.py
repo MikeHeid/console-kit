@@ -18,6 +18,11 @@ Every owner write also appends one line to the doorbell file (D8), which an
 open agent session watches. The view is computed per request and never
 stored (R5).
 
+The live console (0.7.0) adds four owner routes, each behind the same gate
+(and, for the write, the same Origin check): `GET /api/wait` (a long poll on
+the store's seq), `GET /api/feed`, `GET /api/evidence` and
+`POST /api/lock-all`. No route was added to the agent's door or the health door.
+
 `/health` (0.6.0) is answered on the agent's door, and on a third door only
 when `--health-port` asks for one. It is NEVER answered on the owner's door
 without the Access token: that door keeps its rule that no path skips the
@@ -28,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import collections
 import ipaddress
 import json
 import os
@@ -43,6 +49,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
+from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from . import anchors as A
@@ -56,6 +63,19 @@ from .store import Store, StoreError
 HOST = "127.0.0.1"          # never configurable: the tunnel is the only way in
 MAX_BODY = 64 * 1024        # far above any real answer (MAX_TEXT is 20 000 characters)
 OWNER_ROUTES = {"/api/message": "message", "/api/answer": "answer", "/api/lock": "lock"}
+# The live console (0.7.0). A long poll: the page asks "has anything changed
+# since seq S?" and the server answers the moment something does, or after at
+# most WAIT_MAX seconds with "no". Well inside Cloudflare's 100 s response
+# timeout, and one request per owner tab at a time; a server-sent stream was
+# not used because a tunnel may buffer one, and it needs nothing a plain GET
+# behind the same gate does not already have.
+WAIT_MAX = 25.0
+MAX_WAITERS = 16            # open long polls at once; past this a poll is told to back off (429)
+# The chat (0.7.0): at most this many owner messages a minute and an hour.
+CHAT_PER_MINUTE = 6
+CHAT_PER_HOUR = 60
+MAX_LOCK_ALL = 12           # entries in one "Lock all & process" (a round holds at most 5)
+LOCK_ALL_NONCE = 48         # characters: room for the per-record suffixes within the nonce limit
 AGENT_ROUTES = {"/question": "question", "/message": "message"}
 WRITER_FIELDS = ("by", "type", "schemaVersion")
 # Fields only the server computes on a lock (0.5.0): a page that sends one is refused.
@@ -78,9 +98,10 @@ class AuthError(Exception):
 
 
 class RequestError(Exception):
-    def __init__(self, code: int, message: str) -> None:
+    def __init__(self, code: int, message: str, extra: dict | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.extra = extra or {}  # more to say than one line: "Lock all" names each question's outcome
 
 
 def access_verifier(team_domain: str, aud: str,
@@ -155,6 +176,84 @@ class Console:
         os.chmod(cfg.state, 0o700)  # mkdir's mode is ignored for a directory that already exists
         self.store = Store(cfg.store)
         self._lock = threading.Lock()
+        # The live console (0.7.0): every change a page could show bumps `_epoch`
+        # and wakes the long polls waiting on `_changed`. `_boot` tells a page
+        # that the server restarted, so its old token can never match by luck.
+        self._changed = threading.Condition()
+        self._epoch = 0
+        self._boot = secrets.token_hex(4)
+        self._waiters = 0
+        self._chat_times: collections.deque[float] = collections.deque()
+
+    # -- live updates (0.7.0) --------------------------------------------------
+
+    def version(self) -> str:
+        return f"{self._boot}.{self._epoch}"
+
+    def _bump(self) -> None:
+        with self._changed:
+            self._epoch += 1
+            self._changed.notify_all()
+
+    def wait(self, since: int, ver: str | None, timeout: float) -> dict:
+        """Return as soon as the store has moved past `since` or anything else changed since `ver`, or after `timeout` s.
+
+        The answer always carries the store's seq, the version to send next
+        time, and the cursor (sync time, agent listening/active), which is
+        cheap to read and changes without a store record.
+        """
+        def moved() -> bool:
+            return self.store.seq() != since or (ver is not None and ver != self.version())
+        with self._changed:
+            if not moved():
+                if self._waiters >= MAX_WAITERS:
+                    raise RequestError(429, f"{MAX_WAITERS} live updates are already waiting; try again shortly")
+                self._waiters += 1
+                try:
+                    self._changed.wait_for(moved, timeout)
+                finally:
+                    self._waiters -= 1
+            seq, ver_now = self.store.seq(), self.version()
+        return {"seq": seq, "ver": ver_now, "changed": seq != since, "cursor": self.read_cursor()}
+
+    def feed(self, kinds: set[str] | None, item: str | None, before: int | None, limit: int) -> dict:
+        return V.feed(self.store, self.items(), kinds=kinds, item=item, before=before, limit=limit)
+
+    def evidence(self, qid: str) -> dict:
+        """A question's evidence rows with the cited lines as they are now, read server-side (0.7.0)."""
+        q = self.store.question(qid)
+        if q is None:
+            raise RequestError(404, f"no question {qid}")
+        rows = q.get("evidence") or []
+        tree = A.Tree(self.cfg.root, self._status(self.items()))
+        return {"qid": qid, "evidence": A.evidence_now(rows, tree)}
+
+    def _fill_evidence(self, body: dict) -> dict:
+        """Read a new question's evidence lines from the tree, or refuse the question naming each bad row."""
+        if "evidence" not in body:
+            return body
+        errs = S.check_evidence(body["evidence"], stored=False)
+        if errs:
+            raise RequestError(400, "; ".join(errs))
+        rows, errs = A.fill_evidence(body["evidence"], A.Tree(self.cfg.root, {}))
+        if errs:
+            raise RequestError(400, "; ".join(errs))
+        return {**body, "evidence": rows}
+
+    def _chat_gate(self) -> None:
+        """Refuse an owner chat message past CHAT_PER_MINUTE a minute or CHAT_PER_HOUR an hour; the caller holds `_lock`."""
+        now = time.monotonic()
+        while self._chat_times and now - self._chat_times[0] >= 3600:
+            self._chat_times.popleft()
+        last_min = [t for t in self._chat_times if now - t < 60]
+        if len(last_min) >= CHAT_PER_MINUTE:
+            wait = int(60 - (now - last_min[0])) + 1
+            raise RequestError(429, f"at most {CHAT_PER_MINUTE} chat messages a minute: try again in {wait}s. "
+                                    f"Nothing you typed was lost")
+        if len(self._chat_times) >= CHAT_PER_HOUR:
+            wait = int(3600 - (now - self._chat_times[0])) + 1
+            raise RequestError(429, f"at most {CHAT_PER_HOUR} chat messages an hour: try again in {wait // 60 + 1} "
+                                    f"min. Nothing you typed was lost")
 
     def items(self) -> dict[str, dict]:
         """The register as it is now. The store refuses writes to an item that is not in it (R7)."""
@@ -169,8 +268,11 @@ class Console:
             self.items()
             for q in self.adapter.seed_questions():
                 if self.store.question(q["qid"]) is None:
+                    q = self._fill_evidence(dict(q))  # a seed's evidence is read like any other question's
                     added.append(self.store.append({**q, "type": "question",
                                                     "schemaVersion": S.SCHEMA_VERSION})["qid"])
+        if added:
+            self._bump()
         return added
 
     def payload(self) -> dict:
@@ -231,6 +333,8 @@ class Console:
                     p["error"] = str(e)
                     continue
                 p["record"] = rec["id"]
+        if any("record" in p for p in plan):
+            self._bump()
         return {"dry_run": dry, "plan": plan}
 
     def _lock_anchors(self, body: dict, items: dict[str, dict]) -> None:
@@ -305,14 +409,150 @@ class Console:
             return [ans, self._append("lock", {"qid": qid, "answer": ans["id"], "nonce": nonce + "-l"},
                                       "owner", items)]
 
+    def lock_all(self, body: object) -> dict:
+        """"Lock all & process" (0.7.0): answer and lock each drafted question of one round, then send ONE process request.
+
+        The store is append-only, so a batch cannot be undone halfway. It is
+        made as close to all-or-nothing as that allows, and resumable where it
+        is not:
+
+        1. **Refused whole, before anything is written.** The whole batch,
+           the process request included, is first appended to a throwaway
+           copy of the store (`Store.trial`) under the write lock. If the
+           rules refuse ANY of it, nothing is written, and the answer names
+           every question's outcome (409).
+        2. **Then written for real, under the same hold of the lock**, so no
+           other write can land in between and make the trial wrong.
+        3. **A failure while writing** (a full disk) stops there. What was
+           written stays written, and the answer names each question as
+           `locked` or `not_written` (500). Sending the same drafts again
+           resumes: a question already locked with exactly the drafted answer
+           is `already_locked` and skipped, and the process request, same
+           nonce and same words, is stored once.
+
+        A question whose current answer was locked with a DIFFERENT answer
+        since the drafts were made is refused, never superseded here: a
+        supersede needs the owner's reason (D3), from that question's card.
+        """
+        keys = {"fork", "entries", "nonce"}
+        if not isinstance(body, dict) or set(body) != keys:
+            raise RequestError(400, 'lock-all takes {"fork": RECORD_ID, "entries": [{"qid", "picks", "own_text"}], '
+                                    '"nonce"}')
+        fork_id, entries, nonce = body["fork"], body["entries"], body["nonce"]
+        if not isinstance(nonce, str) or not S.NONCE.match(nonce) or len(nonce) > LOCK_ALL_NONCE:
+            raise RequestError(400, f"nonce must be 8-{LOCK_ALL_NONCE} of [A-Za-z0-9_-]")
+        if not isinstance(fork_id, str) or not S.RECORD_ID.match(fork_id):
+            raise RequestError(400, "fork must be the id of the round's fork message (24 lowercase hex)")
+        if (not isinstance(entries, list) or not 1 <= len(entries) <= MAX_LOCK_ALL
+                or not all(isinstance(e, dict) and set(e) == {"qid", "picks", "own_text"} for e in entries)):
+            raise RequestError(400, f"entries must be 1 to {MAX_LOCK_ALL} objects of exactly qid, picks, own_text")
+        qids = [e["qid"] for e in entries]
+        if not all(isinstance(q, str) for q in qids) or len(set(qids)) != len(qids):
+            raise RequestError(400, "each entry names a different qid")
+        with self._lock:
+            items = self.items()
+            fork = self.store.get(fork_id)
+            if fork is None or fork["type"] != "message" or fork.get("intent") != "fork":
+                raise RequestError(400, f"fork {fork_id} is not an owner fork message")
+            proc_body = {"item": fork["item"], "intent": "process", "nonce": nonce + "-p",
+                         "text": "Answers are in: process them. Locked from the review form (round "
+                                 f"{fork_id[:8]}): {', '.join(qids)}."}
+            # 1. The trial: every rule, nothing written.
+            trial = self.store.trial()
+            results, plan, ok = [], [], True
+            for n, e in enumerate(entries):
+                res = {"qid": e["qid"]}
+                results.append(res)
+                try:
+                    step = self._lock_all_step(trial, fork_id, n, e, nonce, None, items)
+                except RequestError as err:
+                    res.update(status="refused", error=str(err))
+                    ok = False
+                    continue
+                res["status"] = "already_locked" if step is None else "ready"
+                plan.append((res, e, n, step is not None))
+            try:
+                trial.append({**proc_body, "type": "message", "schemaVersion": S.SCHEMA_VERSION, "by": "owner"})
+            except StoreError as err:
+                ok = False
+                results.append({"qid": None, "status": "refused", "error": f"the process request: {err}"})
+            if not ok:
+                raise RequestError(409, "nothing was locked: the store would refuse part of this batch, named "
+                                        "below. Fix those and press Lock all again", {"results": results})
+            # 2. For real, under the same hold of the lock.
+            for i, (res, e, n, todo) in enumerate(plan):
+                if not todo:
+                    continue
+                try:
+                    ans, lk = self._lock_all_step(self.store, fork_id, n, e, nonce, self._append, items)
+                except (RequestError, OSError) as err:
+                    res.update(status="not_written", error=f"{type(err).__name__}: {err}")
+                    for later, _e, _n, later_todo in plan[i + 1:]:
+                        if later_todo:
+                            later.update(status="not_written", error="not reached: an earlier write failed")
+                    raise RequestError(500, "the batch stopped part way: the questions marked locked are "
+                                            "locked. Nothing else was written. Press Lock all again to finish; "
+                                            "what is already locked is skipped", {"results": results}) from None
+                res.update(status="locked", answer=ans["id"], lock=lk["id"])
+            try:
+                proc = self._append("message", proc_body, "owner", items)
+            except (RequestError, OSError) as err:
+                raise RequestError(500, f"every answer is locked, but the process request was not written "
+                                        f"({type(err).__name__}: {err}). Press Lock all again to send it",
+                                   {"results": results}) from None
+        return {"results": results, "process": proc}
+
+    def _lock_all_step(self, store: Store, fork_id: str, n: int, e: dict, nonce: str,
+                       append, items: dict) -> tuple[dict, dict] | None:
+        """Answer (if the draft differs from the current answer) and lock one question; None when already locked so.
+
+        With `append` None it appends to `store` directly (the trial); with
+        `self._append`, it writes for real (anchors, doorbell, live bump).
+        """
+        qid = e["qid"]
+        q = store.question(qid)
+        if q is None or q.get("forked_from") != fork_id:
+            raise RequestError(400, f"{qid} is not a question of this round")
+        picks, own = e["picks"], e["own_text"]
+        head = store.head(qid)
+        same = (head is not None and isinstance(picks, list) and isinstance(own, str)
+                and sorted(head["picks"]) == sorted(p for p in picks if isinstance(p, str))
+                and len(head["picks"]) == len(picks) and head["own_text"] == own)
+        if head is not None and store.lock_of(head["id"]) is not None:
+            if same:
+                return None
+            raise RequestError(409, f"{qid} was locked with a different answer since this was drafted; to change "
+                                    f"it, supersede it from its card and give a reason")
+
+        def put(kind: str, rec: dict) -> dict:
+            if append is not None:
+                return append(kind, rec, "owner", items)
+            try:
+                return store.append({**rec, "type": kind, "schemaVersion": S.SCHEMA_VERSION, "by": "owner"})
+            except StoreError as err:
+                raise RequestError(400, str(err)) from None
+        ans = head if same else put("answer", {"qid": qid, "picks": picks, "own_text": own,
+                                                "nonce": f"{nonce}-{n}a"})
+        lk = put("lock", {"qid": qid, "answer": ans["id"], "nonce": f"{nonce}-{n}l"})
+        return ans, lk
+
     def write(self, kind: str, body: object, by: str) -> dict:
         if not isinstance(body, dict):
             raise RequestError(400, "the body must be a JSON object")
         named = [f for f in WRITER_FIELDS + (SERVER_LOCK_FIELDS if kind == "lock" else ()) if f in body]
         if named:
             raise RequestError(400, f"{', '.join(named)} is the server's to set, not the writer's")
+        if kind == "question":
+            body = self._fill_evidence(body)  # reads files: outside the write lock
         with self._lock:
-            return self._append(kind, body, by, self.items())
+            chat = kind == "message" and by == "owner" and body.get("item") == S.CHAT_ITEM
+            if chat and self.store.existing({**body, "type": kind, "by": by}) is None:
+                self._chat_gate()  # a retry of a message already stored is not a new message
+            before = self.store.seq()
+            rec = self._append(kind, body, by, self.items())
+            if chat and self.store.seq() > before:
+                self._chat_times.append(time.monotonic())
+            return rec
 
     def _append(self, kind: str, body: dict, by: str, items: dict[str, dict]) -> dict:
         """Append one record; the caller holds `self._lock`."""
@@ -327,8 +567,10 @@ class Console:
             rec = self.store.append({**body, "type": kind, "schemaVersion": S.SCHEMA_VERSION, "by": by})
         except StoreError as e:
             raise RequestError(400, str(e)) from None
-        if by == "owner" and len(self.store.records()) > before:  # a retried write rings nothing
-            self._ring(rec)
+        if len(self.store.records()) > before:  # a retried write rings nothing and wakes nobody
+            if by == "owner":
+                self._ring(rec)
+            self._bump()
         return rec
 
     def _ring(self, rec: dict) -> None:
@@ -396,6 +638,7 @@ class Console:
         tmp = self.cfg.working.with_suffix(".tmp")
         tmp.write_text(json.dumps(marks, sort_keys=True), encoding="utf-8")
         os.replace(tmp, self.cfg.working)
+        self._bump()  # the page shows "agent active" without waiting out a poll
         return marks
 
     def set_cursor(self, body: object) -> dict:
@@ -411,6 +654,7 @@ class Console:
         tmp.write_text(json.dumps(cur, sort_keys=True), encoding="utf-8")
         os.replace(tmp, self.cfg.cursor)
         self.cfg.working.unlink(missing_ok=True)  # synced or failed, the agent is no longer at work
+        self._bump()
         return cur
 
 
@@ -455,6 +699,14 @@ class _Handler(BaseHTTPRequestHandler):
 class OwnerHandler(_Handler):
     verify: Callable[[str | None], dict]
 
+    def _send(self, code: int, body: object, ctype: str = "application/json") -> None:
+        try:
+            super()._send(code, body, ctype)
+        except (BrokenPipeError, ConnectionResetError):
+            # The page went away mid-answer: a closed tab ends its long poll this way
+            # (0.7.0). Nothing is owed to a client that is gone, and no traceback is logged.
+            self.close_connection = True
+
     def _gate(self) -> bool:
         try:
             self.verify(self.headers.get("Cf-Access-Jwt-Assertion"))
@@ -474,7 +726,85 @@ class OwnerHandler(_Handler):
             return self._board()
         if self.path == "/api/check":
             return self._check()
+        route, query = self._query()
+        live = {"/api/wait": self._wait, "/api/feed": self._feed, "/api/evidence": self._evidence}.get(route)
+        if live is not None and query is not None:
+            try:
+                return live(query)
+            except RequestError as e:
+                return self._send(e.code, {"error": str(e)})
+        if live is not None:
+            return self._send(400, {"error": "a query string must be plain key=value pairs"})
         self._send(404, {"error": "not found"})
+
+    # -- the live console (0.7.0): every route below is behind `_gate` in do_GET --
+
+    def _query(self) -> tuple[str, dict[str, str] | None]:
+        """The path and its query as one value per key; None for a query with a repeated or blank key."""
+        parts = urlsplit(self.path)
+        try:
+            q = parse_qs(parts.query, keep_blank_values=True, strict_parsing=bool(parts.query), max_num_fields=8)
+        except ValueError:
+            return parts.path, None
+        if any(len(v) != 1 for v in q.values()):
+            return parts.path, None
+        return parts.path, {k: v[0] for k, v in q.items()}
+
+    @staticmethod
+    def _only(query: dict[str, str], allowed: set[str], route: str) -> None:
+        extra = sorted(set(query) - allowed)
+        if extra:
+            raise RequestError(400, f"{route} takes only {', '.join(sorted(allowed))}; not {', '.join(extra)}")
+
+    @staticmethod
+    def _int(v: str | None, name: str, lo: int, hi: int) -> int | None:
+        if v is None:
+            return None
+        if not re.fullmatch(r"[0-9]{1,9}", v) or not lo <= int(v) <= hi:
+            raise RequestError(400, f"{name} must be a whole number from {lo} to {hi}")
+        return int(v)
+
+    def _wait(self, query: dict[str, str]) -> None:
+        self._only(query, {"since", "ver", "timeout"}, "/api/wait")
+        since = self._int(query.get("since"), "since", 0, 10**9)
+        if since is None:
+            raise RequestError(400, "/api/wait needs since=<the store seq the page holds>")
+        ver = query.get("ver")
+        if ver is not None and not re.fullmatch(r"[0-9a-f]{8}\.[0-9]{1,12}", ver):
+            raise RequestError(400, "ver must be the token a previous /api/wait returned")
+        raw = query.get("timeout", str(int(WAIT_MAX)))
+        if not re.fullmatch(r"[0-9]{1,2}(\.[0-9]{1,3})?", raw) or float(raw) > WAIT_MAX:
+            raise RequestError(400, f"timeout is 0 to {WAIT_MAX:g} seconds")
+        self._send(200, self.console.wait(since, ver, float(raw)))
+
+    def _feed(self, query: dict[str, str]) -> None:
+        self._only(query, {"kind", "item", "before", "limit"}, "/api/feed")
+        kinds = None
+        if query.get("kind"):
+            kinds = set(query["kind"].split(","))
+            bad = sorted(kinds - set(V.FEED_KINDS))
+            if bad:
+                raise RequestError(400, f"kind {', '.join(bad)} is not one of {', '.join(V.FEED_KINDS)}")
+        item = query.get("item") or None
+        if item is not None and item != S.CHAT_ITEM and (len(item) > 128 or not S.ITEM_ID.match(item)):
+            raise RequestError(400, "item must be an item id")
+        before = self._int(query.get("before"), "before", 1, 10**9)
+        limit = self._int(query.get("limit"), "limit", 1, V.FEED_MAX) or V.FEED_DEFAULT
+        self._send(200, self.console.feed(kinds, item, before, limit))
+
+    def _evidence(self, query: dict[str, str]) -> None:
+        self._only(query, {"qid"}, "/api/evidence")
+        qid = query.get("qid")
+        if not isinstance(qid, str) or not S.QID.match(qid):
+            raise RequestError(400, "qid must be <itemId>/Q<n>")
+        try:
+            out = self.console.evidence(qid)
+        except RequestError:
+            raise
+        except Exception as e:  # a file caught mid-write: this read is skipped, named in the log
+            sys.stderr.write(f"console evidence: {type(e).__name__}: {e}\n")
+            raise RequestError(503, "the cited lines could not be read just now") from None
+        self._send(200, out)
 
     def _check(self) -> None:
         try:
@@ -506,18 +836,20 @@ class OwnerHandler(_Handler):
         if not self._gate():
             return
         kind = OWNER_ROUTES.get(self.path)
-        if kind is None and self.path != "/api/relock":
+        if kind is None and self.path not in ("/api/relock", "/api/lock-all"):
             return self._send(404, {"error": "not found"})
         # Browsers send Origin on every POST, same-origin included, so a missing one is refused too:
         # an absent header must not read as "trusted".
         if self.headers.get("Origin") != f"https://{self.console.cfg.hostname}":
             return self._send(403, {"error": "a write from another site, or with no Origin, is refused"})
         try:
-            if kind is None:
+            if self.path == "/api/relock":
                 return self._send(200, {"records": self.console.relock(self._body())})
+            if self.path == "/api/lock-all":
+                return self._send(200, self.console.lock_all(self._body()))
             self._send(200, {"record": self.console.write(kind, self._body(), "owner")})
         except RequestError as e:
-            self._send(e.code, {"error": str(e)})
+            self._send(e.code, {**e.extra, "error": str(e)})
 
 
 class AgentHandler(_Handler):

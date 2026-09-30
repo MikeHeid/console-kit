@@ -105,6 +105,14 @@ class Store:
         """Return every record in append order. The list is a copy; the records are shared, so don't mutate them."""
         return list(self._records)
 
+    def seq(self) -> int:
+        """The sequence number of the newest record; 0 for an empty store."""
+        return len(self._records)
+
+    def get(self, rid: str) -> dict | None:
+        """The record with id `rid`, or None."""
+        return self._by_id.get(rid) if isinstance(rid, str) else None
+
     def question(self, qid: str) -> dict | None:
         return next((r for r in self._records if r["type"] == "question" and r["qid"] == qid), None)
 
@@ -150,10 +158,40 @@ class Store:
             self._index(rec)
             return rec
 
+    def existing(self, rec: dict) -> dict | None:
+        """The stored record `rec` would dedupe to (same fields, same nonce), or None."""
+        full = dict(rec)
+        full.setdefault("schemaVersion", S.SCHEMA_VERSION)
+        return self._by_id.get(S.record_id(full))
+
+    def trial(self) -> "Store":
+        """A throwaway copy of this store that checks every rule but writes nothing (0.7.0).
+
+        "Lock all & process" appends the whole batch here first, so a batch
+        the rules refuse anywhere is refused before any of it is written. The
+        copy shares the (never mutated) records; appends to it touch no file
+        and are invisible to this store.
+        """
+        t = Store.__new__(Store)
+        t.path = self.path
+        t.known_items = self.known_items
+        t.item_parents = self.item_parents
+        t.clock = self.clock
+        t._lock = threading.Lock()
+        with self._lock:
+            t._records = list(self._records)
+            t._by_id = dict(self._by_id)
+        t._write = lambda rec: None
+        return t
+
     def _check_rules(self, rec: dict) -> None:
         kind = rec["type"]
         item = rec.get("item")
-        if item is not None and self.known_items is not None and item not in self.known_items:
+        # The chat's thread (0.7.0) is not a register item, and the schema admits it
+        # only on a message; every other record still names a register item (R7).
+        if item == S.CHAT_ITEM and kind == "message":
+            pass
+        elif item is not None and self.known_items is not None and item not in self.known_items:
             raise StoreError(f"item {item!r} is not in the project's item list")
         if kind == "question":
             if self.question(rec["qid"]):
