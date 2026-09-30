@@ -1446,7 +1446,7 @@ class LiveConsoleTests(unittest.TestCase):
                 self.assertEqual(page.locator("[role='alert'].ck-lock-answered-error").count(), 0)
                 page.click(".ck-lock-answered-error button")
                 self.assertEqual(page.locator(".ck-lock-answered-error").count(), 0)
-                self.assertNotEqual(page.evaluate("document.activeElement.tagName"), "BODY")
+                self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-questions-heading')"))
                 self.assert_not_reloaded(page)
 
 

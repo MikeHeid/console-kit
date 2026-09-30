@@ -904,7 +904,7 @@
       body.appendChild(renderItemTools(itemId));
 
       if (qs.length > 0) {
-        body.appendChild(el('div', { className: 'ck-section-heading' }, ['Questions']));
+        body.appendChild(el('div', { className: 'ck-section-heading ck-questions-heading' }, ['Questions']));
         const ready = qs.filter(q => q.state === 'unlocked' && q.answers && q.answers.length > 0);
         if (ready.length > 1 || lockAllError[itemId] || lockingAll === itemId) {
           body.appendChild(renderLockAnswered(itemId, ready));
@@ -940,7 +940,7 @@
       dismiss.addEventListener('click', () => {
         delete lockAllError[itemId];
         renderPanel();
-        const h = panelEl.querySelector('.ck-section-heading');
+        const h = panelEl.querySelector('.ck-questions-heading');
         if (h) { h.setAttribute('tabindex', '-1'); h.focus(); }
       });
       err.appendChild(dismiss);
@@ -1002,8 +1002,10 @@
         announce('Locked ' + done + ' answers.');
       }
       renderPanel();
+      // The owner may have moved on while the run was in flight: only then leave focus alone.
+      if (currentMode !== 'item' || currentItem !== itemId) return;
       // The button that was pressed is gone: land on what the run left behind.
-      const land = panelEl.querySelector('.ck-lock-answered-error') || panelEl.querySelector('.ck-section-heading');
+      const land = panelEl.querySelector('.ck-lock-answered-error') || panelEl.querySelector('.ck-questions-heading');
       if (land) { if (!land.hasAttribute('tabindex')) land.setAttribute('tabindex', '-1'); land.focus(); }
     });
     actions.appendChild(go);
