@@ -11,14 +11,16 @@ The agent's own cursor, the highest doorbell seq it has processed, is kept in
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Callable
 
-from .registry import read_regular
+from .registry import RegistryError, read_regular
 
 WAKE_INTENTS = ("process", "fork")
 CURSOR_FILE = "agent-cursor.json"
@@ -57,12 +59,14 @@ def pending(path: Path, since: int, intents: tuple[str, ...] | None = WAKE_INTEN
 
 def watch(path: Path, since: int, *, poll: float = 2.0, timeout: float | None = None,
           sleep: Callable[[float], None] = time.sleep,
-          clock: Callable[[], float] = time.monotonic) -> list[dict]:
+          clock: Callable[[], float] = time.monotonic,
+          heartbeat: Callable[[], None] | None = None) -> list[dict]:
     """Block until a wake line arrives after `since`, and return every wake line waiting.
 
     A line already there when the watch starts returns at once, so a signal sent
     while no session was watching is never missed. With `timeout`, an empty list
-    means it ran out.
+    means it ran out. `heartbeat`, if given, is called once per poll while the
+    watch waits (see `Heartbeat`).
     """
     start = clock()
     while True:
@@ -71,7 +75,111 @@ def watch(path: Path, since: int, *, poll: float = 2.0, timeout: float | None = 
             return found
         if timeout is not None and clock() - start >= timeout:
             return []
+        if heartbeat is not None:
+            heartbeat()
         sleep(poll)
+
+
+# "Agent listening" (0.6.0). A watch that is waiting on the doorbell says so in
+# `watch.json` beside it: `watching`, when it last said so (`at`), and the time
+# by which it promises to say so again (`until`). The server reads it and shows
+# the owner "listening" only while that promise is kept, so a watch killed
+# without a word (SIGKILL, a closed laptop) lapses to "idle" on its own, and a
+# watch that exits normally says so at once. It is a hint for the owner, never
+# something the doorbell depends on: a failed write is reported and the watch
+# goes on.
+WATCH_FILE = "watch.json"
+BEAT_EVERY = 10.0     # seconds between writes while waiting; a 2 s poll does not write every 2 s
+BEAT_GRACE = 20.0     # slack past the promised next beat before "listening" lapses
+MAX_WATCH = 4096
+MAX_PROMISE = 86400   # an `until` further ahead than this is not believed
+TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _ts(t: float) -> str:
+    return time.strftime(TS_FORMAT, time.gmtime(t))
+
+
+def _parse_ts(v: object) -> float | None:
+    if not isinstance(v, str) or len(v) > 40:
+        return None
+    try:
+        return float(calendar.timegm(time.strptime(v, TS_FORMAT)))
+    except ValueError:
+        return None
+
+
+def write_watch(state: Path, watching: bool, *, every: float = BEAT_EVERY, now: float | None = None) -> None:
+    """Record whether a watch is waiting now; `every` is how soon it promises to write again."""
+    t = time.time() if now is None else now
+    rec = {"watching": watching, "at": _ts(t), "until": _ts(t + every + BEAT_GRACE) if watching else None}
+    p = Path(state) / WATCH_FILE
+    fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=".watch.", suffix=".tmp")  # 0600 from creation
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec, sort_keys=True) + "\n")
+        os.replace(tmp, p)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def listening(state: Path, *, now: float | None = None) -> dict:
+    """What the owner is told: {"state": "listening"|"idle"|"never", "last_seen": ts|None}.
+
+    Anything unreadable, malformed or not a regular file reads as "never", by
+    name of state, never as "listening": the safe error is to under-claim.
+    """
+    t = time.time() if now is None else now
+    try:
+        data = read_regular(Path(state) / WATCH_FILE, MAX_WATCH)
+        rec = json.loads(data.decode("utf-8")) if data is not None else None
+    except (OSError, ValueError, RegistryError):
+        rec = None
+    if not isinstance(rec, dict):
+        return {"state": "never", "last_seen": None}
+    at, until = _parse_ts(rec.get("at")), _parse_ts(rec.get("until"))
+    if at is None or at > t + 60:  # a stamp from the future is a broken clock or a forged file
+        return {"state": "never", "last_seen": None}
+    if (rec.get("watching") is True and until is not None
+            and at <= until <= at + MAX_PROMISE and t <= until):
+        return {"state": "listening", "last_seen": rec["at"]}
+    return {"state": "idle", "last_seen": rec["at"]}
+
+
+class Heartbeat:
+    """Write `watch.json` on the first call, then at most once per `every` seconds.
+
+    A write that fails is reported once on stderr and never stops the watch.
+    """
+
+    def __init__(self, state: Path, poll: float, *, clock: Callable[[], float] = time.monotonic,
+                 warn: Callable[[str], None] | None = None) -> None:
+        self.state = Path(state)
+        self.every = max(BEAT_EVERY, poll)  # a slow poll promises its own, longer, interval
+        self.clock = clock
+        self.warn = warn or (lambda m: sys.stderr.write(m + "\n"))
+        self._last: float | None = None
+        self._warned = False
+
+    def _write(self, watching: bool) -> None:
+        try:
+            write_watch(self.state, watching, every=self.every)
+        except OSError as e:
+            if not self._warned:
+                self._warned = True
+                self.warn(f"console-kit: cannot record the watch in {self.state / WATCH_FILE}: {e}; "
+                          "the owner will not see 'agent listening'")
+
+    def __call__(self) -> None:
+        now = self.clock()
+        if self._last is None or now - self._last >= self.every:
+            self._last = now
+            self._write(True)
+
+    def stop(self) -> None:
+        """The watch is over (woken, timed out or interrupted): say so now, not after the promise lapses."""
+        self._write(False)
 
 
 def read_cursor(state: Path) -> int:

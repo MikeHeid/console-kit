@@ -688,6 +688,7 @@
     const syncEl = el('span', { title: cursor && cursor.last_synced_at ? new Date(cursor.last_synced_at).toLocaleString() : '' },
       ['Synced: ' + syncText]);
     bar.appendChild(syncEl);
+    bar.appendChild(renderListening());
     // Refresh button
     const refreshBtn = el('button', { className: 'ck-refresh-btn', type: 'button' }, ['Refresh']);
     refreshBtn.addEventListener('click', async () => {
@@ -718,6 +719,34 @@
       bar.appendChild(el('div', { className: 'ck-error-msg' }, [cursor.last_error]));
     }
     return bar;
+  }
+
+  // "Agent listening" (0.6.0): whether a session is waiting on the doorbell right
+  // now, from the watch's own heartbeat (`cursor.listening`, server-judged). Words
+  // and a glyph carry the state, never colour alone; an old server that sends no
+  // `listening` reads as "not known", never as listening.
+  function listeningWords(l) {
+    if (!l || !l.state) return { state: 'unknown', glyph: '?', text: 'Agent: not known' };
+    if (l.state === 'listening') return { state: 'listening', glyph: '●', text: 'Agent listening' };
+    if (l.state === 'idle' && l.last_seen) {
+      const d = new Date(l.last_seen);
+      const sameDay = d.toDateString() === new Date().toDateString();
+      const when = sameDay ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleString();
+      return { state: 'idle', glyph: '○', text: 'Agent idle since ' + when };
+    }
+    return { state: 'never', glyph: '○', text: 'No agent has listened yet' };
+  }
+  function renderListening() {
+    const l = cursor ? cursor.listening : null;
+    const w = listeningWords(l);
+    const title = w.state === 'listening'
+      ? 'A session is waiting on the doorbell: "Answers are in" wakes it now.'
+      : w.state === 'idle'
+        ? 'No session is waiting on the doorbell. Last seen ' + relTime(l.last_seen) + '; a request waits until one starts.'
+        : 'No session has waited on the doorbell yet; a request waits until one starts.';
+    return el('span', { className: 'ck-listening', dataState: w.state, title: title }, [
+      el('span', { className: 'ck-listening-glyph', 'aria-hidden': 'true' }, [w.glyph]), ' ' + w.text
+    ]);
   }
 
   // Render offline state

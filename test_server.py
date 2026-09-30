@@ -697,5 +697,140 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.state_of("LANE.1/Q2")["state"], "stale")
 
 
+class HealthTests(unittest.TestCase):
+    """0.6.0 /health: on the agent socket, and on an opt-in loopback port that no proxy can reach."""
+
+    FIELDS = {"ok", "version", "store_seq", "register", "agent", "agent_listening"}
+
+    setUp, tearDown, req = ServerTests.setUp, ServerTests.tearDown, ServerTests.req
+
+    def start_health(self):
+        srv = SV.health_server(self.console, 0)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return srv.server_address[1]
+
+    def health(self, port, headers=None, method="GET", path="/health"):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        conn.request(method, path, headers=headers or {})
+        r = conn.getresponse()
+        raw = r.read()
+        conn.close()
+        return r.status, (json.loads(raw) if raw else None)
+
+    def test_the_agent_socket_answers_health_with_no_owner_content(self):
+        # Catches: a health body that grows a field carrying owner text (an item title, a
+        # question, a path) — the field set is pinned — and a store_seq that is not the store's.
+        from console_kit import __version__
+        code, out = SV.agent_request(self.cfg.socket, "GET", "/health")
+        self.assertEqual(code, 200, out)
+        self.assertEqual(set(out), self.FIELDS)
+        self.assertEqual(out["version"], __version__)
+        self.assertEqual(out["store_seq"], len(self.console.store.records()))
+        self.assertEqual((out["ok"], out["register"], out["agent"], out["agent_listening"]),
+                         (True, "ok", "never", False))
+        blob = json.dumps(out)
+        for owner_text in ("Which?", "a lane", "a phase", str(self.cfg.root)):
+            self.assertNotIn(owner_text, blob)
+
+    def test_health_follows_the_watch(self):
+        from console_kit import doorbell as D
+        D.write_watch(self.cfg.state, True)
+        out = SV.agent_request(self.cfg.socket, "GET", "/health")[1]
+        self.assertEqual((out["agent"], out["agent_listening"]), ("listening", True))
+        # The console page reads the same judgement through the cursor.
+        self.assertEqual(self.console.payload()["cursor"]["listening"]["state"], "listening")
+        D.write_watch(self.cfg.state, False)
+        out = SV.agent_request(self.cfg.socket, "GET", "/health")[1]
+        self.assertEqual((out["agent"], out["agent_listening"]), ("idle", False))
+
+    def test_a_broken_register_is_503_and_names_nothing(self):
+        # Catches: an ok:true while every page would fail, and the adapter's error text
+        # (which can hold paths or item text) leaking into the body.
+        class Broken(FakeAdapter):
+            def items(self):
+                raise RuntimeError("secret-path /home/owner/register.toml")
+        self.console.adapter = Broken()
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()):
+            code, out = SV.agent_request(self.cfg.socket, "GET", "/health")
+        self.assertEqual(code, 503)
+        self.assertEqual((out["ok"], out["register"]), (False, "error"))
+        self.assertNotIn("secret-path", json.dumps(out))
+
+    def test_the_owner_door_still_gates_health(self):
+        # Catches: /health answered before the Access gate on the port the tunnel reaches,
+        # from loopback too (cloudflared connects from loopback).
+        self.assertEqual(self.req("GET", "/health")[0], 403)
+        self.assertEqual(self.req("GET", "/health", headers={"Host": "127.0.0.1"})[0], 403)
+        self.assertEqual(self.req("GET", "/health", tok=token())[0], 404)
+
+    def test_the_health_port_answers_a_local_caller(self):
+        port = self.start_health()
+        for host in (f"127.0.0.1:{port}", f"localhost:{port}", "localhost", f"[::1]:{port}"):
+            with self.subTest(host=host):
+                code, out = self.health(port, {"Host": host})
+                self.assertEqual(code, 200, out)
+                self.assertEqual(set(out), self.FIELDS)
+
+    def test_the_health_port_refuses_anything_a_proxy_or_the_edge_forwarded(self):
+        # The refusal that matters: a loopback peer is not proof of a local caller, since
+        # cloudflared connects from loopback. Every header the edge or a proxy adds is refused,
+        # one at a time, so a check that looks at only one of them fails here.
+        port = self.start_health()
+        for h in SV.HealthHandler.PROXY_HEADERS:
+            with self.subTest(header=h):
+                code, out = self.health(port, {"Host": f"127.0.0.1:{port}", h: "203.0.113.7"})
+                self.assertEqual(code, 403, out)
+                self.assertIn("proxy", out["error"])
+                self.assertNotIn("version", out)
+
+    def test_the_health_port_refuses_a_foreign_host_and_a_remote_peer(self):
+        # A page that re-binds its hostname to 127.0.0.1 sends its own Host: refused.
+        port = self.start_health()
+        for host in ("evil.example", f"evil.example:{port}", "127.0.0.1.evil.example", "", "[::1"):
+            with self.subTest(host=host):
+                code, out = self.health(port, {"Host": host})
+                self.assertEqual(code, 403, out)
+        # The listener is bound to 127.0.0.1, so no remote peer can connect at all; the peer
+        # check behind it is exercised directly.
+        import email.message
+        hdrs = email.message.Message()
+        hdrs["Host"] = f"127.0.0.1:{port}"
+        fake = type("Fake", (), {"client_address": ("192.0.2.10", 5555), "headers": hdrs,
+                                 "PROXY_HEADERS": SV.HealthHandler.PROXY_HEADERS,
+                                 "LOCAL_HOSTS": SV.HealthHandler.LOCAL_HOSTS})()
+        self.assertIn("loopback", SV.HealthHandler._refusal(fake))
+        fake.client_address = ("127.0.0.1", 5555)
+        self.assertIsNone(SV.HealthHandler._refusal(fake))
+
+    def test_the_health_port_serves_health_only(self):
+        # Catches: a health door that reaches the view, the store, or any write.
+        port = self.start_health()
+        local = {"Host": f"127.0.0.1:{port}"}
+        for path in ("/", "/api/view", "/view", "/check", "/health/../api/view"):
+            with self.subTest(path=path):
+                self.assertEqual(self.health(port, local, path=path)[0], 404)
+        for method in ("POST", "PUT", "DELETE"):
+            with self.subTest(method=method):
+                self.assertEqual(self.health(port, local, method=method)[0], 405)
+
+    def test_the_health_port_is_never_the_owner_port(self):
+        from unittest import mock
+        cfg = SV.Config(**{**self.cfg.__dict__, "port": 4999})
+        with self.assertRaises(SystemExit):
+            SV.health_server(SV.Console(cfg, FakeAdapter()), 4999)
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+            SV.main(["--root", ".", "--page", "p", "--state", "s", "--adapter", "a", "--team-domain", "t",
+                     "--aud", "x", "--hostname", "h", "--port", "5000", "--health-port", "5000"])
+
+    def test_the_agent_cli_reports_health_by_exit_code(self):
+        rc, out, _ = ServerTests.agent_cli(self, "health")
+        self.assertEqual(rc, 0)
+        self.assertTrue(json.loads(out)["ok"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

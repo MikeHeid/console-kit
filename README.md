@@ -36,6 +36,15 @@ to run next. `INSTALL.md` (also in the zip) has the whole guide.
   tunnel, DNS.
 - **[docs/ADAPTER.md](plugin/kit/docs/ADAPTER.md)**: connect the console to your
   project's work items and decision log.
+- **[docs/DEPLOY.md](plugin/kit/docs/DEPLOY.md)**: install, upgrade and roll back a
+  kit vendored into a project and served by a systemd user unit, and check a
+  vendored copy against a release (`kit/tools/verify_vendor.py`).
+- **[docs/RUNBOOK.md](plugin/kit/docs/RUNBOOK.md)**: symptoms, checks and fixes,
+  starting with the loopback `/health` check.
+
+The console's status bar says whether an agent session is **listening** on the
+doorbell right now, idle since a time, or has never listened, from the
+heartbeat `agent.py watch` writes while it waits (0.6.0).
 
 ## How it fits together
 
