@@ -99,7 +99,8 @@ def export(store: Store) -> dict[str, dict]:
             # Every answer id in store order, so fold can replay the store's rule.
             "order": [a["id"] for a in answers],
         }
-        entry.update({k: q[k] for k in ("forked_from", "star_by") if k in q})
+        # `evidence` (0.7.0) only when present, so a file for a question without it is byte-identical to 0.6.0.
+        entry.update({k: q[k] for k in ("forked_from", "star_by", "evidence") if k in q})
         if "forked_from" in q:
             # The fork message travels with the file, so `fold`, which never reads
             # the store (R1), can still check the id against the message it names.
@@ -196,7 +197,7 @@ def check_entry(name: str, e: object, items: dict[str, dict]) -> list[str]:
                  "text": e.get("question"), "kind": e.get("kind"), "options": e.get("options"),
                  "star": e.get("star"), "valid_if": e.get("valid_if"), "source": e.get("source"),
                  "by": e.get("asked_by"), "nonce": "export-check"}
-    as_record.update({k: e[k] for k in ("forked_from", "star_by") if k in e})
+    as_record.update({k: e[k] for k in ("forked_from", "star_by", "evidence") if k in e})
     errs += [f"{name}: {m}" for m in S.validate(as_record)]
     if not isinstance(e.get("asked_at"), str) or not TS.match(e["asked_at"]):
         errs.append(f"{name}: asked_at {e.get('asked_at')!r} is not a store timestamp")

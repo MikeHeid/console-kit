@@ -46,6 +46,35 @@ The console's status bar says whether an agent session is **listening** on the
 doorbell right now, idle since a time, or has never listened, from the
 heartbeat `agent.py watch` writes while it waits (0.6.0).
 
+### A live console (0.7.0)
+
+- **It updates itself.** An open page long-polls the server (`/api/wait`, at
+  most 25 s a request, behind the same Access gate), so a new question, reply
+  or lock appears without a reload. The poll pauses while the tab is hidden and
+  backs off (2 s up to 60 s) when the server does not answer. A box you are
+  typing in is never redrawn under you: a note offers "Show" instead.
+- **An unread chip** on the Inbox button counts what an agent wrote since you
+  last had the inbox open. "Last looked" is kept in this browser's
+  localStorage, so each browser keeps its own; a new browser starts at zero.
+- **Feed tab**: every question, answer, lock, re-anchor, deliberation request,
+  process request, reply and chat message, newest first, filterable by kind and
+  by item. Folds and PR merges are not in the console's store, so they are not
+  in the Feed.
+- **A round is one form.** A deliberation round's questions open as a form, one
+  question per step: ←/→ move, 1–9 pick, a comment per question becomes your
+  answer's own words. Picks are drafts (kept in this browser) until the review
+  page's **Lock all & process**, which locks each and sends one process
+  request. If the server would refuse any of them it locks none and says which;
+  if a write fails part way, pressing again finishes the rest.
+- **Evidence on a question**: rows citing `path:start-end`, with the command
+  run and what it printed. The form shows the cited lines as they are now and
+  says whether they changed since the question was asked.
+- **Chat tab**: a message not tied to a question. It wakes whichever session
+  is watching, which answers in the same thread. Six a minute, sixty an hour,
+  4000 characters each.
+- Progress rings on items and rounds, and gentle transitions; all motion is off
+  under reduced motion.
+
 ## How it fits together
 
 ```

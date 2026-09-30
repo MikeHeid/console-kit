@@ -63,7 +63,7 @@ Cloudflare reached the tunnel but not the server, or not the tunnel at all.
 1. Is anything listening? The status bar, or `health`, says `listening`.
    If not, no session is running `agent.py watch`: start one (the
    `console-process` skill re-arms it after each run).
-2. Did the owner's action ring? Only "Answers are in" (`process`) and a
+2. Did the owner's action ring? Only "Answers are in" (`process`), a chat message (`chat`) and a
    deliberation request (`fork`) wake a watch; answers, locks and messages
    do not.
 
@@ -85,6 +85,48 @@ Cloudflare reached the tunnel but not the server, or not the tunnel at all.
 
 "Agent active" that never clears lapses on its own after an hour, or at once
 on `agent.py synced`.
+
+## The console does not update by itself (0.7.0)
+
+An open tab keeps one long poll to `/api/wait`; each answers within 25 s.
+
+1. Reload once. A tab opened before the server was upgraded has the old page.
+2. In the browser's network panel, `/api/wait` should show one request at a
+   time, each lasting up to 25 s. A `403` means the Access session expired:
+   reload to log in again. A `429` means more than 16 tabs are polling; close
+   some. A `404` means the server is older than 0.7.0 (`health` shows the
+   version); the page then stops polling and **Refresh** still works.
+3. A hidden tab does not poll; it catches up the moment it is shown.
+4. While you type in the panel, a change shows a **New activity · Show**
+   note instead of redrawing the box you are typing in. The chat is the
+   exception: replies appear in its log as you type.
+5. The server log shows one `GET /api/wait` line per poll. Several a second
+   from one tab is a bug: note the browser and version.
+
+## "Lock all & process" says nothing was locked (0.7.0)
+
+It checks the whole batch first and writes nothing if the store would refuse
+any of it; each question's line says why. The usual cause is a question
+locked from another tab or card since you drafted it: re-open the round (it
+shows as already locked) and lock the rest. To change a locked answer, use
+**Change my answer** on its card, which asks for a reason.
+
+**"Stopped part way"** means a write failed (a full disk, say) after some
+questions were locked. Those stay locked; the rest were not written and no
+process request was sent. Fix the cause (`df -h <state>`), then press **Lock
+all & process** again: already-locked questions are skipped and one process
+request is sent.
+
+## A chat message is not answered (0.7.0)
+
+1. The Chat tab says whether an agent is listening. If not, the message waits
+   for the next session; nothing is lost.
+2. A watch started before 0.7.0 does not wake on chat: restart it (the
+   `console-process` skill re-arms it).
+3. `tail -n 3 <state>/inbox.jsonl` shows a line with `"intent": "chat"` and
+   `"item": "@chat"` for each message.
+4. **429 "at most 6 chat messages a minute"** (or 60 an hour): wait and send
+   again. What you typed stays in the box.
 
 ## An answer shows stale
 

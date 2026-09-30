@@ -31,8 +31,31 @@
   let currentMode = null; // 'item' or 'inbox'
   let pendingNonces = {};
   let draftTexts = {};
-  let currentFork = null; // the answers sheet's fork filter (spec §7.6)
+  let currentFork = null; // the answers sheet's fork filter (spec §7.6), or the round the form walks
   const openForms = new Set(); // disclosure keys the owner left open
+  // 0.7.0: the inbox's tabs, the round form, and the live loop.
+  let currentTab = 'inbox';     // 'inbox' | 'feed' | 'chat', inside inbox mode
+  let arrived = new Set();      // qids and message ids that arrived with the latest live update
+  let knownIds = null;          // every qid and message id the page has seen; null before the first view
+  let seenAtOpen = 0;           // the seen seq when the inbox was opened: what the Feed marks "new"
+  const CHAT_ITEM = '@chat';    // mirrors schema.CHAT_ITEM
+  const MAX_CHAT = 4000;        // mirrors schema.MAX_CHAT
+  const reducedMotion = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+
+  // Per-viewer memory in localStorage (0.7.0): what this browser last saw, and
+  // the round form's drafts. It is a convenience of THIS browser only: another
+  // browser starts afresh, and a private window may refuse it, so every read
+  // and write is guarded and the page works without it.
+  function storeKey(name) { return 'ck:' + ((config && config.project) || location.pathname) + ':' + name; }
+  function memGet(name) {
+    try { const v = localStorage.getItem(storeKey(name)); return v === null ? null : JSON.parse(v); } catch (e) { return null; }
+  }
+  function memSet(name, value) {
+    try {
+      if (value === null) localStorage.removeItem(storeKey(name));
+      else localStorage.setItem(storeKey(name), JSON.stringify(value));
+    } catch (e) { /* storage refused: the page carries on without memory */ }
+  }
 
   // Mirrors schema.py: the fork fields and the D13 roster. The server refuses
   // anything else by name, so these only shape the form.
@@ -169,6 +192,42 @@
     setTimeout(() => { liveRegion.textContent = msg; }, 50);
   }
 
+  // A brief "this changed" pop (0.7.0). CSS runs it only without reduced motion.
+  function pulse(e) {
+    e.classList.remove('ck-pulse');
+    void e.offsetWidth; // restart the animation
+    e.classList.add('ck-pulse');
+  }
+
+  // A progress ring (0.7.0): `done` of `total`, drawn as an SVG arc. It only
+  // echoes a count that is always said in words beside it, so it is hidden
+  // from assistive tech.
+  function ring(done, total, extraClass) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const r = 7, c = 2 * Math.PI * r;
+    const frac = total > 0 ? Math.max(0, Math.min(1, done / total)) : 0;
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('class', 'ck-ring' + (extraClass ? ' ' + extraClass : '') + (total > 0 && done >= total ? ' ck-ring-full' : ''));
+    svg.setAttribute('viewBox', '0 0 18 18');
+    svg.setAttribute('width', '18');
+    svg.setAttribute('height', '18');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
+    const track = document.createElementNS(ns, 'circle');
+    track.setAttribute('class', 'ck-ring-track');
+    const arc = document.createElementNS(ns, 'circle');
+    arc.setAttribute('class', 'ck-ring-arc');
+    for (const e of [track, arc]) {
+      e.setAttribute('cx', '9'); e.setAttribute('cy', '9'); e.setAttribute('r', String(r));
+      svg.appendChild(e);
+    }
+    arc.setAttribute('stroke-dasharray', c.toFixed(2));
+    arc.setAttribute('stroke-dashoffset', (c * (1 - frac)).toFixed(2));
+    svg.setAttribute('data-done', String(done));
+    svg.setAttribute('data-total', String(total));
+    return svg;
+  }
+
   // Create element helper
   function el(tag, attrs, children) {
     const e = document.createElement(tag);
@@ -219,6 +278,7 @@
       items = data.items;
       checkPromise = null; // a new view: "why stale" is checked afresh
       cursor = data.cursor;
+      noteArrivals();
       updateInboxButton();
       updateItemButtons();
       return data;
@@ -268,9 +328,46 @@
   }
   function agentWords(itemId) { return agentActive(itemId) ? 'agent active' : 'awaiting agent'; }
 
+  // What arrived with this view that the page had not seen (0.7.0): new rows are
+  // marked so they can be eased in, and a screen reader is told how many came.
+  function noteArrivals() {
+    const ids = new Set(Object.keys(view.questions || {}));
+    for (const msgs of Object.values(view.threads || {})) for (const m of msgs) ids.add(m.id);
+    if (knownIds === null) { knownIds = ids; arrived = new Set(); return; }
+    arrived = new Set([...ids].filter(i => !knownIds.has(i)));
+    knownIds = ids;
+  }
+
+  // Unread (0.7.0): what the AGENT wrote after the store seq this browser last
+  // saw with the inbox open: questions asked and messages it wrote, the chat's
+  // replies included. The owner's own writes are never "unread". The seq lives
+  // in this browser's localStorage, so it is per viewer; a browser that has
+  // never looked starts at "nothing unread", not at the whole history.
+  function seenSeq() {
+    const v = memGet('seen');
+    return typeof v === 'number' && v >= 0 ? v : null;
+  }
+  function unreadCount() {
+    if (!view || typeof view.seq !== 'number') return 0;
+    let seen = seenSeq();
+    if (seen === null) { memSet('seen', view.seq); seen = view.seq; }
+    let n = 0;
+    for (const q of Object.values(view.questions || {})) if (q.question.seq > seen && q.question.by === 'agent') n++;
+    for (const msgs of Object.values(view.threads || {})) for (const m of msgs) if (m.seq > seen && m.by === 'agent') n++;
+    return n;
+  }
+  // The owner is looking at the inbox now: everything up to this view is seen.
+  function markSeen() {
+    if (!view || typeof view.seq !== 'number' || document.visibilityState === 'hidden') return;
+    if (!panelEl || panelEl.getAttribute('data-open') !== 'true' || currentMode !== 'inbox') return;
+    if ((seenSeq() || 0) < view.seq) memSet('seen', view.seq);
+  }
+
   // Update inbox button badge — use view.inbox.length to avoid double-counting rolled-up totals
   function updateInboxButton() {
     if (!inboxBtn || !view) return;
+    markSeen();
+    const unread = unreadCount();
     // Fix #1: inbox.length is the true count, not summed totals which double-count children
     const total = (view.inbox ? view.inbox.length : 0);
     // A second, separate count: threads where the owner wrote last and an agent
@@ -281,10 +378,18 @@
     let label = total ? 'Open inbox, ' + total + ' waiting for you' : 'Open inbox';
     if (agent - active) label += ', ' + (agent - active) + ' waiting on an agent';
     if (active) label += ', ' + active + ' with an agent at work';
+    if (unread) label += ', ' + unread + ' new since you last looked';
     for (const b of [inboxBtn, dockStrip]) {
       if (!b) continue;
       const countEl = b.querySelector('.ck-inbox-count');
       if (countEl) countEl.textContent = total || '';
+      const newEl = b.querySelector('.ck-new-count');
+      if (newEl) {
+        const was = newEl.textContent;
+        newEl.textContent = unread ? unread + ' new' : '';
+        if (unread && was !== newEl.textContent) pulse(newEl);
+      }
+      b.setAttribute('data-new-empty', unread ? 'false' : 'true');
       const agentEl = b.querySelector('.ck-agent-count');
       if (agentEl) agentEl.textContent = agent ? GLYPH.awaiting_agent + ' ' + agent : '';
       b.setAttribute('data-empty', total === 0 ? 'true' : 'false');
@@ -328,15 +433,36 @@
     }
   }
 
+  // Locked questions of all questions, per item and everything under it (0.7.0):
+  // what an item's progress ring shows. One walk up from each question's item,
+  // safe against a parent cycle.
+  function lockedCounts() {
+    const out = {};
+    for (const q of Object.values(view.questions || {})) {
+      const seen = new Set();
+      let node = q.question.item;
+      while (node != null && items && items[node] && !seen.has(node)) {
+        seen.add(node);
+        const c = out[node] || (out[node] = { locked: 0, total: 0 });
+        c.total += 1;
+        if (q.state === 'locked') c.locked += 1;
+        node = items[node].parent;
+      }
+    }
+    return out;
+  }
+
   // Update item indicator buttons in the dashboard
   function updateItemButtons() {
     if (!view) return;
+    const rings = lockedCounts();
     document.querySelectorAll('details[id^="item-"]').forEach(det => {
       const id = det.id.replace('item-', '');
       const btn = det.querySelector('.ck-item-btn');
       if (!btn) return;
       const data = view.items[id];
       if (!data) return;
+      const rc = rings[id];
       const t = data.total;
       const parts = [];
       if (t.awaiting_you > 0) parts.push(GLYPH.awaiting_you + ' ' + t.awaiting_you + ' you');
@@ -346,12 +472,19 @@
       const hasItems = parts.length > 0;
       btn.setAttribute('data-has-items', hasItems ? 'true' : 'false');
       // Clear and rebuild
+      const before = btn.textContent;
       btn.textContent = '';
+      if (rc && rc.total) {
+        btn.appendChild(ring(rc.locked, rc.total));
+        btn.title = rc.locked + ' of ' + rc.total + ' question' + (rc.total === 1 ? '' : 's') + ' locked';
+      }
       if (hasItems) {
         btn.appendChild(document.createTextNode(parts.join('  ')));
       } else {
         btn.appendChild(document.createTextNode('discuss'));
       }
+      if (btn.hasAttribute('data-drawn') && before !== btn.textContent) pulse(btn);  // a live change, not the first draw
+      btn.setAttribute('data-drawn', 'true');
     });
   }
 
@@ -414,8 +547,10 @@
     }, [
       el('span', {}, ['Inbox']),
       el('span', { className: 'ck-inbox-count' }, ['?']),
-      el('span', { className: 'ck-agent-count', 'aria-hidden': 'true' }, [''])
+      el('span', { className: 'ck-agent-count', 'aria-hidden': 'true' }, ['']),
+      el('span', { className: 'ck-new-count', 'aria-hidden': 'true' }, [''])
     ]);
+    inboxBtn.setAttribute('data-new-empty', 'true');
     inboxBtn.addEventListener('click', () => openPanel(null, 'inbox'));
     document.body.appendChild(inboxBtn);
 
@@ -429,8 +564,10 @@
     }, [
       el('span', { className: 'ck-dock-label' }, ['Inbox']),
       el('span', { className: 'ck-inbox-count' }, ['?']),
-      el('span', { className: 'ck-agent-count', 'aria-hidden': 'true' }, [''])
+      el('span', { className: 'ck-agent-count', 'aria-hidden': 'true' }, ['']),
+      el('span', { className: 'ck-new-count', 'aria-hidden': 'true' }, [''])
     ]);
+    dockStrip.setAttribute('data-new-empty', 'true');
     dockStrip.addEventListener('click', () => openPanel(null, 'inbox'));
     document.body.appendChild(dockStrip);
 
@@ -477,6 +614,7 @@
     lastFocused = document.activeElement;
     currentItem = itemId;
     currentMode = mode;
+    if (mode === 'inbox') seenAtOpen = seenSeq() || 0;
     panelEl.setAttribute('data-open', 'true');
     panelEl.setAttribute('aria-label', mode === 'inbox' ? 'Inbox' : 'Console: ' + (itemId || ''));
     applyDock();
@@ -513,8 +651,13 @@
   // Render panel content
   function renderPanel() {
     panelEl.textContent = '';
+    pendingLive = false;
     if (currentMode === 'inbox') {
       renderInbox();
+      markSeen();
+      updateInboxButton();
+    } else if (currentMode === 'round') {
+      renderRound(currentFork);
     } else if (currentMode === 'sheet') {
       renderSheet(currentItem, currentFork);
     } else if (currentItem) {
@@ -524,95 +667,151 @@
 
   // Render inbox mode
   function renderInbox() {
-    const header = el('div', { className: 'ck-header' }, [
-      el('button', {
-        className: 'ck-back-btn',
-        type: 'button',
-        'aria-label': 'Back to board'
-      }, ['← Back']),
-      el('span', { className: 'ck-title' }, ['Inbox']),
-      el('button', {
-        className: 'ck-close-btn',
-        type: 'button',
-        'aria-label': 'Close panel'
-      }, ['×'])
-    ]);
-    header.querySelector('.ck-back-btn').addEventListener('click', closePanel);
-    header.querySelector('.ck-close-btn').addEventListener('click', closePanel);
-    panelEl.appendChild(header);
+    panelEl.appendChild(makeHeader(['Inbox'], closePanel, 'Back to board'));
+    panelEl.appendChild(renderTabs());
+    panelEl.appendChild(renderStatusBar(null));
 
-    // Status bar
-    const statusBar = renderStatusBar(null);
-    panelEl.appendChild(statusBar);
-
-    // Body
-    const body = el('div', { className: 'ck-body' });
+    // One tab panel; the tab bar above says which view it holds (0.7.0).
+    const body = el('div', { className: 'ck-body', role: 'tabpanel', id: 'ck-tabpanel',
+      'aria-labelledby': 'ck-tab-' + currentTab });
     if (!view) {
       body.appendChild(renderOffline());
+    } else if (currentTab === 'feed') {
+      renderFeed(body);
+    } else if (currentTab === 'chat') {
+      renderChat(body);
     } else {
-      // Questions awaiting owner
-      if (view.inbox && view.inbox.length > 0) {
-        body.appendChild(el('div', { className: 'ck-section-heading' }, ['Questions for you']));
-        const list = el('div', { className: 'ck-inbox-list' });
-        for (const qid of view.inbox) {
-          const q = view.questions[qid];
-          if (!q) continue;
-          const itemData = items[q.question.item];
-          const item = el('div', { className: 'ck-inbox-item', tabindex: '0' }, [
-            el('span', { className: 'ck-q-state', dataState: q.state }, [
-              GLYPH[q.state] || '', ' ', q.state.replace('_', ' ')
-            ]),
-            el('span', { className: 'ck-inbox-item-id' }, [q.question.item]),
-            el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : ''])
-          ]);
-          item.addEventListener('click', () => {
-            currentItem = q.question.item;
-            currentMode = 'item';
-            renderPanel();
-          });
-          item.addEventListener('keydown', e => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              currentItem = q.question.item;
-              currentMode = 'item';
-              renderPanel();
-            }
-          });
-          list.appendChild(item);
-        }
-        body.appendChild(list);
-      }
-
-      // Items awaiting agent
-      if (view.awaiting_agent && view.awaiting_agent.length > 0) {
-        const allActive = view.awaiting_agent.every(agentActive);
-        body.appendChild(el('div', { className: 'ck-section-heading' }, [allActive ? 'Agent active' : 'Awaiting agent']));
-        const list = el('div', { className: 'ck-inbox-list' });
-        for (const itemId of view.awaiting_agent) {
-          const itemData = items[itemId];
-          const item = el('div', { className: 'ck-inbox-item', tabindex: '0' }, [
-            el('span', { className: 'ck-q-state', dataState: agentActive(itemId) ? 'agent_active' : 'awaiting_agent' }, [
-              GLYPH.awaiting_agent, ' ' + agentWords(itemId)
-            ]),
-            el('span', { className: 'ck-inbox-item-id' }, [itemId]),
-            el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : ''])
-          ]);
-          item.addEventListener('click', () => {
-            currentItem = itemId;
-            currentMode = 'item';
-            renderPanel();
-          });
-          list.appendChild(item);
-        }
-        body.appendChild(list);
-      }
-
-      if ((!view.inbox || view.inbox.length === 0) && (!view.awaiting_agent || view.awaiting_agent.length === 0)) {
-        body.appendChild(el('p', { style: 'color: var(--c-fg-muted); text-align: center; padding: 20px;' },
-          ['No pending items.']));
-      }
+      renderInboxList(body);
     }
     panelEl.appendChild(body);
+    if (currentTab === 'chat') {
+      const log = body.querySelector('.ck-chat-log');
+      if (log) log.scrollTop = log.scrollHeight;
+    }
+  }
+
+  // The inbox's three views (0.7.0): what waits on you, what happened, and the chat.
+  const TABS = [['inbox', 'Inbox'], ['feed', 'Feed'], ['chat', 'Chat']];
+
+  function renderTabs() {
+    const bar = el('div', { className: 'ck-tabs', role: 'tablist', 'aria-label': 'Inbox views' });
+    const unread = unreadCount();
+    TABS.forEach(([id, label]) => {
+      const selected = currentTab === id;
+      const b = el('button', { className: 'ck-tab', type: 'button', role: 'tab', id: 'ck-tab-' + id,
+        'aria-selected': selected ? 'true' : 'false', 'aria-controls': 'ck-tabpanel', tabindex: selected ? '0' : '-1' },
+      [label]);
+      let note = '';
+      if (id === 'inbox' && view && view.inbox && view.inbox.length) note = String(view.inbox.length);
+      if (id === 'feed' && unread) note = unread + ' new';
+      if (id === 'chat' && view && view.chat && view.chat.awaiting_agent) note = '●';
+      if (note) b.appendChild(el('span', { className: 'ck-tab-note' }, [' ' + note]));
+      if (id === 'chat' && note) b.setAttribute('aria-label', 'Chat, waiting on an agent');
+      b.addEventListener('click', () => selectTab(id));
+      b.addEventListener('keydown', e => {
+        const n = TABS.findIndex(t => t[0] === id);
+        let to = null;
+        if (e.key === 'ArrowRight') to = TABS[(n + 1) % TABS.length][0];
+        else if (e.key === 'ArrowLeft') to = TABS[(n + TABS.length - 1) % TABS.length][0];
+        else if (e.key === 'Home') to = TABS[0][0];
+        else if (e.key === 'End') to = TABS[TABS.length - 1][0];
+        if (to) { e.preventDefault(); selectTab(to); }
+      });
+      bar.appendChild(b);
+    });
+    return bar;
+  }
+
+  function selectTab(id) {
+    currentTab = id;
+    renderPanel();
+    const t = panelEl.querySelector('#ck-tab-' + id);
+    if (t) t.focus();
+  }
+
+  // The Inbox tab: rounds to answer as one form each, then loose questions, then what waits on an agent.
+  function renderInboxList(body) {
+    const rounds = new Map();
+    const loose = [];
+    for (const qid of view.inbox || []) {
+      const q = view.questions[qid];
+      if (!q) continue;
+      const f = q.question.forked_from;
+      if (f && view.forks[f]) {
+        if (!rounds.has(f)) rounds.set(f, []);
+        rounds.get(f).push(q);
+      } else {
+        loose.push(q);
+      }
+    }
+    if (rounds.size) {
+      body.appendChild(el('div', { className: 'ck-section-heading' }, ['Rounds to answer']));
+      const list = el('div', { className: 'ck-inbox-list' });
+      for (const fid of rounds.keys()) list.appendChild(renderRoundCard(fid));
+      body.appendChild(list);
+    }
+    if (loose.length) {
+      body.appendChild(el('div', { className: 'ck-section-heading' }, ['Questions for you']));
+      const list = el('div', { className: 'ck-inbox-list' });
+      for (const q of loose) {
+        const itemData = items[q.question.item];
+        const item = el('div', { className: 'ck-inbox-item' + (arrived.has(q.question.qid) ? ' ck-arrived' : ''),
+          tabindex: '0', dataQid: q.question.qid }, [
+          el('span', { className: 'ck-q-state', dataState: q.state }, [
+            GLYPH[q.state] || '', ' ', q.state.replace('_', ' ')
+          ]),
+          el('span', { className: 'ck-inbox-item-id' }, [q.question.item]),
+          el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : ''])
+        ]);
+        const go = () => { currentItem = q.question.item; currentMode = 'item'; renderPanel(); };
+        item.addEventListener('click', go);
+        item.addEventListener('keydown', e => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
+        });
+        list.appendChild(item);
+      }
+      body.appendChild(list);
+    }
+
+    // Items awaiting agent
+    if (view.awaiting_agent && view.awaiting_agent.length > 0) {
+      const allActive = view.awaiting_agent.every(agentActive);
+      body.appendChild(el('div', { className: 'ck-section-heading' }, [allActive ? 'Agent active' : 'Awaiting agent']));
+      const list = el('div', { className: 'ck-inbox-list' });
+      for (const itemId of view.awaiting_agent) {
+        const itemData = items[itemId];
+        const item = el('div', { className: 'ck-inbox-item', tabindex: '0' }, [
+          el('span', { className: 'ck-q-state', dataState: agentActive(itemId) ? 'agent_active' : 'awaiting_agent' }, [
+            GLYPH.awaiting_agent, ' ' + agentWords(itemId)
+          ]),
+          el('span', { className: 'ck-inbox-item-id' }, [itemId]),
+          el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : ''])
+        ]);
+        item.addEventListener('click', () => {
+          currentItem = itemId;
+          currentMode = 'item';
+          renderPanel();
+        });
+        list.appendChild(item);
+      }
+      body.appendChild(list);
+    }
+
+    const chatWaits = !!(view.chat && view.chat.awaiting_agent);
+    if (chatWaits) {
+      const row = el('button', { className: 'ck-inbox-item ck-inbox-chat', type: 'button' }, [
+        el('span', { className: 'ck-q-state', dataState: 'awaiting_agent' }, [GLYPH.awaiting_agent, ' awaiting agent']),
+        el('span', { className: 'ck-inbox-item-title' }, ['Your chat message'])
+      ]);
+      row.addEventListener('click', () => selectTab('chat'));
+      body.appendChild(el('div', { className: 'ck-section-heading' }, ['Chat']));
+      body.appendChild(row);
+    }
+
+    if (!rounds.size && !loose.length && (!view.awaiting_agent || view.awaiting_agent.length === 0) && !chatWaits) {
+      body.appendChild(el('p', { style: 'color: var(--c-fg-muted); text-align: center; padding: 20px;' },
+        ['No pending items.']));
+    }
   }
 
   // Render item view
@@ -1668,6 +1867,11 @@
         const answersBtn = el('button', { className: 'ck-btn', type: 'button' }, ['Answers from this round']);
         answersBtn.addEventListener('click', () => showSheet(itemId, m.id));
         const actions = el('div', { className: 'ck-actions' }, [answersBtn]);
+        if (qs.some(q => q.state === 'awaiting_you' || q.state === 'unlocked')) {
+          const formBtn = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' }, ['Answer this round']);
+          formBtn.addEventListener('click', () => openRound(m.id));
+          actions.insertBefore(formBtn, answersBtn);
+        }
         if (qs.every(q => q.state !== 'awaiting_you')) {
           const [fuBtn, slot] = disclosure('Follow up with other seats…', 'fu-' + m.id,
             () => renderForkForm(itemId, m.id));
@@ -1681,6 +1885,905 @@
       wrap.appendChild(card);
     }
     return wrap;
+  }
+
+  // ---------------------------------------------------------------------------
+  // The review-round form (0.7.0; owner, 2026-09-29 21:00): a round's questions
+  // (every question sharing one `forked_from`) open as one form, a question per
+  // step. Picks and comments are DRAFTS, kept in this browser, until the review
+  // page's one "Lock all & process". The server answers and locks each, then
+  // sends one process request; if it would refuse any, it writes none.
+  // ---------------------------------------------------------------------------
+
+  const OPEN_STATES = ['awaiting_you', 'unlocked'];
+  const roundMem = {};  // forkId -> { drafts: {qid: {picks, text}}, step, review, nonce, failure, result }
+
+  function qNum(qid) { return parseInt(qid.split('/Q').pop(), 10); }
+
+  // Every question of the round, in qid order, and the ones the form walks (not yet locked).
+  function roundQuestions(forkId) {
+    const f = view && view.forks[forkId];
+    if (!f) return [];
+    return f.questions.map(qid => view.questions[qid]).filter(Boolean)
+      .sort((a, b) => a.question.item.localeCompare(b.question.item) || qNum(a.question.qid) - qNum(b.question.qid));
+  }
+  function roundSteps(forkId) { return roundQuestions(forkId).filter(q => OPEN_STATES.includes(q.state)); }
+
+  function roundFor(forkId) {
+    if (!roundMem[forkId]) {
+      const saved = memGet('round:' + forkId);
+      roundMem[forkId] = {
+        drafts: (saved && typeof saved.drafts === 'object' && saved.drafts) || {},
+        step: (saved && Number.isInteger(saved.step)) ? saved.step : 0,
+        review: !!(saved && saved.review),
+        nonce: (saved && typeof saved.nonce === 'string') ? saved.nonce : null,
+        failure: null, result: null
+      };
+    }
+    const mem = roundMem[forkId];
+    // An answered-but-unlocked question starts from the owner's current answer, so
+    // "Lock all" locks what they already said unless they change it here.
+    for (const q of roundSteps(forkId)) {
+      const qid = q.question.qid;
+      if (mem.drafts[qid] || q.state !== 'unlocked') continue;
+      const head = q.answers[q.answers.length - 1];
+      mem.drafts[qid] = { picks: [...head.picks], text: head.own_text || '' };
+    }
+    return mem;
+  }
+  function saveRound(forkId) {
+    const mem = roundMem[forkId];
+    if (!mem) return;
+    memSet('round:' + forkId, { drafts: mem.drafts, step: mem.step, review: mem.review, nonce: mem.nonce });
+  }
+  function drafted(d) { return !!d && ((d.picks && d.picks.length > 0) || !!(d.text && d.text.trim())); }
+  function draftedCount(forkId) {
+    const mem = roundFor(forkId);
+    return roundSteps(forkId).filter(q => drafted(mem.drafts[q.question.qid])).length;
+  }
+
+  function openRound(forkId) {
+    currentFork = forkId;
+    currentMode = 'round';
+    const mem = roundFor(forkId);
+    mem.result = null;
+    if (panelEl.getAttribute('data-open') !== 'true') openPanel(null, 'round');
+    else renderPanel();
+    const h = panelEl.querySelector('.ck-round-title');
+    if (h) h.focus();
+    return mem;
+  }
+
+  function leaveRound() {
+    currentMode = 'inbox';
+    currentTab = 'inbox';
+    renderPanel();
+  }
+
+  // A round's line in the Inbox: what it is, how far the drafts got, and the way in.
+  function renderRoundCard(forkId) {
+    const m = view.forks[forkId].message;
+    const steps = roundSteps(forkId);
+    const done = draftedCount(forkId);
+    const isNew = steps.some(q => arrived.has(q.question.qid));
+    const btn = el('button', { className: 'ck-btn ck-btn-primary', type: 'button',
+      'aria-label': 'Answer this round on ' + m.item + ': ' + steps.length + ' questions, ' + done + ' drafted' },
+    [done ? 'Continue this round' : 'Answer this round']);
+    btn.addEventListener('click', () => openRound(forkId));
+    const who = m.roles ? m.roles.map(r => ROSTER_LABEL[r] || r.replace(/^other:/, '')).join(', ') : 'committee';
+    return el('div', { className: 'ck-round-card' + (isNew ? ' ck-arrived' : ''), dataFork: forkId }, [
+      ring(done, steps.length),
+      el('div', { className: 'ck-round-card-text' }, [
+        el('div', { className: 'ck-round-card-head' }, ['⑂ ' + m.item + ' · ' + m.mode + ' · ' + who]),
+        el('div', { className: 'ck-muted' }, [steps.length + ' question' + (steps.length === 1 ? '' : 's') +
+          ' · ' + done + ' drafted · asked ' + relTime(m.ts)])
+      ]),
+      btn
+    ]);
+  }
+
+  function renderRound(forkId) {
+    const f = view && view.forks[forkId];
+    const m = f ? f.message : null;
+    const title = el('span', { className: 'ck-round-title', tabindex: '-1' },
+      [m ? 'Round: ' + m.item + ' · ' + m.mode : 'Round']);
+    panelEl.appendChild(makeHeader([title], leaveRound, 'Back to inbox'));
+    panelEl.appendChild(renderStatusBar(null));
+    const body = el('div', { className: 'ck-body ck-round' });
+    panelEl.appendChild(body);
+    if (!view) { body.appendChild(renderOffline()); return; }
+    if (!f) { body.appendChild(el('p', {}, ['This round is not in the console any more.'])); return; }
+    const mem = roundFor(forkId);
+    if (mem.result) return renderRoundResult(body, forkId, mem);
+    const steps = roundSteps(forkId);
+    if (mem.review || !steps.length) return renderRoundReview(body, forkId, mem);
+    mem.step = Math.max(0, Math.min(mem.step, steps.length - 1));
+    renderRoundStep(body, forkId, mem, steps);
+  }
+
+  function roundProgress(forkId, mem, steps) {
+    const done = steps.filter(q => drafted(mem.drafts[q.question.qid])).length;
+    const wrap = el('div', { className: 'ck-round-progress' });
+    wrap.appendChild(ring(done, steps.length));
+    wrap.appendChild(el('span', { className: 'ck-round-count' }, [
+      'Question ' + (mem.step + 1) + ' of ' + steps.length + ' · ' + done + ' picked']));
+    const bar = el('div', { className: 'ck-progress', role: 'progressbar', 'aria-label': 'Question ' +
+      (mem.step + 1) + ' of ' + steps.length, 'aria-valuemin': '1', 'aria-valuemax': String(steps.length),
+      'aria-valuenow': String(mem.step + 1) });
+    bar.appendChild(el('div', { className: 'ck-progress-fill',
+      style: 'width: ' + Math.round(100 * (mem.step + 1) / steps.length) + '%' }));
+    wrap.appendChild(bar);
+    const dots = el('div', { className: 'ck-round-dots' });
+    steps.forEach((q, i) => {
+      const d = mem.drafts[q.question.qid];
+      const state = i === mem.step ? 'current' : drafted(d) ? 'picked' : 'open';
+      const b = el('button', { className: 'ck-round-dot', type: 'button', dataState: state,
+        'aria-label': 'Question ' + (i + 1) + ', ' + q.question.qid + ': ' + (drafted(d) ? 'picked' : 'not picked yet'),
+        'aria-current': i === mem.step ? 'step' : 'false' }, [String(i + 1)]);
+      b.addEventListener('click', () => { mem.step = i; saveRound(forkId); renderPanel(); focusRoundStep(); });
+      dots.appendChild(b);
+    });
+    wrap.appendChild(dots);
+    return wrap;
+  }
+
+  function focusRoundStep() {
+    requestAnimationFrame(() => {
+      const h = panelEl.querySelector('.ck-round-qtext');
+      if (h) h.focus();
+    });
+  }
+
+  function roundGo(forkId, delta) {
+    const mem = roundFor(forkId);
+    const steps = roundSteps(forkId);
+    const next = mem.step + delta;
+    if (next >= steps.length) { mem.review = true; }
+    else if (next >= 0) { mem.step = next; }
+    else return;
+    saveRound(forkId);
+    renderPanel();
+    if (mem.review) {
+      requestAnimationFrame(() => { const h = panelEl.querySelector('.ck-review-heading'); if (h) h.focus(); });
+    } else {
+      focusRoundStep();
+    }
+  }
+
+  function renderRoundStep(body, forkId, mem, steps) {
+    const q = steps[mem.step];
+    const qData = q.question;
+    const draft = mem.drafts[qData.qid] || (mem.drafts[qData.qid] = { picks: [], text: '' });
+    const tighten = view.forks[forkId].message.mode === 'tighten';
+    body.appendChild(roundProgress(forkId, mem, steps));
+    const card = el('div', { className: 'ck-round-step', role: 'group', 'aria-labelledby': 'ck-round-qtext' });
+    card.appendChild(el('div', { className: 'ck-q-header' }, [
+      el('span', { className: 'ck-q-state', dataState: q.state }, [GLYPH[q.state] + ' ' + STATE_WORDS[q.state]]),
+      el('span', { className: 'ck-inbox-item-id' }, [qData.qid])
+    ]));
+    const text = el('div', { className: 'ck-q-text ck-round-qtext', id: 'ck-round-qtext', tabindex: '-1' });
+    text.textContent = qData.text;
+    card.appendChild(text);
+    if (qData.source) card.appendChild(el('div', { className: 'ck-q-source' }, [qData.source]));
+    if (tighten) {
+      card.appendChild(el('p', { className: 'ck-muted' }, [
+        'A tighten round: each finding is Fix now, Record in findings.md, or Leave it. Nothing happens on a pick ' +
+        'alone; it acts once locked and folded.']));
+    }
+
+    const inputs = [];
+    if (qData.kind !== 'free' && qData.options.length) {
+      const multi = qData.kind === 'multi';
+      const fs = el('fieldset', { className: 'ck-options ck-round-options' }, [
+        el('legend', { className: 'ck-sr-only' }, [multi ? 'Pick any' : 'Pick one'])]);
+      qData.options.forEach((opt, i) => {
+        const input = el('input', { type: multi ? 'checkbox' : 'radio', name: 'ck-round-opt', value: opt.id });
+        input.checked = draft.picks.includes(opt.id);  // a draft, never the ★ (R2)
+        input.addEventListener('change', () => {
+          if (multi) {
+            draft.picks = qData.options.map(o => o.id).filter(id => {
+              const box = fs.querySelector('input[value="' + id + '"]');
+              return box && box.checked;
+            });
+          } else {
+            draft.picks = input.checked ? [opt.id] : [];
+          }
+          saveRound(forkId);
+          refreshRoundProgress(forkId, mem, steps);
+        });
+        inputs.push(input);
+        const content = el('div', { className: 'ck-option-content' }, [
+          el('span', { className: 'ck-option-label' }, [
+            i < 9 ? el('kbd', { className: 'ck-kbd', 'aria-hidden': 'true' }, [String(i + 1)]) : null,
+            ' ' + opt.label])]);
+        if (qData.star === opt.id) {
+          content.appendChild(el('span', { className: 'ck-option-star' }, [
+            '★ ' + (qData.star_by ? qData.star_by.replace(/^other:/, '') + "'s pick" : 'recommended')]));
+        }
+        if (opt.description) {
+          const desc = el('div', { className: 'ck-option-desc' });
+          desc.textContent = opt.description;
+          content.appendChild(desc);
+        }
+        fs.appendChild(el('label', { className: 'ck-option' }, [input, content]));
+      });
+      card.appendChild(fs);
+      const clear = el('button', { className: 'ck-btn ck-btn-quiet', type: 'button' }, ['Clear my pick']);
+      clear.addEventListener('click', () => {
+        draft.picks = [];
+        for (const i of inputs) i.checked = false;
+        saveRound(forkId);
+        refreshRoundProgress(forkId, mem, steps);
+      });
+      card.appendChild(el('div', { className: 'ck-actions' }, [clear]));
+    }
+
+    const wordsId = 'ck-round-words';
+    card.appendChild(el('label', { for: wordsId, className: 'ck-field-label ck-round-words-label' }, [
+      qData.kind === 'free' ? 'Your answer' : 'Comment (optional): it becomes your answer\'s own words']));
+    const words = el('textarea', { className: 'ck-textarea', id: wordsId, rows: '3', maxlength: '20000' });
+    words.value = draft.text || '';
+    words.addEventListener('input', () => {
+      draft.text = words.value;
+      saveRound(forkId);
+      refreshRoundProgress(forkId, mem, steps);
+    });
+    card.appendChild(words);
+    card.appendChild(renderEvidence(qData));
+    body.appendChild(card);
+
+    const prev = el('button', { className: 'ck-btn', type: 'button' }, ['← Previous']);
+    prev.disabled = mem.step === 0;
+    prev.addEventListener('click', () => roundGo(forkId, -1));
+    const last = mem.step === steps.length - 1;
+    const next = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' }, [last ? 'Review →' : 'Next →']);
+    next.addEventListener('click', () => roundGo(forkId, +1));
+    const review = el('button', { className: 'ck-btn ck-btn-quiet', type: 'button' }, ['Review all']);
+    review.addEventListener('click', () => { mem.review = true; saveRound(forkId); renderPanel();
+      requestAnimationFrame(() => { const h = panelEl.querySelector('.ck-review-heading'); if (h) h.focus(); }); });
+    body.appendChild(el('div', { className: 'ck-actions ck-round-nav' }, [prev, next, review]));
+    body.appendChild(el('p', { className: 'ck-muted ck-round-keys' }, [
+      '← → move between questions · 1–' + Math.min(9, Math.max(1, qData.options.length)) +
+      ' pick an option · nothing is locked until you press Lock all on the review page']));
+  }
+
+  // Keep the step's progress (ring, count, dots) in step with a pick, without redrawing the inputs.
+  function refreshRoundProgress(forkId, mem, steps) {
+    const old = panelEl.querySelector('.ck-round-progress');
+    if (old) old.replaceWith(roundProgress(forkId, mem, steps));
+  }
+
+  // ←/→ walk the round and 1-9 pick an option, except while typing (0.7.0).
+  function onRoundKey(e) {
+    if (currentMode !== 'round' || !currentFork || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (panelEl.getAttribute('data-open') !== 'true') return;
+    const mem = roundMem[currentFork];
+    if (!mem || mem.review || mem.result) return;
+    const t = e.target;
+    // In the panel, or nowhere in particular (a redraw can drop focus onto <body>); never the board's own controls.
+    if (t !== document.body && t !== document.documentElement && !panelEl.contains(t)) return;
+    const typing = t && (t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' ||
+      (t.tagName === 'INPUT' && !['radio', 'checkbox'].includes(t.type)));
+    if (typing) return;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      e.preventDefault();  // on a radio this would move the pick; ↑/↓ still do that
+      roundGo(currentFork, e.key === 'ArrowRight' ? +1 : -1);
+    } else if (/^[1-9]$/.test(e.key)) {
+      const boxes = panelEl.querySelectorAll('.ck-round-options input');
+      const box = boxes[parseInt(e.key, 10) - 1];
+      if (box) {
+        e.preventDefault();
+        box.checked = box.type === 'radio' ? true : !box.checked;
+        box.dispatchEvent(new Event('change'));
+        box.focus();
+      }
+    }
+  }
+
+  // Structured evidence (0.7.0): each row's citation, command and result, and the
+  // cited lines as they are NOW, read by the server, marked unchanged or changed
+  // since the question was asked. A question without evidence shows its text only.
+  const evidenceCache = {};
+  function fetchEvidence(qid) {
+    if (!evidenceCache[qid]) {
+      evidenceCache[qid] = fetch(config.api + '/evidence?qid=' + encodeURIComponent(qid), { credentials: 'same-origin' })
+        .then(r => r.json().then(d => { if (!r.ok) throw new Error(d.error || 'HTTP ' + r.status); return d; }))
+        .catch(e => { delete evidenceCache[qid]; return { error: e.message || 'Network error' }; });
+    }
+    return evidenceCache[qid];
+  }
+  const EVIDENCE_WORDS = { unchanged: 'unchanged', moved: 'unchanged, moved', changed: 'changed since asked',
+    missing: 'file gone' };
+
+  function renderEvidence(qData) {
+    const box = el('section', { className: 'ck-evidence', 'aria-label': 'Evidence for ' + qData.qid });
+    if (!qData.evidence || !qData.evidence.length) {
+      box.appendChild(el('p', { className: 'ck-muted' }, [
+        'No structured evidence on this question: it rests on its text above' +
+        (qData.source ? ' and ' + qData.source : '') + '.']));
+      return box;
+    }
+    box.appendChild(el('div', { className: 'ck-evidence-heading' }, ['Evidence']));
+    const list = el('ul', { className: 'ck-evidence-list' });
+    box.appendChild(list);
+    list.appendChild(el('li', { className: 'ck-muted' }, ['Reading the cited lines…']));
+    fetchEvidence(qData.qid).then(data => {
+      list.textContent = '';
+      const rows = data.error ? qData.evidence.map(r => ({ cite: r.cite, command: r.command, result: r.result,
+        asked: r.text, state: null })) : data.evidence;
+      if (data.error) box.insertBefore(el('p', { className: 'ck-error-msg' }, [
+        'Could not read the lines as they are now: ' + data.error + '. Shown as asked.']), list);
+      for (const r of rows) {
+        const li = el('li', { className: 'ck-evidence-row', dataState: r.state || 'unknown' });
+        const head = el('div', { className: 'ck-evidence-head' }, [el('code', {}, [r.cite])]);
+        if (r.state) head.appendChild(el('span', { className: 'ck-evidence-state', dataState: r.state },
+          [(r.state === 'unchanged' || r.state === 'moved' ? '✓ ' : '△ ') + EVIDENCE_WORDS[r.state]]));
+        li.appendChild(head);
+        if (r.command) {
+          const c = el('pre', { className: 'ck-evidence-cmd' });
+          c.textContent = '$ ' + r.command;
+          li.appendChild(c);
+        }
+        if (r.result) {
+          const c = el('pre', { className: 'ck-evidence-result', tabindex: '0' });
+          c.textContent = r.result;
+          li.appendChild(c);
+        }
+        if (r.words) li.appendChild(el('div', { className: 'ck-muted' }, [r.words]));
+        const shown = r.state === 'changed' && r.diff ? r.diff : (r.now !== undefined ? r.now : r.asked);
+        if (shown) {
+          if (r.state === 'changed' && r.diff) {
+            li.appendChild(el('div', { className: 'ck-muted' }, ['As asked (−) against the file now (+):']));
+          }
+          const pre = el('pre', { className: 'ck-evidence-lines', tabindex: '0' });
+          pre.textContent = shown;
+          li.appendChild(pre);
+        }
+        list.appendChild(li);
+      }
+    });
+    return box;
+  }
+
+  // The review page: what is picked, commented and left, then one "Lock all & process".
+  function renderRoundReview(body, forkId, mem) {
+    const all = roundQuestions(forkId);
+    const steps = roundSteps(forkId);
+    body.appendChild(el('h2', { className: 'ck-review-heading', tabindex: '-1' }, ['Review this round']));
+    const toLock = steps.filter(q => drafted(mem.drafts[q.question.qid]));
+    const left = steps.length - toLock.length;
+    body.appendChild(el('p', { className: 'ck-muted' }, [toLock.length + ' to lock, ' + left + ' left unanswered' +
+      (all.length > steps.length ? ', ' + (all.length - steps.length) + ' already locked' : '') +
+      '. Nothing is locked until you press the button below.']));
+    if (mem.failure) body.appendChild(renderLockFailure(mem.failure));
+    const refused = {};
+    for (const r of (mem.failure && mem.failure.results) || []) if (r.qid) refused[r.qid] = r;
+    const list = el('ol', { className: 'ck-review-list' });
+    for (const q of all) {
+      const qData = q.question;
+      const labels = optionLabels(qData);
+      const d = mem.drafts[qData.qid];
+      const open = OPEN_STATES.includes(q.state);
+      const status = !open ? 'locked' : drafted(d) ? 'picked' : 'left';
+      const li = el('li', { className: 'ck-review-row', dataStatus: status }, [
+        el('div', { className: 'ck-review-q' }, [el('span', { className: 'ck-inbox-item-id' }, [qData.qid]), ' ',
+          truncateText(qData.text, 120)])]);
+      if (status === 'locked') {
+        li.appendChild(el('div', { className: 'ck-muted' }, ['Already ' + STATE_WORDS[q.state] + ': not changed here.']));
+      } else if (status === 'picked') {
+        li.appendChild(el('div', { className: 'ck-review-pick' }, ['✓ ' + (d.picks.map(p => labels[p] || p).join(', ') ||
+          'your own words')]));
+        if (d.text && d.text.trim()) {
+          const w = el('div', { className: 'ck-receipt-own' });
+          w.textContent = 'Your words: ' + d.text.trim();
+          li.appendChild(w);
+        }
+      } else {
+        li.appendChild(el('div', { className: 'ck-muted' }, ['Left: stays unanswered in the inbox.']));
+      }
+      if (refused[qData.qid] && refused[qData.qid].error) {
+        li.appendChild(el('div', { className: 'ck-error-msg' }, [refused[qData.qid].status + ': ' + refused[qData.qid].error]));
+      }
+      if (open) {
+        const change = el('button', { className: 'ck-btn', type: 'button', 'aria-label': 'Change ' + qData.qid }, ['Change']);
+        change.addEventListener('click', () => {
+          mem.review = false;
+          mem.step = steps.indexOf(q);
+          saveRound(forkId);
+          renderPanel();
+          focusRoundStep();
+        });
+        li.appendChild(el('div', { className: 'ck-actions' }, [change]));
+      }
+      list.appendChild(li);
+    }
+    body.appendChild(list);
+    const go = el('button', { className: 'ck-btn ck-btn-primary ck-lock-all', type: 'button' }, [
+      'Lock all & process (' + toLock.length + ')']);
+    go.disabled = toLock.length === 0;
+    go.addEventListener('click', () => lockAll(forkId, go));
+    const back = el('button', { className: 'ck-btn', type: 'button' }, ['Back to the questions']);
+    back.disabled = steps.length === 0;
+    back.addEventListener('click', () => { mem.review = false; saveRound(forkId); renderPanel(); focusRoundStep(); });
+    body.appendChild(el('div', { className: 'ck-actions ck-round-nav' }, [go, back]));
+    body.appendChild(el('p', { className: 'ck-muted' }, [
+      'Each picked answer is locked, then one "Answers are in" request goes to the agent. If the server would ' +
+      'refuse any of them, it locks none and says which. A locked answer can later be superseded, with a reason.']));
+  }
+
+  function renderLockFailure(f) {
+    const words = f.status === 409 ? 'Nothing was locked. ' : f.status === 500 ? 'Stopped part way. ' : '';
+    return el('div', { className: 'ck-error-msg', role: 'alert' }, [words + (f.error || 'The server refused this.')]);
+  }
+
+  async function lockAll(forkId, btn) {
+    const mem = roundFor(forkId);
+    const entries = roundSteps(forkId).filter(q => drafted(mem.drafts[q.question.qid])).map(q => {
+      const d = mem.drafts[q.question.qid];
+      return { qid: q.question.qid, picks: [...d.picks], own_text: (d.text || '').trim() };
+    });
+    if (!entries.length) return;
+    // One nonce per attempt, kept until it succeeds: a retry after a failure part way resumes.
+    if (!mem.nonce) mem.nonce = genNonce();
+    saveRound(forkId);
+    btn.disabled = true;
+    btn.textContent = 'Locking…';
+    let resp = null;
+    let data = {};
+    try {
+      resp = await fetch(config.api + '/lock-all', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fork: forkId, entries: entries, nonce: mem.nonce }) });
+      data = await resp.json().catch(() => ({ error: 'HTTP ' + resp.status }));
+    } catch (e) {
+      data = { error: "Can't reach the console server. Nothing is known to be locked; press again when it is " +
+        'back, and anything already locked is skipped.' };
+    }
+    if (resp && resp.ok) {
+      mem.result = data;
+      mem.failure = null;
+      mem.drafts = {};
+      mem.nonce = null;
+      mem.review = false;
+      mem.step = 0;
+      memSet('round:' + forkId, null);
+      announce('Locked ' + data.results.filter(r => r.status === 'locked').length + ' answers; the agent was asked to process them.');
+    } else {
+      mem.failure = { status: resp ? resp.status : 0, error: data.error, results: data.results || [] };
+      saveRound(forkId);
+      announce('Not locked: ' + (data.error || 'refused'));
+    }
+    await fetchView();
+    renderPanel();
+    const h = panelEl.querySelector(mem.result ? '.ck-result-heading' : '.ck-review-heading');
+    if (h) h.focus();
+  }
+
+  function renderRoundResult(body, forkId, mem) {
+    const r = mem.result;
+    body.appendChild(el('h2', { className: 'ck-result-heading', tabindex: '-1' }, ['Locked, and sent to the agent']));
+    const list = el('ul', { className: 'ck-review-list' });
+    const words = { locked: '✓ locked now', already_locked: '✓ was already locked' };
+    for (const x of r.results || []) {
+      list.appendChild(el('li', { className: 'ck-review-row', dataStatus: x.status }, [
+        el('span', { className: 'ck-inbox-item-id' }, [x.qid || '']), ' ' + (words[x.status] || x.status)]));
+    }
+    body.appendChild(list);
+    body.appendChild(el('p', { className: 'ck-muted' }, [r.process
+      ? 'One "Answers are in" request went to the agent: ' + listeningWords(cursor && cursor.listening).text.toLowerCase() + '.'
+      : 'No process request was needed.']));
+    const back = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' }, ['Back to inbox']);
+    back.addEventListener('click', () => { mem.result = null; leaveRound(); });
+    const sheet = el('button', { className: 'ck-btn', type: 'button' }, ['Answers from this round']);
+    sheet.addEventListener('click', () => { mem.result = null; showSheet(view.forks[forkId].message.item, forkId); });
+    body.appendChild(el('div', { className: 'ck-actions' }, [back, sheet]));
+  }
+
+  // ---------------------------------------------------------------------------
+  // The Feed (0.7.0): every store record as an event, newest first, filterable
+  // by kind and by item. Folds and PR merges are not store records, so they are
+  // not here; the footer says so.
+  // ---------------------------------------------------------------------------
+
+  const FEED_LABEL = { question: 'Question asked', answer: 'Answered', lock: 'Locked', reanchor: 'Re-anchored',
+    fork: 'Deliberation requested', process: 'Answers are in', chat: 'Chat', reply: 'Agent replied', note: 'Your note' };
+  const feedState = { kind: '', item: '', events: null, next: null, error: null, seq: -1, key: '' };
+
+  function feedWords(ev) {
+    if (ev.kind === 'answer' && ev.supersedes) return 'Answer changed (supersedes a lock)';
+    if (ev.kind === 'lock' && ev.relock) return 'Re-locked';
+    if (ev.kind === 'fork') {
+      if (ev.about_qid) return 'Follow-up on ' + ev.about_qid;
+      if (ev.follow_up_of) return 'Follow-up round';
+    }
+    if (ev.kind === 'chat') return ev.by === 'owner' ? 'You, in the chat' : 'Agent, in the chat';
+    return FEED_LABEL[ev.kind] || ev.kind;
+  }
+
+  async function loadFeed(listEl, append) {
+    const key = feedState.kind + '|' + feedState.item;
+    let url = config.api + '/feed?limit=50';
+    if (feedState.kind) url += '&kind=' + encodeURIComponent(feedState.kind);
+    if (feedState.item) url += '&item=' + encodeURIComponent(feedState.item);
+    if (append && feedState.next) url += '&before=' + feedState.next;
+    try {
+      const resp = await fetch(url, { credentials: 'same-origin' });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'HTTP ' + resp.status);
+      if (key !== feedState.kind + '|' + feedState.item) return; // the filter changed while this loaded
+      feedState.events = append && feedState.events ? feedState.events.concat(data.events) : data.events;
+      feedState.next = data.next_before;
+      feedState.seq = append ? feedState.seq : data.seq;
+      feedState.key = key;
+      feedState.error = null;
+    } catch (e) {
+      feedState.error = e.message || 'Network error';
+    }
+    if (document.contains(listEl)) fillFeedList(listEl);
+  }
+
+  function renderFeed(body) {
+    const kindSel = el('select', { className: 'ck-select', id: 'ck-feed-kind' });
+    kindSel.appendChild(el('option', { value: '' }, ['Every kind']));
+    for (const k of Object.keys(FEED_LABEL)) {
+      const o = el('option', { value: k }, [FEED_LABEL[k]]);
+      if (feedState.kind === k) o.selected = true;
+      kindSel.appendChild(o);
+    }
+    const itemSel = el('select', { className: 'ck-select', id: 'ck-feed-item' });
+    itemSel.appendChild(el('option', { value: '' }, ['Every item']));
+    const chatOpt = el('option', { value: CHAT_ITEM }, ['The chat']);
+    if (feedState.item === CHAT_ITEM) chatOpt.selected = true;
+    itemSel.appendChild(chatOpt);
+    for (const id of treeOrder()) {
+      const o = el('option', { value: id }, [id + (items[id].title ? ' · ' + truncateText(items[id].title, 40) : '')]);
+      if (feedState.item === id) o.selected = true;
+      itemSel.appendChild(o);
+    }
+    const list = el('ol', { className: 'ck-feed', 'aria-label': 'What happened, newest first' });
+    const refilter = () => {
+      feedState.kind = kindSel.value;
+      feedState.item = itemSel.value;
+      feedState.events = null;
+      list.textContent = '';
+      list.appendChild(el('li', { className: 'ck-muted' }, ['Loading…']));
+      loadFeed(list, false);
+    };
+    kindSel.addEventListener('change', refilter);
+    itemSel.addEventListener('change', refilter);
+    body.appendChild(el('div', { className: 'ck-feed-filters' }, [
+      el('label', { for: 'ck-feed-kind', className: 'ck-field-label' }, ['Show']), kindSel,
+      el('label', { for: 'ck-feed-item', className: 'ck-field-label' }, ['on']), itemSel]));
+    body.appendChild(list);
+    const key = feedState.kind + '|' + feedState.item;
+    if (feedState.events && feedState.key === key) fillFeedList(list);
+    else list.appendChild(el('li', { className: 'ck-muted' }, ['Loading…']));
+    if (!feedState.events || feedState.key !== key || feedState.seq !== view.seq) loadFeed(list, false);
+    body.appendChild(el('p', { className: 'ck-muted ck-feed-foot' }, [
+      'Folds and pull-request merges happen in the repository, not in the console\'s store, so they are not ' +
+      'listed here: see the project\'s pull requests.']));
+  }
+
+  function fillFeedList(list) {
+    list.textContent = '';
+    if (feedState.error) {
+      list.appendChild(el('li', { className: 'ck-error-msg' }, ['Could not load the feed: ' + feedState.error]));
+      return;
+    }
+    const evs = feedState.events || [];
+    if (!evs.length) list.appendChild(el('li', { className: 'ck-muted' }, ['Nothing here yet.']));
+    for (const ev of evs) {
+      const isNew = ev.seq > seenAtOpen && ev.by === 'agent';
+      const where = ev.item === CHAT_ITEM ? 'chat' : (ev.qid || ev.item || '');
+      const row = el('li', { className: 'ck-feed-row' + (isNew ? ' ck-feed-new' : ''), dataKind: ev.kind, dataSeq: String(ev.seq) });
+      const head = el('div', { className: 'ck-feed-head' }, [
+        el('span', { className: 'ck-feed-kind', dataKind: ev.kind }, [feedWords(ev)]),
+        el('span', { className: 'ck-inbox-item-id' }, [where]),
+        el('span', { className: 'ck-feed-time', title: new Date(ev.ts).toLocaleString() }, [relTime(ev.ts)])
+      ]);
+      if (isNew) head.appendChild(el('span', { className: 'ck-feed-newtag' }, ['new']));
+      row.appendChild(head);
+      if (ev.text) {
+        const t = el('div', { className: 'ck-feed-text' });
+        t.textContent = ev.text;
+        row.appendChild(t);
+      }
+      const target = ev.item === CHAT_ITEM ? 'chat' : (items[ev.item] ? ev.item : null);
+      if (target) {
+        const open = el('button', { className: 'ck-btn ck-btn-quiet', type: 'button',
+          'aria-label': 'Open ' + (target === 'chat' ? 'the chat' : target) }, ['Open']);
+        open.addEventListener('click', () => {
+          if (target === 'chat') return selectTab('chat');
+          currentItem = target;
+          currentMode = 'item';
+          renderPanel();
+        });
+        row.appendChild(open);
+      }
+      list.appendChild(row);
+    }
+    if (feedState.next) {
+      const more = el('button', { className: 'ck-btn', type: 'button' }, ['Older']);
+      more.addEventListener('click', () => { more.disabled = true; loadFeed(list, true); });
+      list.appendChild(el('li', { className: 'ck-feed-more' }, [more]));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // The chat (0.7.0; owner: "answered by whichever session is watching"). A
+  // general message, not tied to a question: an owner message on the chat thread
+  // with intent 'chat', which rings the doorbell so a watching session wakes and
+  // replies in the same thread with `agent.py reply @chat`.
+  // ---------------------------------------------------------------------------
+
+  function renderChat(body) {
+    body.appendChild(renderChatLog());
+    body.appendChild(renderChatStatus());
+    body.appendChild(renderChatCompose());
+  }
+
+  // A reply that arrives while the owner types is drawn into the log in place: the
+  // box they are typing in, its caret and its draft are never touched.
+  function refreshChatInPlace() {
+    const log = panelEl.querySelector('.ck-chat-log');
+    const status = panelEl.querySelector('.ck-chat-status');
+    if (!log || !status) return false;
+    const fresh = renderChatLog();
+    log.replaceWith(fresh);
+    fresh.scrollTop = fresh.scrollHeight;
+    status.replaceWith(renderChatStatus());
+    const tabs = panelEl.querySelector('.ck-tabs');
+    if (tabs && !tabs.contains(document.activeElement)) tabs.replaceWith(renderTabs());
+    return true;
+  }
+
+  function renderChatLog() {
+    const msgs = ((view.threads && view.threads[CHAT_ITEM]) || []).slice().sort((a, b) => a.seq - b.seq);
+    const log = el('div', { className: 'ck-chat-log', role: 'log', 'aria-label': 'Chat with the agent', tabindex: '0' });
+    if (!msgs.length) {
+      log.appendChild(el('p', { className: 'ck-muted' }, [
+        'Ask anything that is not tied to one question: a status, a "why", a request. A session that is ' +
+        'watching answers here.']));
+    }
+    for (const m of msgs) {
+      const b = el('div', { className: 'ck-chat-msg' + (arrived.has(m.id) ? ' ck-arrived' : ''), dataBy: m.by });
+      b.appendChild(el('div', { className: 'ck-chat-who' }, [
+        m.by === 'owner' ? 'You' : 'Agent', ' · ',
+        el('span', { title: new Date(m.ts).toLocaleString() }, [relTime(m.ts)])]));
+      const t = el('div', { className: 'ck-chat-text' });
+      t.textContent = m.text;
+      b.appendChild(t);
+      log.appendChild(b);
+    }
+    return log;
+  }
+
+  function renderChatStatus() {
+    const w = listeningWords(cursor ? cursor.listening : null);
+    const waiting = !!(view.chat && view.chat.awaiting_agent);
+    return el('p', { className: 'ck-chat-status', dataState: w.state }, [
+      waiting ? (w.state === 'listening' ? '● An agent is listening and will answer here.'
+        : '○ Waiting: no session is watching right now, so your message waits until one starts.')
+        : (w.state === 'listening' ? '● An agent is listening.' : '○ ' + w.text + '.')]);
+  }
+
+  function renderChatCompose() {
+    const id = 'ck-chat-input';
+    const box = el('textarea', { className: 'ck-textarea', id: id, rows: '3', maxlength: String(MAX_CHAT),
+      placeholder: 'Ask the agent… (Enter sends, Shift+Enter for a new line)' });
+    if (draftTexts.chat === undefined) draftTexts.chat = memGet('chat-draft') || '';
+    box.value = draftTexts.chat;
+    const count = el('span', { className: 'ck-chat-count', 'aria-live': 'off' }, [box.value.length + ' / ' + MAX_CHAT]);
+    const err = el('p', { className: 'ck-error-msg', role: 'status', 'aria-live': 'polite' });
+    box.addEventListener('input', () => {
+      draftTexts.chat = box.value;
+      memSet('chat-draft', box.value || null);
+      count.textContent = box.value.length + ' / ' + MAX_CHAT;
+    });
+    const send = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' }, ['Send']);
+    const doSend = async () => {
+      const text = box.value.trim();
+      if (!text) { err.textContent = 'Type a message first.'; return; }
+      send.disabled = true;
+      err.textContent = '';
+      const result = await apiPost('/message', { item: CHAT_ITEM, text: text, intent: 'chat' }, 'chat');
+      send.disabled = false;
+      if (result.error) {
+        err.textContent = 'Not sent: ' + result.error;
+        announce('Not sent: ' + result.error);
+        return;
+      }
+      draftTexts.chat = '';
+      memSet('chat-draft', null);
+      renderPanel();
+      const again = panelEl.querySelector('#' + id);
+      if (again) again.focus();
+    };
+    send.addEventListener('click', doSend);
+    box.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); doSend(); }
+    });
+    return el('div', { className: 'ck-chat-compose' }, [
+      el('label', { for: id, className: 'ck-field-label' }, ['Message']), box,
+      el('div', { className: 'ck-chat-foot' }, [count, send]), err]);
+  }
+
+  // ---------------------------------------------------------------------------
+  // The live loop (0.7.0): a long poll on the store's sequence number. The page
+  // asks /api/wait "anything since seq S?"; the server answers the moment
+  // something changes, or after 25 s with "no". Only a change fetches the view.
+  // Paused while the tab is hidden; on errors it backs off 2 s, 4 s … 60 s.
+  // A server with no /api/wait (before 0.7.0) stops the loop, and Refresh still works.
+  // ---------------------------------------------------------------------------
+
+  const LIVE_WAIT_S = 25;
+  const LIVE_BACKOFF_MIN = 2000;
+  const LIVE_BACKOFF_MAX = 60000;
+  const LIVE_MIN_GAP = 1000;   // never two polls closer than this, whatever the server says
+  let liveVer = null;
+  let liveBackoff = 0;
+  let liveAbort = null;
+  let liveStopped = false;
+  let liveRunning = false;
+  let liveWake = null;          // resolves a pause early (tab shown again)
+  let pendingLive = false;      // a live change arrived while the owner was typing in the panel
+
+  function sleep(ms) {
+    return new Promise(resolve => {
+      const t = setTimeout(() => { liveWake = null; resolve(); }, ms);
+      liveWake = () => { clearTimeout(t); liveWake = null; resolve(); };
+    });
+  }
+
+  function whenVisible() {
+    return new Promise(resolve => {
+      const on = () => {
+        if (document.visibilityState !== 'hidden') { document.removeEventListener('visibilitychange', on); resolve(); }
+      };
+      document.addEventListener('visibilitychange', on);
+    });
+  }
+
+  async function liveLoop() {
+    if (liveRunning) return;
+    liveRunning = true;
+    try {
+      while (!liveStopped) {
+        if (document.visibilityState === 'hidden') { await whenVisible(); continue; }
+        const since = view && typeof view.seq === 'number' ? view.seq : null;
+        if (since === null) {  // no view yet, or an older server's view without a seq
+          const got = await fetchView();
+          if (!got) { await backoff(); continue; }
+          if (typeof view.seq !== 'number') { liveStopped = true; break; }
+          onLive(false);
+          continue;
+        }
+        const started = Date.now();
+        const ctl = new AbortController();
+        liveAbort = ctl;
+        const guard = setTimeout(() => ctl.abort(), (LIVE_WAIT_S + 15) * 1000);
+        let resp;
+        try {
+          let url = config.api + '/wait?since=' + since + '&timeout=' + LIVE_WAIT_S;
+          if (liveVer) url += '&ver=' + encodeURIComponent(liveVer);
+          resp = await fetch(url, { credentials: 'same-origin', signal: ctl.signal });
+        } catch (e) {
+          clearTimeout(guard);
+          liveAbort = null;
+          if (document.visibilityState === 'hidden') continue;  // aborted because the tab was hidden
+          await backoff();
+          continue;
+        }
+        clearTimeout(guard);
+        liveAbort = null;
+        if (resp.status === 404) { liveStopped = true; break; }  // a server from before 0.7.0
+        if (!resp.ok) { await backoff(); continue; }
+        let data;
+        try { data = await resp.json(); } catch (e) { await backoff(); continue; }
+        liveBackoff = 0;
+        const verChanged = liveVer !== null && data.ver !== liveVer;
+        liveVer = data.ver;
+        if (data.seq !== view.seq) {  // not already fetched by one of this page's own writes
+          if (await fetchView()) onLive(true);
+          else await backoff();
+        } else if (data.seq !== since) {
+          cursor = data.cursor || cursor;
+        } else if (verChanged && data.cursor) {
+          cursor = data.cursor;
+          onLive(false);
+        } else if (data.cursor) {
+          cursor = data.cursor;  // the listening heartbeat, refreshed at least every poll
+          refreshStatusBits();
+        }
+        const gap = Date.now() - started;
+        if (gap < LIVE_MIN_GAP) await sleep(LIVE_MIN_GAP - gap);
+      }
+    } finally {
+      liveRunning = false;
+    }
+  }
+
+  async function backoff() {
+    liveBackoff = liveBackoff ? Math.min(liveBackoff * 2, LIVE_BACKOFF_MAX) : LIVE_BACKOFF_MIN;
+    await sleep(liveBackoff + Math.floor(Math.random() * 500));
+  }
+
+  // Is the owner in the middle of something in the panel? Then a redraw would take their focus and caret.
+  function busyInPanel() {
+    const a = document.activeElement;
+    if (!panelEl || !a || a === document.body || !panelEl.contains(a)) return false;
+    if (currentMode === 'round') return true;  // walking a round: the next step redraws it anyway
+    return a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || (a.tagName === 'INPUT' && a.type !== 'radio' && a.type !== 'checkbox');
+  }
+
+  // A live change arrived. The buttons outside the panel are already updated (fetchView);
+  // the open panel is redrawn, unless the owner is typing in it: then a "Show" note waits.
+  function onLive(storeChanged) {
+    updateInboxButton();
+    updateItemButtons();
+    if (storeChanged && arrived.size) {
+      const qs = [...arrived].filter(i => view.questions[i]).length;
+      const msgs = arrived.size - qs;
+      const parts = [];
+      if (qs) parts.push(qs + ' new question' + (qs === 1 ? '' : 's'));
+      if (msgs) parts.push(msgs + ' new message' + (msgs === 1 ? '' : 's'));
+      announce(parts.join(', ') + '.');
+    }
+    if (!panelEl || panelEl.getAttribute('data-open') !== 'true') return;
+    if (busyInPanel()) {
+      if (currentMode === 'inbox' && currentTab === 'chat' && refreshChatInPlace()) return;
+      pendingLive = true;  // redrawn when the owner leaves the text box
+      if (storeChanged && arrived.size) showLiveNote();
+      return;
+    }
+    redrawKeepingPlace();
+  }
+
+  function redrawKeepingPlace() {
+    const bodyEl = panelEl.querySelector('.ck-body');
+    const top = bodyEl ? bodyEl.scrollTop : 0;
+    const hadFocus = panelEl.contains(document.activeElement) && document.activeElement !== document.body;
+    renderPanel();
+    const again = panelEl.querySelector('.ck-body');
+    if (again && currentTab !== 'chat') again.scrollTop = top;
+    // Focus was on a control the redraw replaced: put it somewhere stable in the panel, never on the board.
+    if (hadFocus && !panelEl.contains(document.activeElement)) {
+      const t = panelEl.querySelector('[role="tab"][aria-selected="true"]') || panelEl.querySelector('.ck-close-btn');
+      if (t) t.focus();
+    }
+  }
+
+  function showLiveNote() {
+    pendingLive = true;
+    if (panelEl.querySelector('.ck-live-note')) return;
+    const show = el('button', { className: 'ck-btn ck-btn-quiet', type: 'button' }, ['Show']);
+    show.addEventListener('click', () => { redrawKeepingPlace(); });
+    const note = el('div', { className: 'ck-live-note', role: 'status' }, [
+      el('span', {}, ['New activity. ']), show]);
+    const bar = panelEl.querySelector('.ck-status-bar');
+    if (bar) bar.appendChild(note);
+  }
+
+  // Cheap updates that need no redraw: the "agent listening" words.
+  function refreshStatusBits() {
+    const old = panelEl && panelEl.querySelector('.ck-status-bar .ck-listening');
+    if (old) old.replaceWith(renderListening());
+  }
+
+  // Pause while hidden: stop the open poll (it holds a server thread), and resume at once when shown.
+  function onVisibility() {
+    if (document.visibilityState === 'hidden') {
+      if (liveAbort) liveAbort.abort();
+    } else {
+      if (liveWake) liveWake();
+      if (!liveStopped && !liveRunning) liveLoop();
+    }
+  }
+
+  // When the owner leaves a text box, a redraw that waited for them can happen.
+  function onPanelFocusOut() {
+    if (!pendingLive) return;
+    setTimeout(() => { if (pendingLive && !busyInPanel()) redrawKeepingPlace(); }, 0);
   }
 
   // Live values (AB-2/Q4, owner): the committed page stays the page, and an
@@ -1794,9 +2897,12 @@
       }
     }
     createPanel();
+    document.addEventListener('keydown', onRoundKey);
+    panelEl.addEventListener('focusout', onPanelFocusOut);
+    document.addEventListener('visibilitychange', onVisibility);
     injectItemButtons();
-    // Initial fetch
-    fetchView();
+    // Initial fetch, then the live loop (0.7.0) keeps the page current
+    fetchView().then(() => { if (config && config.api) liveLoop(); });
     startBoard();
   }
 
@@ -1807,6 +2913,14 @@
     },
     refreshBoard: function() {
       return fetchBoard();
+    },
+    // 0.7.0: open the inbox on a tab ('inbox', 'feed', 'chat'), or a round's form.
+    openTab: function(tab) {
+      currentTab = TABS.some(t => t[0] === tab) ? tab : 'inbox';
+      openPanel(null, 'inbox');
+    },
+    openRound: function(forkId) {
+      openRound(forkId);
     },
     refresh: function() {
       return fetchView().then(() => {

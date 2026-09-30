@@ -1,6 +1,6 @@
 ---
 name: console-process
-description: Use when the owner console's doorbell says "process" (the owner pressed "Answers are in"), when the SessionStart note lists owner requests, or when a background `agent.py watch` exits. Folds newly locked answers through a PR, replies to threads awaiting the agent, runs waiting forks, marks the console synced and re-arms the watch.
+description: Use when the owner console's doorbell says "process" (the owner pressed "Answers are in") or "chat" (a chat message in the inbox), when the SessionStart note lists owner requests, or when a background `agent.py watch` exits. Folds newly locked answers through a PR, replies to threads and chat messages awaiting the agent, runs waiting forks, marks the console synced and re-arms the watch.
 ---
 
 # Process the owner console
@@ -66,6 +66,21 @@ Answer what was asked, in plain words. If a message needs a decision rather
 than an answer, ask it as a question (the console-fork skill's format) instead
 of deciding it yourself.
 
+**The chat** (0.7.0). `view.chat.awaiting_agent` is true when the owner's
+latest chat message has no reply yet; `view.threads["@chat"]` holds the
+thread. A chat line on the doorbell (`"intent": "chat"`, `"item": "@chat"`)
+is what woke you. Answer the newest owner message there, in the same thread:
+
+    A reply @chat "text" --reply-to RECORD_ID
+
+The chat is general: a status, a "why", a request. Answer from the
+repository as it is, and say what you checked (a file and line, a command and
+what it printed). Anything the owner must decide goes on the console as a
+question (console-ask), and your reply says so, naming it. Never act on a chat
+message beyond answering it unless it plainly asks for work you would do
+anyway in this session; a change it asks for goes through the project's usual
+PR path. `@chat` is not an item: do not pass it to `A working`.
+
 ## 4. Run each waiting fork
 
 Every owner message with `intent: "fork"` that has no questions yet
@@ -80,7 +95,8 @@ leave them after the cursor.
 
     A synced --through SEQ
 
-`SEQ` is the highest doorbell seq you fully handled in steps 2–4. The cursor
+`SEQ` is the highest doorbell seq you fully handled in steps 2–4, chat lines
+included once you have replied to them. The cursor
 only moves forward. If something failed, say so instead:
 
     A synced --error "what failed, in one line"
@@ -92,5 +108,6 @@ true`), so its exit wakes this session when the owner sends the next request:
 
     A watch
 
-It exits 0 printing the waiting lines when a `process` or `fork` arrives, and
-returns at once if one is already waiting. When it exits, run this skill again.
+It exits 0 printing the waiting lines when a `process`, `fork` or `chat`
+arrives, and returns at once if one is already waiting. When it exits, run
+this skill again.

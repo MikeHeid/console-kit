@@ -48,6 +48,14 @@ into the document that owns it.
   answer stale. Do not hash a whole big living file (`file_sha256` of a
   register, status file or log): every unrelated edit would make the answer
   stale. The full list is in the console-fork skill.
+- Add **`evidence`** when the decision rests on specific lines, a command or
+  a measurement (0.7.0): up to 8 rows of
+  `{"cite": "path/to/file:120-134", "command": "...", "result": "..."}`.
+  `cite` is required (a relative path inside the project with `:line` or
+  `:start-end`, at most 200 lines); `command` (one line) and `result` (at most
+  2000 characters) are optional. Never send `text`: the server reads the
+  cited lines itself, so the owner's form can say later whether they changed.
+  The full rules are in the console-fork skill.
 - Write in plain words the owner can decide from without opening the
   document. The document's shorthand (`Q-GE5`, `D-206`) goes in the
   description only with its meaning beside it.

@@ -790,3 +790,271 @@
 .ck-followup .ck-error-msg:empty { display: none; }
 .ck-followup .ck-field-label { display: block; margin: 10px 0 4px; }
 .ck-followup .ck-input, .ck-followup .ck-textarea { box-sizing: border-box; max-width: 100%; }
+
+/* ==========================================================================
+   0.7.0: a live console. Tabs, the Feed, the chat, the review-round form,
+   progress rings and gentle motion. Every animation below runs only under
+   prefers-reduced-motion: no-preference; words always carry the state, and
+   colour and motion only echo it.
+   ========================================================================== */
+
+/* --- Unread chip on the inbox button and the docked strip --- */
+.ck-new-count {
+  font-weight: 600;
+  font-size: 12px;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: var(--c-accent);
+  color: var(--c-accent-fg, #fff);
+  white-space: nowrap;
+}
+[data-new-empty="true"] > .ck-new-count { display: none; }
+@media (min-width: 1024px) {
+  .ck-dock-strip .ck-new-count { padding: 2px 3px; white-space: normal; text-align: center; font-size: 11px; }
+}
+
+/* --- Progress rings --- */
+.ck-ring { flex-shrink: 0; vertical-align: middle; transform: rotate(-90deg); }
+.ck-ring circle { fill: none; stroke-width: 3; }
+.ck-ring-track { stroke: var(--c-border-light, var(--c-border)); }
+.ck-ring-arc { stroke: var(--c-accent); stroke-linecap: round; }
+.ck-ring-full .ck-ring-arc { stroke: var(--c-built, var(--c-accent)); }
+.ck-item-btn .ck-ring { width: 14px; height: 14px; }
+@media (prefers-reduced-motion: no-preference) {
+  .ck-ring-arc { transition: stroke-dashoffset 0.5s ease; }
+  .ck-q-state { transition: background-color 0.3s ease, color 0.3s ease; }
+  .ck-pulse { animation: ck-pop 0.6s ease; }
+  .ck-arrived { animation: ck-arrive 1.6s ease; }
+  .ck-panel .ck-body { animation: ck-fade 0.18s ease; }
+}
+@keyframes ck-pop { 30% { transform: scale(1.15); } }
+@keyframes ck-arrive {
+  0% { opacity: 0; transform: translateY(-4px); box-shadow: 0 0 0 3px color-mix(in srgb, var(--c-accent) 45%, transparent); }
+  30% { opacity: 1; transform: none; }
+  100% { box-shadow: 0 0 0 3px transparent; }
+}
+@keyframes ck-fade { from { opacity: 0.85; } to { opacity: 1; } }
+
+/* --- Tabs in the inbox --- */
+.ck-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--c-border);
+  background: var(--c-surface-alt);
+  flex-shrink: 0;
+}
+.ck-tab {
+  font: inherit;
+  font-size: 13px;
+  padding: 10px 12px;
+  min-height: 40px;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  background: transparent;
+  color: var(--c-fg-muted);
+  cursor: pointer;
+}
+.ck-tab[aria-selected="true"] { color: var(--c-fg); font-weight: 600; border-bottom-color: var(--c-accent); }
+.ck-tab:hover { color: var(--c-fg); }
+.ck-tab:focus-visible { outline: 2px solid var(--c-accent); outline-offset: -2px; }
+.ck-tab-note { font-size: 11px; font-weight: 600; color: var(--c-accent); }
+
+/* --- A live change while the owner types: a note, not a redraw --- */
+.ck-live-note {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--c-accent) 12%, var(--c-surface));
+  color: var(--c-fg);
+}
+.ck-btn-quiet { padding: 4px 10px; font-size: 12px; }
+
+/* --- Round cards in the inbox --- */
+.ck-round-card {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--c-border);
+  border-left: 3px solid var(--c-claimed, var(--c-accent));
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+  background: var(--c-surface);
+}
+.ck-round-card .ck-ring { width: 22px; height: 22px; }
+.ck-round-card-text { flex: 1 1 160px; min-width: 0; }
+.ck-round-card-head { font-weight: 600; font-size: 13px; overflow-wrap: anywhere; }
+.ck-inbox-chat { width: 100%; text-align: left; font: inherit; }
+
+/* --- The review-round form --- */
+.ck-round-title:focus, .ck-round-qtext:focus, .ck-review-heading:focus, .ck-result-heading:focus { outline: none; }
+.ck-round-progress {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.ck-round-progress > .ck-ring { width: 22px; height: 22px; }
+.ck-round-count { flex: 1 1 auto; }
+.ck-progress {
+  flex: 1 1 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--c-border-light, var(--c-border));
+  overflow: hidden;
+}
+.ck-progress-fill { height: 100%; background: var(--c-accent); }
+@media (prefers-reduced-motion: no-preference) {
+  .ck-progress-fill { transition: width 0.3s ease; }
+}
+.ck-round-dots { display: flex; flex-wrap: wrap; gap: 6px; }
+.ck-round-dot {
+  min-width: 32px;
+  min-height: 32px;
+  border-radius: 16px;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-fg);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.ck-round-dot[data-state="picked"] { background: var(--c-open-bg, var(--c-surface-alt)); border-color: var(--c-accent); }
+.ck-round-dot[data-state="current"] { background: var(--c-accent); color: var(--c-accent-fg, #fff); border-color: var(--c-accent); font-weight: 600; }
+.ck-round-dot:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 2px; }
+.ck-round-step {
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  padding: 0 14px 14px;
+  background: var(--c-surface);
+}
+.ck-round-step > .ck-q-header { margin: 0 -14px 12px; flex-direction: row; align-items: center; }
+.ck-round-qtext { font-size: 15px; margin-bottom: 6px; overflow-wrap: anywhere; }
+.ck-round-options { border: 0; padding: 0; margin: 12px 0 0; }
+.ck-round-words-label { display: block; margin: 12px 0 4px; }
+.ck-round-step .ck-textarea { box-sizing: border-box; }
+.ck-kbd {
+  display: inline-block;
+  min-width: 16px;
+  padding: 0 4px;
+  border: 1px solid var(--c-border);
+  border-radius: 3px;
+  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: center;
+  color: var(--c-fg-muted);
+}
+.ck-round-nav { position: sticky; bottom: -16px; padding: 10px 0; background: var(--c-surface); }
+.ck-round-keys { font-size: 12px; }
+
+/* --- Evidence rows --- */
+.ck-evidence { margin-top: 14px; }
+.ck-evidence-heading { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.ck-evidence-list { list-style: none; margin: 0; padding: 0; }
+.ck-evidence-row {
+  border: 1px solid var(--c-border-light, var(--c-border));
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.ck-evidence-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
+.ck-evidence-head code { overflow-wrap: anywhere; }
+.ck-evidence-state { font-size: 12px; padding: 1px 8px; border-radius: 10px; }
+.ck-evidence-state[data-state="unchanged"], .ck-evidence-state[data-state="moved"] {
+  background: var(--c-built-bg, var(--c-surface-alt)); color: var(--c-built, var(--c-fg));
+}
+.ck-evidence-state[data-state="changed"], .ck-evidence-state[data-state="missing"] {
+  background: var(--c-blocked-bg, var(--c-surface-alt)); color: var(--c-blocked, var(--c-fg));
+}
+.ck-evidence-cmd, .ck-evidence-result, .ck-evidence-lines {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  max-height: 14em;
+  overflow: auto;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--c-surface-alt);
+  border-radius: var(--radius-sm);
+}
+.ck-evidence-cmd { color: var(--c-fg-muted); }
+
+/* --- The review page --- */
+.ck-review-heading, .ck-result-heading { font-size: 16px; margin: 0 0 6px; }
+.ck-review-list { margin: 10px 0; padding-left: 22px; }
+.ck-review-row { margin-bottom: 12px; font-size: 13px; }
+.ck-review-row .ck-actions { margin-top: 6px; }
+.ck-review-q { overflow-wrap: anywhere; }
+.ck-review-pick { font-weight: 600; margin-top: 4px; }
+.ck-review-row[data-status="left"] { color: var(--c-fg-muted); }
+
+/* --- The Feed --- */
+.ck-feed-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.ck-feed-filters .ck-select { max-width: 100%; }
+.ck-feed { list-style: none; margin: 0; padding: 0; }
+.ck-feed-row {
+  position: relative;
+  padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--c-border-light, var(--c-border));
+  font-size: 13px;
+}
+.ck-feed-row::before {
+  content: "";
+  position: absolute;
+  left: 4px; top: 12px;
+  width: 4px; height: 4px;
+  border-radius: 2px;
+  background: var(--c-border);
+}
+.ck-feed-new::before { background: var(--c-accent); width: 6px; height: 6px; left: 3px; }
+.ck-feed-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
+.ck-feed-kind { font-weight: 600; }
+.ck-feed-time { margin-left: auto; color: var(--c-fg-muted); font-size: 12px; white-space: nowrap; }
+.ck-feed-newtag {
+  font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 8px;
+  background: var(--c-accent); color: var(--c-accent-fg, #fff);
+}
+.ck-feed-text { margin-top: 3px; color: var(--c-fg); overflow-wrap: anywhere; line-height: 1.4; }
+.ck-feed-row .ck-btn-quiet { margin-top: 6px; }
+.ck-feed-more { padding: 10px 0; }
+
+/* --- The chat --- */
+.ck-chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 55vh;
+  overflow-y: auto;
+  padding: 4px 2px 8px;
+}
+.ck-chat-log:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 2px; }
+.ck-chat-msg {
+  max-width: 88%;
+  padding: 8px 10px;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.45;
+  background: var(--c-surface-alt);
+  border: 1px solid var(--c-border-light, var(--c-border));
+}
+.ck-chat-msg[data-by="owner"] {
+  align-self: flex-end;
+  background: var(--c-claimed-bg, var(--c-surface-alt));
+  color: var(--c-claimed, var(--c-fg));
+}
+.ck-chat-who { font-size: 11px; font-weight: 600; margin-bottom: 2px; }
+.ck-chat-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ck-chat-status { font-size: 12px; color: var(--c-fg-muted); margin: 8px 0; }
+.ck-chat-status[data-state="listening"] { color: var(--c-accent); font-weight: 600; }
+.ck-chat-compose .ck-field-label { display: block; margin-bottom: 4px; }
+.ck-chat-compose .ck-textarea { box-sizing: border-box; min-height: 64px; }
+.ck-chat-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
+.ck-chat-count { font-size: 12px; color: var(--c-fg-muted); font-variant-numeric: tabular-nums; }
+.ck-chat-compose .ck-error-msg:empty { display: none; }

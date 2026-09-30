@@ -68,7 +68,14 @@ Read the live unit before changing anything:
        python3 <vendored>/agent.py --state <state> health    # exit 0, "version": the new one
 
 5. Reload any open console tab. A session with a running `agent.py watch`
-   keeps the old code until its watch next exits; that is harmless.
+   keeps the old code until its watch next exits; that is harmless, except
+   that a watch started before 0.7.0 does not wake on a chat message. Restart
+   it (the console-process skill re-arms it) so chat reaches a session.
+
+From 0.7.0 an open tab keeps one long poll (`/api/wait`, 25 s) open to the
+server. The tunnel needs nothing for it: it is a plain GET behind Access, well
+inside Cloudflare's 100 s response limit. The server holds at most 16 such
+polls at once and answers a 17th with 429, which the page backs off from.
 
 A kit installed by `deploy/install.sh` instead (copied to
 `~/.local/share/console-kit/kit`) is upgraded by re-running
@@ -93,7 +100,16 @@ A kit installed by `deploy/install.sh` instead (copied to
    adds no store record. It adds only `<state>/watch.json`, which older kits
    ignore.
 
-3. Never "roll back" by editing `store.jsonl`. Every line's `seq` and `id` are
+3. Before rolling 0.7.0 back to **0.6.0 or older**, check the store the same
+   way. 0.7.0 adds no record kind, but a 0.6.0 kit refuses, by name, a chat
+   message (`intent 'chat'`, item `@chat`) and a question carrying `evidence`,
+   and will not start:
+
+       grep -cE '"intent":"chat"|"item":"@chat"|"evidence":' <state>/store.jsonl
+
+   Anything but `0` means the store needs 0.7.0 or later.
+
+4. Never "roll back" by editing `store.jsonl`. Every line's `seq` and `id` are
    checked on load, and an edited line stops the server.
 
 ## Health

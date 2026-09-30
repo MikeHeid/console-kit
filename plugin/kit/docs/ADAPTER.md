@@ -44,6 +44,13 @@ A real project usually points these at what it already has:
 Keep `record()` **append-only**: the locked answers are the source of truth, and
 the record is their readable history.
 
+From 0.7.0 an entry may carry `evidence`: the question's rows
+`{"cite": "path:a-b", "command"?, "result"?, "text"}`, where `text` is the
+cited lines as the server read them when the question was asked. It is present
+only when the question had evidence, and `fold` checks it with the store's
+rules. An adapter that ignores it loses nothing else; one that writes it should
+print `cite` and `command` inline and `result`/`text` as quoted blocks.
+
 ## The page
 
 The server serves one HTML page (`CONSOLE_PAGE`) and injects the console into
