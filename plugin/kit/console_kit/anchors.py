@@ -37,6 +37,10 @@ GIT_TIMEOUT = 20        # seconds for one git call
 DIFF_LINES = 40         # a "why stale" diff is cut to this many lines...
 DIFF_CHARS = 4000       # ...and this many characters
 SIMILAR = 0.5           # below this, a region is "not similar" and no diff is shown
+MAX_READ = 2 << 20      # bytes: a larger file is never read (0.7.0); it answers like an unreadable one
+UNREADABLE = {"outside": "resolves outside the project", "missing": "is not in the project",
+              "secret": "is a secrets file, which is never read", "too_large": f"is over {MAX_READ >> 20} MiB, "
+              "so it is not read"}
 SOURCE_RANGE = re.compile(r"^(?P<path>[^:]+):(?P<a>[0-9]+)(?:-(?P<b>[0-9]+))?$")
 
 
@@ -75,11 +79,17 @@ class Tree:
         p = (self.root / rel).resolve()
         if self.root not in p.parents:
             return _File("outside", None)
+        # 0.7.0: a secrets file is never read, whatever cites it, and neither is a
+        # file past MAX_READ: both answer like a file that cannot be read.
+        if S.secret_path(str(p.relative_to(self.root))) or S.secret_path(rel):
+            return _File("secret", None)
         if not p.is_file():
             return _File("missing", None)
         f = self._files.get(rel) if self.snapshot else None
         if f is None:
             try:
+                if p.stat().st_size > MAX_READ:
+                    return _File("too_large", None)
                 f = _File("ok", p.read_bytes())
             except OSError:
                 return _File("missing", None)
@@ -88,7 +98,7 @@ class Tree:
         return f
 
     def text(self, rel: str) -> tuple[str, str | None]:
-        """(status, text): status is 'ok', 'missing' or 'outside'."""
+        """(status, text): status is 'ok', or a key of UNREADABLE ('missing', 'outside', 'secret', 'too_large')."""
         f = self._file(rel)
         return f.status, f.text
 
@@ -301,6 +311,8 @@ def explain(c: dict, tree: Tree, history: History, source: str) -> dict:
     if status == "missing":
         return {**out, "reason": "file_missing",
                 "words": f"{c['path']} is gone: it was moved, renamed or deleted."}
+    if status != "ok":  # a secrets file or one too large to read (0.7.0): never read, never diffed
+        return {**out, "reason": "file_unreadable", "words": f"{c['path']} {UNREADABLE[status]}."}
     if c["kind"] == "excerpt":
         near = nearest(c["text"], text)
         words = f"The text this answer cites is no longer in {c['path']}: it was changed or deleted."
@@ -405,8 +417,9 @@ def _reanchor_one(c: dict, tree: Tree, history: History, source: str) -> tuple[d
         return None, f"item {c['item']} is not {c['status']}; a status change is real, so it stays stale"
     if c["kind"] == "excerpt":
         return None, f"the cited text is no longer in {c['path']}"
-    if tree.text(c["path"])[0] != "ok":
-        return None, f"{c['path']} is gone"
+    status = tree.text(c["path"])[0]
+    if status != "ok":
+        return None, f"{c['path']} {'is gone' if status == 'missing' else UNREADABLE[status]}"
     rng = cited_range(source, c["path"])
     if rng is None:
         return None, f"the question's source ({source}) names no line range in {c['path']}"
@@ -456,7 +469,7 @@ def fill_evidence(rows: list[dict], tree: Tree) -> tuple[list[dict], list[str]]:
         path, a, b = S.cite_parts(row["cite"])  # the schema has already checked the shape
         status, text = tree.text(path)
         if status != "ok":
-            errs.append(f"evidence row {n}: {path} is {'outside the project' if status == 'outside' else 'not in the project'}")
+            errs.append(f"evidence row {n}: {path} {UNREADABLE[status]}")
             continue
         lines = _split(text)
         if b > len(lines):
@@ -495,7 +508,8 @@ def evidence_now(rows: list[dict], tree: Tree) -> list[dict]:
         path, a, b = parts
         status, text = tree.text(path)
         if status != "ok":
-            out.append({**e, "state": "missing", "words": f"{path} is gone: it was moved, renamed or deleted."})
+            out.append({**e, "state": "missing", "words": f"{path} is gone: it was moved, renamed or deleted."
+                        if status == "missing" else f"{path} {UNREADABLE[status]}."})
             continue
         lines = _split(text)
         now = "\n".join(lines[a - 1:b]) if a <= len(lines) else ""

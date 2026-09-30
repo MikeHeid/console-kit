@@ -1351,5 +1351,48 @@ class LockAllTests(_Live, unittest.TestCase):
         self.assertEqual(code, 400)  # the id of a question, not of a fork message
 
 
+class EvidenceReadLimitTests(_Live, unittest.TestCase):
+    """0.7.0 review LOWs: secrets files are refused by name when asked, and big files are never read."""
+
+    ask = EvidenceTests.ask
+
+    def test_secrets_files_are_refused_when_asked_and_near_misses_are_not(self):
+        # Catches: a deny-list that is not applied at ask time (the form would show a key file's
+        # lines to anyone reading the question), and one so broad an ordinary doc is refused.
+        for rel in (".env", "secrets/.git/config", "certs/a.pem", "home/.ssh/id_ed25519", "docs/env.md"):
+            p = self.cfg.root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("TOKEN=abc123 line\n")
+        n = 10
+        for rel, words in ((".env", "a .env file"), ("secrets/.git/config", ".git"), ("certs/a.pem", ".pem key"),
+                           ("home/.ssh/id_ed25519", ".ssh")):
+            with self.subTest(rel=rel):
+                n += 1
+                code, out = self.ask([{"cite": f"{rel}:1"}], n=n)
+                self.assertEqual(code, 400, out)
+                self.assertIn(words, out["error"])
+                self.assertIn("never cited as evidence", out["error"])
+                self.assertNotIn("abc123", json.dumps(out))
+        code, out = self.ask([{"cite": "docs/env.md:1"}], n=n + 1)
+        self.assertEqual(code, 200, out)
+        code, out = self.agent_post("/question", self.seed_q(
+            qid="LANE.1/Q40", nonce="evidq0040x",
+            valid_if=[{"kind": "excerpt", "path": ".env", "text": "TOKEN=abc123"}]))
+        self.assertEqual(code, 400, out)
+        self.assertIn(".env", out["error"])
+
+    def test_an_oversized_file_is_refused_unread(self):
+        # Catches: reading the whole of a huge cited file and only truncating what is shown.
+        from console_kit import anchors as A
+        big = self.cfg.root / "logs" / "big.log"
+        big.parent.mkdir(parents=True, exist_ok=True)
+        with open(big, "wb") as fh:
+            fh.write(b"first line\n")
+            fh.truncate(A.MAX_READ + 1)
+        code, out = self.ask([{"cite": "logs/big.log:1"}], n=50)
+        self.assertEqual(code, 400, out)
+        self.assertIn("is over 2 MiB, so it is not read", out["error"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

@@ -2010,7 +2010,9 @@ class AnchorExportTests(Tmp):
         self.assertEqual(set(e["history"][0]), self.V040_LOCKED_KEYS)  # the first lock had none
         self.assertEqual(self.fold_it()["locked"]["anchors"], [excerpt()])
 
-    def test_a_reanchored_answer_exports_its_anchors_and_evidence(self):
+    def test_a_reanchored_answer_exports_its_anchors_and_basis(self):
+        # (Named "..._and_evidence" before 0.7.0: it covers the anchor record's `basis`, not
+        # question evidence, which EvidenceExportTests covers.)
         rec = self.st.append({"type": "anchor", "schemaVersion": 1, "qid": "LANE.1/Q1", "lock": self.lk1["id"],
                               "anchors": [excerpt()], "basis": "spec.md: lines 5-6 as locked (commit abc) unchanged",
                               "by": "agent", "nonce": nonce()})
@@ -2153,6 +2155,83 @@ class FeedViewTests(Tmp):
         ev = V.feed(st, ITEMS)["events"][0]
         self.assertLessEqual(len(ev["text"]), V.FEED_SNIPPET)
         self.assertNotIn("\n", ev["text"])
+
+
+class EvidenceExportTests(Tmp):
+    """0.7.0 review MEDIUM: a locked question's evidence reaches the permanent record."""
+
+    def locked(self, **qkw):
+        st = self.store()
+        st.append(question(**qkw))
+        st.append(lock(st.append(answer())))
+        [(name, e)] = F.export(st).items()
+        return st, name, e
+
+    def test_evidence_is_exported_checked_and_folded(self):
+        # Catches: an export whitelist that drops `evidence` (the rows never reach the record),
+        # and a fold that refuses, or silently accepts forged, evidence.
+        st, name, e = self.locked(evidence=[EVIDENCE_ROW])
+        self.assertEqual(e["evidence"], [EVIDENCE_ROW])
+        self.assertEqual(F.check_entry(name, e, ITEMS), [])
+        out = self.dir / "locked"
+        F.write_export(F.export(st), out)
+        ad = FakeAdapter(ITEMS)
+        F.fold(out, self.dir / "ledger.txt", ad, dry_run=False)
+        self.assertEqual(ad.recorded[0][0]["evidence"], [EVIDENCE_ROW])
+        for bad in ([{"cite": "../x.md:1", "text": "t" * 9}], [{**EVIDENCE_ROW, "text": ""}], "rows"):
+            with self.subTest(bad=bad):
+                self.assertTrue(F.check_entry(name, {**e, "evidence": bad}, ITEMS))
+
+    def test_a_question_without_evidence_exports_as_before(self):
+        # Catches: an empty `evidence` key added to every file (older exports must stay byte-identical).
+        _, _, e = self.locked()
+        self.assertNotIn("evidence", e)
+
+
+class SecretPathTests(unittest.TestCase):
+    def test_secrets_files_are_named_and_near_misses_are_not(self):
+        # Catches: a deny-list that misses a key file, and one so broad it refuses ordinary docs.
+        for path in (".env", "config/.env.local", "certs/server.pem", "tls/site.key", "home/.ssh/config",
+                     ".git/config", "keys/id_rsa", "keys/id_ed25519.pub", "store.p12", "store.PFX"):
+            self.assertIsNotNone(S.secret_path(path), path)
+        for path in ("docs/env.md", "environment.md", "src/keyboard.py", "docs/git-workflow.md",
+                     "ssh/notes.md", "pem.md", "a/.github/workflows/ci.yml"):
+            self.assertIsNone(S.secret_path(path), path)
+
+    def test_evidence_and_conditions_refuse_them_at_ask_time_only(self):
+        # Catches: a secrets cite accepted when asked, and a store refused on LOAD for a record
+        # written before the rule (the rule is an ask-time check).
+        errs = S.check_evidence([{"cite": ".env:1"}], stored=False)
+        self.assertTrue(any("a .env file" in e for e in errs), errs)
+        self.assertEqual(S.check_evidence([{"cite": "docs/env.md:1"}], stored=False), [])
+        self.assertEqual(S.check_evidence([{"cite": ".env:1", "text": "X=1 secret"}], stored=True), [])
+        self.assertTrue(S.secret_condition_paths([{"kind": "excerpt", "path": "k/id_rsa", "text": "x" * 9}]))
+        self.assertEqual(S.secret_condition_paths([{"kind": "excerpt", "path": "docs/env.md", "text": "x" * 9}]), [])
+
+
+class TreeReadLimitTests(Tmp):
+    def test_a_secrets_file_or_an_oversized_file_is_never_read(self):
+        # Catches: a Tree that reads a whole huge file before truncating its output, and one
+        # that reads a secrets file for a condition written before the ask-time rule.
+        from unittest import mock
+        from console_kit import anchors as A
+        (self.dir / ".env").write_text("TOKEN=abc123 secret value\n")
+        big = self.dir / "big.log"
+        with open(big, "wb") as fh:
+            fh.truncate(A.MAX_READ + 1)
+        (self.dir / "ok.md").write_text("small file here\n")
+        tree = A.Tree(self.dir, {})
+        with mock.patch("pathlib.Path.read_bytes", side_effect=AssertionError("read")):
+            self.assertEqual(tree.text("big.log"), ("too_large", None))
+            self.assertEqual(tree.text(".env"), ("secret", None))
+        self.assertEqual(tree.text("ok.md")[0], "ok")
+        self.assertFalse(tree.holds({"kind": "excerpt", "path": ".env", "text": "TOKEN=abc123"}))
+        why = A.explain({"kind": "excerpt", "path": ".env", "text": "TOKEN=abc123"}, tree, A.History(self.dir), "x")
+        self.assertNotIn("abc123", json.dumps({k: v for k, v in why.items() if k != "condition"}))
+        self.assertIn("never read", why["words"])
+        rows, errs = A.fill_evidence([{"cite": "big.log:1"}], tree)
+        self.assertEqual(rows, [])
+        self.assertIn("MiB", errs[0])
 
 
 if __name__ == "__main__":

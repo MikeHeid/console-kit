@@ -543,6 +543,9 @@ class Console:
         if named:
             raise RequestError(400, f"{', '.join(named)} is the server's to set, not the writer's")
         if kind == "question":
+            secrets_named = S.secret_condition_paths(body.get("valid_if"))
+            if secrets_named:
+                raise RequestError(400, "; ".join(secrets_named))
             body = self._fill_evidence(body)  # reads files: outside the write lock
         with self._lock:
             chat = kind == "message" and by == "owner" and body.get("item") == S.CHAT_ITEM

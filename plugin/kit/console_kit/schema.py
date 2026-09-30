@@ -74,6 +74,34 @@ MAX_EVIDENCE = 8               # rows on one question
 MAX_EVIDENCE_LINES = 200       # lines one row may cite
 MAX_EVIDENCE_RESULT = 2000     # characters of a row's `result`
 EVIDENCE_FIELDS = frozenset({"cite", "command", "result", "text"})
+# Files that hold secrets, never read as evidence or checked as a condition
+# (0.7.0). The server reads a cited file's lines and shows them on the owner's
+# page, and "why stale?" shows a condition's file too, so a path matching one
+# of these is refused when a question is asked, and `anchors.Tree` never reads
+# one. (glob on a path component, the rule's words) - the ONE list.
+SECRET_PATH_RULES = (
+    ("dir", ".git", "anything under a .git directory"),
+    ("dir", ".ssh", "anything under a .ssh directory"),
+    ("name", ".env*", "a .env file"),
+    ("name", "*.pem", "a .pem key or certificate"),
+    ("name", "*.key", "a .key file"),
+    ("name", "id_rsa*", "an SSH key (id_rsa)"),
+    ("name", "id_ed25519*", "an SSH key (id_ed25519)"),
+    ("name", "*.p12", "a .p12 keystore"),
+    ("name", "*.pfx", "a .pfx keystore"),
+)
+
+
+def secret_path(path: str) -> str | None:
+    """The rule a project-relative path breaks by naming a secrets file, or None."""
+    import fnmatch
+    parts = [p for p in path.replace("\\", "/").split("/") if p not in ("", ".")]
+    for kind, pattern, words in SECRET_PATH_RULES:
+        if kind == "dir" and any(p.lower() == pattern for p in parts[:-1]):
+            return words
+        if kind == "name" and parts and fnmatch.fnmatchcase(parts[-1].lower(), pattern):
+            return words
+    return None
 CITE = re.compile(r"^(?P<path>[A-Za-z0-9_.\-/]+):(?P<a>[1-9][0-9]{0,6})(?:-(?P<b>[1-9][0-9]{0,6}))?$")
 
 # The fields the WRITER supplies; `id`, `seq` and `ts` belong to the store.
@@ -218,6 +246,14 @@ def _check_question(rec: dict) -> list[str]:
     return errs
 
 
+def secret_condition_paths(conds: object) -> list[str]:
+    """Why each `file_sha256`/`excerpt` condition in `conds` names a secrets file (0.7.0); checked at ask time."""
+    if not isinstance(conds, list):
+        return []
+    return [f"valid_if path {c['path']!r} names {secret_path(c['path'])}; a condition never reads a secrets file"
+            for c in conds if isinstance(c, dict) and isinstance(c.get("path"), str) and secret_path(c["path"])]
+
+
 def cite_parts(cite: object) -> tuple[str, int, int] | None:
     """(path, first line, last line) of a well-formed evidence `cite`, or None."""
     m = CITE.fullmatch(cite) if isinstance(cite, str) and len(cite) <= MAX_LINE else None
@@ -254,6 +290,10 @@ def check_evidence(ev: object, *, stored: bool) -> list[str]:
                         f":line or :start-end, no '..'")
         elif parts[2] < parts[1] or parts[2] - parts[1] + 1 > MAX_EVIDENCE_LINES:
             errs.append(f"{where}: cite {row['cite']!r} must name 1 to {MAX_EVIDENCE_LINES} lines, start before end")
+        elif not stored and secret_path(parts[0]):
+            # At ask time only: a stored record is never refused on load for this.
+            errs.append(f"{where}: cite {row['cite']!r} names {secret_path(parts[0])}; secrets are never "
+                        f"cited as evidence")
         if "command" in row:
             errs += one_line(row["command"], f"{where} command")
         if "result" in row:
