@@ -566,6 +566,9 @@ class HealthHandler(_Handler):
       visitor cannot strip them, so a tunnel mis-pointed here still meets 403.
     - `Host` must name loopback, so a web page that re-binds its own hostname
       to 127.0.0.1 cannot read it from the owner's browser.
+    - Every method meets these checks first (`_dispatch`): a proxied or
+      foreign-Host request is 403 whatever its method, and only a clean local
+      request learns anything else (404 for another path, 405 for another method).
     - What it says is not secret and holds nothing the owner wrote: a version,
       a record count, and two words of state.
     """
@@ -573,7 +576,9 @@ class HealthHandler(_Handler):
     PROXY_HEADERS = ("Cf-Connecting-Ip", "Cf-Ray", "Cf-Visitor", "Cf-Ipcountry", "Cf-Warp-Tag-Id",
                      "Cf-Access-Jwt-Assertion", "Cf-Access-Authenticated-User-Email", "Cdn-Loop",
                      "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-Ip", "Forwarded", "Via")
-    LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+    # The listener is AF_INET on 127.0.0.1 only, so no IPv6 peer can connect: `[::1]`
+    # is not listed, because no honest client of this port sends it.
+    LOCAL_HOSTS = ("127.0.0.1", "localhost")
 
     def _refusal(self) -> str | None:
         if not ipaddress.ip_address(self.client_address[0]).is_loopback:
@@ -582,22 +587,33 @@ class HealthHandler(_Handler):
             return "health answers local callers only, never through a proxy or tunnel"
         m = re.fullmatch(r"(\[[^\]]*\]|[^:\[\]]+)(:[0-9]{1,5})?", (self.headers.get("Host") or "").strip().lower())
         if m is None or m.group(1) not in self.LOCAL_HOSTS:
-            return "health answers only a Host of 127.0.0.1, localhost or [::1]"
+            return "health answers only a Host of 127.0.0.1 or localhost"
         return None
 
-    def do_GET(self) -> None:
+    def _send(self, code: int, body: object, ctype: str = "application/json") -> None:
+        if self.command != "HEAD":
+            return super()._send(code, body, ctype)
+        # HEAD: the same status and headers, and no body.
+        data = json.dumps(body).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        for k, v in SECURITY_HEADERS:
+            self.send_header(k, v)
+        self.end_headers()
+
+    def _dispatch(self) -> None:
         why = self._refusal()
         if why:
             return self._send(403, {"error": why})
+        if self.command != "GET":
+            return self._send(405, {"error": "method not allowed"})
         if self.path != "/health":
             return self._send(404, {"error": "this port answers /health only"})
         ok, body = self.console.health()
         self._send(200 if ok else 503, body)
 
-    def _other_method(self) -> None:
-        self._send(405, {"error": "method not allowed"})
-
-    do_HEAD = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _other_method
+    do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _dispatch
 
 
 def health_server(console: Console, port: int) -> ThreadingHTTPServer:

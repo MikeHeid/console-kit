@@ -14,13 +14,14 @@ from __future__ import annotations
 import calendar
 import json
 import os
+import stat
 import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Callable
 
-from .registry import RegistryError, read_regular
+from .registry import read_regular
 
 WAKE_INTENTS = ("process", "fork")
 CURSOR_FILE = "agent-cursor.json"
@@ -124,6 +125,27 @@ def write_watch(state: Path, watching: bool, *, every: float = BEAT_EVERY, now: 
         raise
 
 
+def _read_watch(path: Path) -> bytes | None:
+    """The heartbeat's bytes, or None when absent.
+
+    Trust: the state dir is the server's own, mode 0700, so only this user can
+    put anything in it. Even so, the file is opened with O_NOFOLLOW (a symlink
+    raises ELOOP) and O_NONBLOCK, and must be a small regular file: a link
+    planted to make some other file read as a heartbeat reads as "never".
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_WATCH:
+            raise OSError(f"{path} is not a small regular file")
+        return os.read(fd, MAX_WATCH + 1)[:MAX_WATCH]
+    finally:
+        os.close(fd)
+
+
 def listening(state: Path, *, now: float | None = None) -> dict:
     """What the owner is told: {"state": "listening"|"idle"|"never", "last_seen": ts|None}.
 
@@ -132,9 +154,9 @@ def listening(state: Path, *, now: float | None = None) -> dict:
     """
     t = time.time() if now is None else now
     try:
-        data = read_regular(Path(state) / WATCH_FILE, MAX_WATCH)
+        data = _read_watch(Path(state) / WATCH_FILE)
         rec = json.loads(data.decode("utf-8")) if data is not None else None
-    except (OSError, ValueError, RegistryError):
+    except (OSError, ValueError):
         rec = None
     if not isinstance(rec, dict):
         return {"state": "never", "last_seen": None}

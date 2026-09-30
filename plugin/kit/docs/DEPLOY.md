@@ -115,7 +115,7 @@ It holds no owner text and no secret.
 
 The health port refuses (403) any request that carries a header a proxy or the
 Cloudflare edge adds (`Cf-Connecting-Ip`, `Cf-Ray`, `X-Forwarded-For`,
-`Forwarded` and others), a `Host` that is not `127.0.0.1`, `localhost` or
-`[::1]`, and any peer that is not loopback. So pointing the tunnel at it by
+`Forwarded` and others), whatever the method, a `Host` that is not
+`127.0.0.1` or `localhost`, and any peer that is not loopback. So pointing the tunnel at it by
 mistake exposes nothing. Never put `<hport>` in the tunnel's ingress anyway.
 The owner port still answers `/health` with 403 without a token.

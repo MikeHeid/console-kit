@@ -1215,6 +1215,17 @@ class ListeningTests(Tmp):
         os.mkfifo(self.dir / D.WATCH_FILE)
         self.assertEqual(D.listening(self.dir, now=self.T0)["state"], "never")
 
+    def test_a_symlinked_watch_file_reads_never(self):
+        # Review of PR #8 (LOW a): a link to a genuine, fresh heartbeat elsewhere must not
+        # make this state dir read "listening". Counter-check: the same file, not linked, does.
+        real = self.dir / "elsewhere.json"
+        real.write_text(json.dumps({"watching": True, "at": D._ts(self.T0), "until": D._ts(self.T0 + 30)}))
+        (self.dir / D.WATCH_FILE).symlink_to(real)
+        self.assertEqual(D.listening(self.dir, now=self.T0 + 1)["state"], "never")
+        (self.dir / D.WATCH_FILE).unlink()
+        real.rename(self.dir / D.WATCH_FILE)
+        self.assertEqual(D.listening(self.dir, now=self.T0 + 1)["state"], "listening")
+
     def test_the_heartbeat_writes_at_most_once_per_interval(self):
         # Catches: a heartbeat that writes on every 2 s poll (disk churn for nothing), and
         # one that promises 10 s while a slow --poll only comes back every 60 s, so the owner

@@ -769,7 +769,7 @@ class HealthTests(unittest.TestCase):
 
     def test_the_health_port_answers_a_local_caller(self):
         port = self.start_health()
-        for host in (f"127.0.0.1:{port}", f"localhost:{port}", "localhost", f"[::1]:{port}"):
+        for host in (f"127.0.0.1:{port}", f"localhost:{port}", "localhost"):
             with self.subTest(host=host):
                 code, out = self.health(port, {"Host": host})
                 self.assertEqual(code, 200, out)
@@ -790,7 +790,8 @@ class HealthTests(unittest.TestCase):
     def test_the_health_port_refuses_a_foreign_host_and_a_remote_peer(self):
         # A page that re-binds its hostname to 127.0.0.1 sends its own Host: refused.
         port = self.start_health()
-        for host in ("evil.example", f"evil.example:{port}", "127.0.0.1.evil.example", "", "[::1"):
+        # `[::1]` too: the listener is IPv4-only, so no honest client of it names IPv6 loopback.
+        for host in ("evil.example", f"evil.example:{port}", "127.0.0.1.evil.example", "", "[::1", f"[::1]:{port}"):
             with self.subTest(host=host):
                 code, out = self.health(port, {"Host": host})
                 self.assertEqual(code, 403, out)
@@ -816,6 +817,37 @@ class HealthTests(unittest.TestCase):
         for method in ("POST", "PUT", "DELETE"):
             with self.subTest(method=method):
                 self.assertEqual(self.health(port, local, method=method)[0], 405)
+
+    NON_GET = ("HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS")
+
+    def test_every_method_meets_the_refusals_first(self):
+        # Review of PR #8 (MEDIUM): the checks ran for GET only, so a proxied or foreign-Host
+        # request with another method got 405 instead of 403. Now every method is refused
+        # the same way, and only a clean local non-GET reaches 405.
+        port = self.start_health()
+        local = f"127.0.0.1:{port}"
+        for method in self.NON_GET:
+            for label, headers, want in (("cloudflare", {"Host": local, "Cf-Connecting-Ip": "203.0.113.7"}, 403),
+                                         ("proxy", {"Host": local, "X-Forwarded-For": "203.0.113.7"}, 403),
+                                         ("foreign host", {"Host": "evil.example"}, 403),
+                                         ("clean local", {"Host": local}, 405)):
+                with self.subTest(method=method, case=label):
+                    self.assertEqual(self.health(port, headers, method=method)[0], want)
+
+    def test_head_sends_no_body(self):
+        # A raw socket, so a body sent after a HEAD's headers is seen rather than ignored by a client.
+        import socket
+        port = self.start_health()
+        for headers in (f"Host: 127.0.0.1:{port}\r\n", f"Host: 127.0.0.1:{port}\r\nCf-Ray: x\r\n"):
+            with self.subTest(headers=headers):
+                with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
+                    s.sendall(f"HEAD /health HTTP/1.1\r\n{headers}Connection: close\r\n\r\n".encode())
+                    raw = b""
+                    while chunk := s.recv(4096):
+                        raw += chunk
+                head, _, rest = raw.partition(b"\r\n\r\n")
+                self.assertTrue(head.startswith(b"HTTP/1.0 405") or head.startswith(b"HTTP/1.0 403"), head)
+                self.assertEqual(rest, b"")
 
     def test_the_health_port_is_never_the_owner_port(self):
         from unittest import mock
