@@ -240,6 +240,7 @@ def _read_capped(path: Path, cap: int, what: str) -> tuple[bytes, float]:
 
 
 _EPOCH_MAX = 253402300799  # 9999-12-31T23:59:59Z, the last second a datetime can hold
+_MTIME_SLACK_S = 60  # a write time this far ahead of our clock is still taken as now
 
 
 def _utc(seconds: float, what: str) -> str:
@@ -276,7 +277,8 @@ def _window(raw, name: str) -> dict:
         raise UsageProblem(f"the usage file has no {name} window")
     pct = raw.get("used_percentage")
     if pct is not None and (isinstance(pct, bool) or not isinstance(pct, (int, float))
-                            or not math.isfinite(pct) or not 0 <= pct <= 100):
+                            or not 0 <= pct <= 100 or not math.isfinite(pct)):
+        # The range check comes first: math.isfinite raises OverflowError on a huge integer.
         raise UsageProblem(f"the usage file's {name} percentage is not 0-100")
     resets = raw.get("resets_at")
     return {"used_percentage": None if pct is None else float(pct),
@@ -286,8 +288,9 @@ def _window(raw, name: str) -> dict:
 def usage_snapshot(path: Path) -> dict:
     """Two shapes are read. claude-hud's snapshot: the windows at the top level, with updated_at.
     Claude Code's own status line input, saved as it arrives: the windows under rate_limits and
-    no updated_at, so the file's write time stands in (a file nobody rewrites then reads as
-    stale, as it should). A file with windows at the top level is read from there only."""
+    no updated_at, so the file's write time stands in. The status line rewrites it on every
+    redraw, so that time says a session is running, not when the limits were last fetched; with
+    no session open it goes stale. A file with windows at the top level is read from there only."""
     raw, mtime = _read_capped(path, USAGE_MAX_BYTES, "usage file")
     try:
         doc = json.loads(raw)
@@ -296,11 +299,18 @@ def usage_snapshot(path: Path) -> dict:
     if not isinstance(doc, dict):
         raise UsageProblem("the usage file is not a JSON object")
     src = doc
-    if not any(w in doc for w in _WINDOWS) and isinstance(doc.get("rate_limits"), dict):
-        src = doc["rate_limits"]
     updated = doc.get("updated_at")
-    out = {"updated_at": _utc(mtime, "write time") if updated is None and src is not doc
-           else _iso(updated, "updated_at")}
+    if not any(w in doc for w in _WINDOWS):
+        if isinstance(doc.get("rate_limits"), dict):
+            src = doc["rate_limits"]
+        elif updated is None:  # Claude Code sends no rate_limits before the first API answer
+            raise UsageProblem("the usage file has no usage limits yet")
+    if updated is None and src is not doc:
+        if mtime > time.time() + _MTIME_SLACK_S:  # a skewed clock or touch -d, never "fresh"
+            raise UsageProblem("the usage file's write time is in the future")
+        out = {"updated_at": _utc(mtime, "write time")}
+    else:
+        out = {"updated_at": _iso(updated, "updated_at")}
     for w in _WINDOWS:
         out[w] = _window(src.get(w), w)
     return out

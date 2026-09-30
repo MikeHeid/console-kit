@@ -2227,6 +2227,32 @@ class UsageTests(_Live, unittest.TestCase):
                 self.assertIsNone(out["usage"])
                 self.assertIn(problem, out["usage_problem"])
 
+    def test_a_write_time_in_the_future_is_named_not_shown_as_fresh(self):
+        # Review of #17: a clock skew or a touch -d would otherwise read as fresh for years.
+        # Catches: forwarding any mtime unchecked; and one minute of slack is allowed, so a
+        # host whose clock sits a few seconds behind the writer's still shows the numbers.
+        u, _ = self.configure(NATIVE_USAGE)
+        ahead = time.time() + 3600
+        os.utime(u, (ahead, ahead))
+        out = self.usage()
+        self.assertIsNone(out["usage"])
+        self.assertIn("write time is in the future", out["usage_problem"])
+        nearly = time.time() + 5
+        os.utime(u, (nearly, nearly))
+        self.assertIsNone(self.usage()["usage_problem"])
+
+    def test_claude_code_input_before_its_first_limits_says_so(self):
+        # Claude Code sends no rate_limits until the session's first API answer. Catches: the
+        # misleading "updated_at is not a timestamp" the review of #17 measured for that case.
+        self.configure({k: v for k, v in NATIVE_USAGE.items() if k != "rate_limits"})
+        self.assertEqual(self.usage()["usage_problem"], "the usage file has no usage limits yet")
+
+    def test_a_huge_percentage_is_named(self):
+        # Review of #17: 10**400 made math.isfinite raise, which reached only the generic message.
+        limits = {**NATIVE_USAGE["rate_limits"], "five_hour": {"used_percentage": 10 ** 400, "resets_at": None}}
+        self.configure({**NATIVE_USAGE, "rate_limits": limits})
+        self.assertIn("five_hour percentage is not 0-100", self.usage()["usage_problem"])
+
     def test_top_level_windows_win_over_rate_limits(self):
         # Catches: a file carrying both shapes read from the one the writer did not mean.
         self.configure({**GOOD_USAGE, "rate_limits": {"five_hour": {"used_percentage": 99, "resets_at": None},
