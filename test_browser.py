@@ -1342,6 +1342,113 @@ class LiveConsoleTests(unittest.TestCase):
                       const s = getComputedStyle(e); return [s.animationName, s.transitionDuration]; })""")
                 self.assertEqual(names, [["none", "0s"], ["none", "0s"]])
 
+    def test_an_item_opened_from_the_inbox_offers_the_way_back(self):
+        # Catches (owner, 2026-09-30: "when diving into an inbox item, there is no button to go
+        # back to the inbox"): an item header whose Back is hidden on a wide screen; one that
+        # leaves for the board instead of the inbox; focus dropped on the way in or out; and a
+        # Back-to-inbox on an item the BOARD opened, where it would lead somewhere the owner
+        # never was.
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    url = self.serve()
+                    self.ask(1)
+                    page = self.page(kind, width, url)
+                    self.open_inbox(page, width)
+                    page.click(".ck-inbox-item[data-qid='LANE.1/Q1']")
+                    page.wait_for_selector(".ck-title-id")
+                    back = page.locator(".ck-panel .ck-back-btn")
+                    self.assertTrue(back.is_visible())
+                    self.assertEqual(back.get_attribute("aria-label"), "Back to inbox")
+                    self.assertEqual(back.text_content(), "← Inbox")
+                    self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-back-btn')"))
+                    back.click()
+                    page.wait_for_selector(".ck-tabs")
+                    self.assertEqual(page.get_attribute(".ck-panel", "data-open"), "true")
+                    self.assertEqual(page.evaluate("document.activeElement.getAttribute('data-qid')"), "LANE.1/Q1")
+                    # Opened from the board, the same item keeps the board's Back (narrow screens only).
+                    page.evaluate("window.ConsoleKit.open('LANE.1')")
+                    page.wait_for_selector(".ck-title-id")
+                    back = page.locator(".ck-panel .ck-back-btn")
+                    self.assertEqual(back.get_attribute("aria-label"), "Back to board")
+                    self.assertEqual(back.is_visible(), width < 400)
+                    self.assertFalse(page.evaluate(OVERFLOW))
+                    self.assert_not_reloaded(page)
+
+    def test_one_lock_covers_every_answered_question_on_an_item(self):
+        # Catches (owner, 2026-09-30: "there should be a 'lock all items' button rather than one
+        # for each question being answered"): no such button; one offered for a single answer;
+        # one that locks before its confirmation, locks a question nobody answered, or rings
+        # "process" (locking is not asking the agent to act).
+        def locks():
+            return sorted(b["qid"] for b in self.bell() if b.get("type") == "lock")
+
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    url = self.serve()
+                    for n in (1, 2, 3):
+                        self.ask(n)
+                    self.console.write("answer", {"qid": "LANE.1/Q1", "picks": ["fix"], "own_text": "",
+                                                  "nonce": "lockallans1"}, "owner")
+                    page = self.page(kind, width, url)
+                    page.evaluate("window.ConsoleKit.open('LANE.1')")
+                    page.wait_for_selector(".ck-question")
+                    self.assertEqual(page.locator(".ck-lock-answered-open").count(), 0)  # one answer: its own button
+                    self.console.write("answer", {"qid": "LANE.1/Q2", "picks": ["record"], "own_text": "",
+                                                  "nonce": "lockallans2"}, "owner")
+                    page.click(".ck-status-bar .ck-refresh-btn >> nth=0")
+                    page.wait_for_selector(".ck-lock-answered-open", timeout=10000)
+                    self.assertEqual(page.locator(".ck-lock-answered-open").text_content(), "Lock all 2 answers…")
+                    page.click(".ck-lock-answered-open")
+                    page.wait_for_selector(".ck-lock-answered .ck-confirm")
+                    self.assertEqual(locks(), [])  # nothing locks before the confirmation
+                    self.assertEqual(page.locator(".ck-lock-answered-qid").all_text_contents(),
+                                     ["LANE.1/Q1", "LANE.1/Q2"])
+                    self.assertFalse(page.evaluate(OVERFLOW))
+                    page.click(".ck-lock-answered-go")
+                    page.wait_for_function(
+                        "document.querySelectorAll(\".ck-q-state[data-state='locked']\").length === 2", timeout=10000)
+                    self.assertEqual(locks(), ["LANE.1/Q1", "LANE.1/Q2"])  # Q3, unanswered, is not locked
+                    self.assertEqual(page.locator(".ck-lock-answered-open").count(), 0)
+                    self.assertEqual(page.locator(".ck-lock-answered .ck-error-msg").count(), 0)
+                    self.assertEqual([b for b in self.bell() if b.get("intent") == "process"], [])
+                    self.assert_not_reloaded(page)
+
+    def test_a_refused_lock_stops_the_run_names_it_and_can_be_dismissed(self):
+        # Catches: a run that goes on past a refusal, or stops silently; an error that does not
+        # name the question or the count; one that cannot be cleared; focus left on <body>.
+        def locks():
+            return sorted(b["qid"] for b in self.bell() if b.get("type") == "lock")
+
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                for n in (1, 2, 3):
+                    self.ask(n)
+                for n in (1, 2, 3):
+                    self.console.write("answer", {"qid": f"LANE.1/Q{n}", "picks": ["fix"], "own_text": "",
+                                                  "nonce": f"refusedans{n}"}, "owner")
+                page = self.page(kind, 1280, url, block_live=True)  # the confirm keeps the answers it showed
+                page.evaluate("window.ConsoleKit.open('LANE.1')")
+                page.click(".ck-lock-answered-open")
+                page.wait_for_selector(".ck-lock-answered .ck-confirm")
+                # Q2 is answered again after the owner saw it: its shown answer is no longer current.
+                self.console.write("answer", {"qid": "LANE.1/Q2", "picks": ["leave"], "own_text": "",
+                                              "nonce": "refusedans4"}, "owner")
+                page.click(".ck-lock-answered-go")
+                page.wait_for_selector(".ck-lock-answered-error", timeout=10000)
+                err = page.locator(".ck-lock-answered-error").text_content()
+                self.assertIn("Locked 1 of 3.", err)
+                self.assertIn("LANE.1/Q2 was not locked", err)
+                self.assertEqual(locks(), ["LANE.1/Q1"])  # stopped at Q2: Q3 was not tried
+                self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-lock-answered-error')"))
+                self.assertEqual(page.locator("[role='alert'].ck-lock-answered-error").count(), 0)
+                page.click(".ck-lock-answered-error button")
+                self.assertEqual(page.locator(".ck-lock-answered-error").count(), 0)
+                self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-questions-heading')"))
+                self.assert_not_reloaded(page)
+
 
 # -- 0.8.0: the Next step menu, tag chips, roar, and visuals, against the REAL server ------
 

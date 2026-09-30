@@ -67,6 +67,11 @@
 @media (max-width: 399px) {
   .ck-back-btn { display: inline-flex; }
 }
+/* 0.8.5: an item opened from the inbox leads back to it at every width. */
+.ck-back-btn.ck-back-always { display: inline-flex; }
+/* 0.8.5: one lock for every answered question on an item. */
+.ck-lock-answered { margin: 8px 0 12px; }
+.ck-lock-answered-qid { margin-top: 10px; font-size: 12px; font-weight: 600; color: var(--c-fg-muted); }
 .ck-back-btn:hover, .ck-back-btn:focus {
   border-color: var(--c-accent);
   background: var(--c-surface-alt);
