@@ -27,7 +27,7 @@ from console_kit import publish as P  # noqa: E402
 REQUIRED = os.environ.get("CONSOLE_KIT_BROWSER") == "1"
 BROWSERS = [b.strip() for b in os.environ.get("CONSOLE_KIT_BROWSERS", "chromium").split(",") if b.strip()]
 
-# A host page with nothing of Gradiance's in it: the kit must bring its own room.
+# A host page with nothing of any vendoring project's in it: the kit must bring its own room.
 HOST = """<!doctype html><html><head><meta charset="utf-8"><title>host</title>
 <style>:root{--c-surface:#fff;--c-surface-alt:#f4f4f4;--c-border:#ccc;--c-fg:#111;
 --c-fg-muted:#555;--c-accent:#0057d9;--c-claimed:#7a4b00;--c-claimed-bg:#fff3d6}
@@ -1213,14 +1213,14 @@ class LiveConsoleTests(unittest.TestCase):
                     page = self.page(kind, width, url)
                     self.open_inbox(page, width)
                     page.click("#ck-tab-chat")
-                    page.fill("#ck-chat-input", "Is the gradiance build green?")
+                    page.fill("#ck-chat-input", "Is the project build green?")
                     page.keyboard.press("Enter")
                     page.wait_for_selector(".ck-chat-msg[data-by='owner']")
                     woke = D.watch(self.cfg.inbox, 0, poll=0.05, timeout=5)
                     self.assertEqual([(w["intent"], w["item"]) for w in woke], [("chat", "@chat")])
                     msg = [r for r in self.console.store.records() if r["type"] == "message"][-1]
                     self.assertEqual((msg["by"], msg["intent"], msg["text"]),
-                                     ("owner", "chat", "Is the gradiance build green?"))
+                                     ("owner", "chat", "Is the project build green?"))
                     self.agent_post("/message", {"item": "@chat", "text": "Green at abc123.", "reply_to": msg["id"],
                                                  "nonce": "chatreply01"})
                     page.wait_for_selector(".ck-chat-msg[data-by='agent']", timeout=10000)

@@ -921,9 +921,9 @@ class RosterSchemaTests(unittest.TestCase):
 
     def test_another_projects_audit_seat_is_attributed_as_a_typed_seat(self):
         # PR #171 review HIGH: the console-fork skill attributes a ★ to the project's
-        # audit seat. Gradiance's `determinism` is an accepted name; another project's
-        # `compliance` is not, so the skill writes `other:compliance`, which is. Catches:
-        # a skill rule that passes only because Gradiance's seat is already in the list.
+        # audit seat. One vendoring project's `determinism` is an accepted name; another
+        # project's `compliance` is not, so the skill writes `other:compliance`, which is. Catches:
+        # a skill rule that passes only because the first project's seat is already in the list.
         skill = (HERE / "plugin" / "skills" / "console-fork" / "SKILL.md").read_text()
         self.assertIn("`other:<audit.seat>`", skill)
         self.assertTrue(S.validate(question(forked_from="f" * 24, star_by="compliance")))
