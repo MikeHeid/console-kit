@@ -3299,6 +3299,89 @@
     });
   }
 
+  // --- 0.8.6: the usage footer (owner, 2026-09-30: "a probe on a small footer bar for claude
+  // usage and account (probed once every 30s-1m)"). The server reads both files and forwards
+  // only checked fields; the page formats them as text, never as markup. There is no footer
+  // unless the server was started with --usage-file or --account-file, and none against an
+  // older server, which answers /api/usage with 404.
+  const USAGE_POLL_MS = 45000;
+  const USAGE_STALE_MS = 10 * 60 * 1000;  // the status line writes only while a session runs
+  let footerEl = null;
+
+  function fmtReset(iso) {
+    if (!iso) return '';
+    const t = new Date(iso);
+    if (isNaN(t.getTime())) return '';
+    const time = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (t.toDateString() === new Date().toDateString()) return time;
+    return t.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + time;
+  }
+
+  function fmtAge(ms) {
+    const m = Math.round(ms / 60000);
+    if (m < 1) return 'just now';
+    if (m < 60) return m + ' min ago';
+    const h = Math.round(m / 60);
+    return h < 48 ? h + ' h ago' : Math.round(h / 24) + ' days ago';
+  }
+
+  function usageWindow(label, w) {
+    if (!w || w.used_percentage === null || w.used_percentage === undefined) return label + ' —';
+    const r = fmtReset(w.resets_at);
+    return label + ' ' + Math.round(w.used_percentage) + '%' + (r ? ' (resets ' + r + ')' : '');
+  }
+
+  function renderFooter(u) {
+    const root = document.documentElement;
+    if (!u || !u.enabled) {
+      if (footerEl) { footerEl.remove(); footerEl = null; }
+      root.classList.remove('ck-footer-on');
+      return;
+    }
+    if (!footerEl) {
+      footerEl = el('div', { className: 'ck-footer', role: 'contentinfo', 'aria-label': 'Claude usage and account' }, []);
+      document.body.appendChild(footerEl);
+      root.classList.add('ck-footer-on');
+    }
+    const parts = [];
+    let stale = false;
+    if (u.usage) {
+      const age = Date.now() - new Date(u.usage.updated_at).getTime();
+      stale = age > USAGE_STALE_MS;
+      parts.push('Claude usage: ' + usageWindow('5-hour', u.usage.five_hour) + ', ' +
+                 usageWindow('7-day', u.usage.seven_day));
+      parts.push('as of ' + fmtAge(age));
+    } else if (u.usage_problem) {
+      parts.push('Claude usage: ' + u.usage_problem);
+    }
+    if (u.account) parts.push(u.account);
+    footerEl.textContent = parts.join(' · ');
+    footerEl.setAttribute('data-stale', stale ? 'true' : 'false');
+    // The host page gets room for the footer at whatever height it wrapped to.
+    root.style.setProperty('--ck-footer-h', footerEl.offsetHeight + 'px');
+  }
+
+  async function fetchUsage() {
+    if (!config || !config.api || document.visibilityState === 'hidden') return;
+    try {
+      const resp = await fetch(config.api + '/usage', { credentials: 'same-origin' });
+      if (resp.status === 404) return renderFooter(null);  // an older server: no footer
+      if (!resp.ok) return;  // a blip keeps what is shown; the next poll tries again
+      renderFooter(await resp.json());
+    } catch (e) {
+      // offline: keep what is shown
+    }
+  }
+
+  function startUsage() {
+    if (!config || !config.api) return;
+    fetchUsage();
+    setInterval(fetchUsage, USAGE_POLL_MS);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') fetchUsage();
+    });
+  }
+
   // Initialize
   function init() {
     // Read config from injected script
@@ -3318,6 +3401,7 @@
     // Initial fetch, then the live loop (0.7.0) keeps the page current
     fetchView().then(() => { if (config && config.api) liveLoop(); });
     startBoard();
+    startUsage();
   }
 
   // Public API
@@ -3327,6 +3411,10 @@
     },
     refreshBoard: function() {
       return fetchBoard();
+    },
+    // 0.8.6: poll the usage footer now, rather than at its next 45 s tick.
+    refreshUsage: function() {
+      return fetchUsage();
     },
     // 0.7.0: open the inbox on a tab ('inbox', 'feed', 'chat'), or a round's form.
     openTab: function(tab) {

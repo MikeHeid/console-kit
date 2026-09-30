@@ -57,6 +57,7 @@ import collections
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -67,6 +68,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
@@ -180,6 +182,8 @@ class Config:
     port: int = 4793
     project: str = ""
     health_port: int = 0  # 0: no health port; /health is still on the agent socket
+    usage_file: Path | None = None    # 0.8.6: a status line's usage snapshot, read for the footer
+    account_file: Path | None = None  # 0.8.6: Claude Code's settings file; only the account email is read
 
     @property
     def store(self) -> Path:
@@ -200,6 +204,98 @@ class Config:
     @property
     def socket(self) -> Path:
         return self.state / "agent.sock"
+
+
+# -- 0.8.6: the footer's usage and account probe --------------------------------------------
+# Both files belong to someone else (a status line plugin, Claude Code), so each is read with a
+# size cap, parsed defensively, and reduced to the named fields: nothing else in either file ever
+# reaches the page. Every problem becomes a short sentence, never the file's contents.
+
+USAGE_MAX_BYTES = 16 * 1024
+ACCOUNT_MAX_BYTES = 8 * 1024 * 1024  # a long-used settings file holds project history
+_WINDOWS = ("five_hour", "seven_day")
+
+
+class UsageProblem(Exception):
+    pass
+
+
+def _read_capped(path: Path, cap: int, what: str) -> bytes:
+    try:
+        with open(path, "rb") as f:
+            data = f.read(cap + 1)
+    except FileNotFoundError:
+        raise UsageProblem(f"the {what} does not exist yet") from None
+    except OSError:
+        raise UsageProblem(f"the {what} cannot be read") from None
+    if len(data) > cap:
+        raise UsageProblem(f"the {what} is larger than {cap // 1024} KB")
+    return data
+
+
+def _iso(value, what: str) -> str:
+    """A timestamp re-emitted in one form, so the page never parses a string it did not check."""
+    if not isinstance(value, str) or len(value) > 64:
+        raise UsageProblem(f"the usage file's {what} is not a timestamp")
+    try:
+        t = datetime.fromisoformat(value)
+    except ValueError:
+        raise UsageProblem(f"the usage file's {what} is not a timestamp") from None
+    if t.tzinfo is None:
+        raise UsageProblem(f"the usage file's {what} has no time zone")
+    return t.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _window(raw, name: str) -> dict:
+    if not isinstance(raw, dict):
+        raise UsageProblem(f"the usage file has no {name} window")
+    pct = raw.get("used_percentage")
+    if pct is not None and (isinstance(pct, bool) or not isinstance(pct, (int, float))
+                            or not math.isfinite(pct) or not 0 <= pct <= 100):
+        raise UsageProblem(f"the usage file's {name} percentage is not 0-100")
+    resets = raw.get("resets_at")
+    return {"used_percentage": None if pct is None else float(pct),
+            "resets_at": None if resets is None else _iso(resets, f"{name} reset time")}
+
+
+def usage_snapshot(path: Path) -> dict:
+    try:
+        doc = json.loads(_read_capped(path, USAGE_MAX_BYTES, "usage file"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise UsageProblem("the usage file is not JSON") from None
+    if not isinstance(doc, dict):
+        raise UsageProblem("the usage file is not a JSON object")
+    out = {"updated_at": _iso(doc.get("updated_at"), "updated_at")}
+    for w in _WINDOWS:
+        out[w] = _window(doc.get(w), w)
+    return out
+
+
+def account_email(path: Path) -> str | None:
+    """The signed-in account's email, or None. Nothing else is taken from the file."""
+    try:
+        doc = json.loads(_read_capped(path, ACCOUNT_MAX_BYTES, "account file"))
+    except (UsageProblem, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    acct = doc.get("oauthAccount") if isinstance(doc, dict) else None
+    email = acct.get("emailAddress") if isinstance(acct, dict) else None
+    if (not isinstance(email, str) or not 3 <= len(email) <= 254 or email.count("@") != 1
+            or any(c.isspace() or not c.isprintable() for c in email)):
+        return None
+    return email
+
+
+def read_usage(cfg: Config) -> dict:
+    out = {"enabled": cfg.usage_file is not None or cfg.account_file is not None,
+           "usage": None, "usage_problem": None, "account": None}
+    if cfg.usage_file is not None:
+        try:
+            out["usage"] = usage_snapshot(cfg.usage_file)
+        except UsageProblem as e:
+            out["usage_problem"] = str(e)
+    if cfg.account_file is not None:
+        out["account"] = account_email(cfg.account_file)
+    return out
 
 
 class Console:
@@ -965,6 +1061,8 @@ class OwnerHandler(_Handler):
             return self._board()
         if self.path == "/api/check":
             return self._check()
+        if self.path == "/api/usage":  # 0.8.6: the footer's probe
+            return self._send(200, read_usage(self.console.cfg))
         route, query = self._query()
         live = {"/api/wait": self._wait, "/api/feed": self._feed, "/api/evidence": self._evidence,
                 "/api/visual": self._visual}.get(route)
@@ -1321,11 +1419,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--health-port", type=int, default=0,
                     help="also answer GET /health on this loopback port, ungated (default: off; "
                          "/health is always on the agent socket)")
+    ap.add_argument("--usage-file", type=Path, default=None,
+                    help="a status line's usage snapshot (JSON with five_hour/seven_day), shown in the "
+                         "console's footer (default: off)")
+    ap.add_argument("--account-file", type=Path, default=None,
+                    help="Claude Code's settings file; the footer shows its account email and nothing "
+                         "else is read from it (default: off)")
     a = ap.parse_args(argv)
     if not 0 <= a.health_port <= 65535:
         ap.error("--health-port takes 0 (off) or a port number")
     if a.health_port and a.health_port == a.port:
         ap.error("--health-port must differ from --port: the owner's door is never ungated")
+    for flag, p in (("--usage-file", a.usage_file), ("--account-file", a.account_file)):
+        if p is not None and not p.is_absolute():
+            ap.error(f"{flag} takes an absolute path")
     serve(Config(root=a.root, page=a.page, state=a.state, adapter=a.adapter, team_domain=a.team_domain,
-                 aud=a.aud, hostname=a.hostname, port=a.port, project=a.project, health_port=a.health_port))
+                 aud=a.aud, hostname=a.hostname, port=a.port, project=a.project, health_port=a.health_port,
+                 usage_file=a.usage_file, account_file=a.account_file))
     return 0

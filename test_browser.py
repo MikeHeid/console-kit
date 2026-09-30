@@ -1449,6 +1449,57 @@ class LiveConsoleTests(unittest.TestCase):
                 self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-questions-heading')"))
                 self.assert_not_reloaded(page)
 
+    def test_the_usage_footer_shows_usage_and_account_and_makes_room(self):
+        # Catches: a footer on a server that set no file; one drawn from anything but the checked
+        # fields; one that covers the page's last line; a stale snapshot that reads as current;
+        # and one that pushes a phone sideways.
+        from datetime import datetime, timedelta, timezone
+
+        def stamp(ago=timedelta(0)):
+            return (datetime.now(timezone.utc) - ago).isoformat().replace("+00:00", "Z")
+
+        def write_usage(d, ago=timedelta(0)):
+            (d / "usage.json").write_text(json.dumps({
+                "updated_at": stamp(ago),
+                "five_hour": {"used_percentage": 42, "resets_at": stamp(-timedelta(hours=2))},
+                "seven_day": {"used_percentage": 18, "resets_at": None},
+                "planted": "planted-usage-marker"}))
+
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                page = self.page(kind, 1280, url)
+                page.evaluate("window.ConsoleKit.refreshUsage()")
+                self.assertEqual(page.locator(".ck-footer").count(), 0)  # off unless configured
+                d = self.cfg.root
+                write_usage(d)
+                (d / "acct.json").write_text(json.dumps(
+                    {"oauthAccount": {"emailAddress": "owner@example.com", "accountUuid": "planted-uuid"},
+                     "primaryApiKey": "planted-secret"}))
+                self.console.cfg = self.SV.Config(**{**self.cfg.__dict__, "usage_file": d / "usage.json",
+                                                     "account_file": d / "acct.json"})
+                page.evaluate("window.ConsoleKit.refreshUsage()")
+                page.wait_for_selector(".ck-footer")
+                text = page.locator(".ck-footer").text_content()
+                for want in ("5-hour 42% (resets", "7-day 18%", "as of just now", "owner@example.com"):
+                    self.assertIn(want, text)
+                self.assertNotIn("planted", text)
+                self.assertEqual(page.locator(".ck-footer").get_attribute("data-stale"), "false")
+                room = page.evaluate("[parseFloat(getComputedStyle(document.body).paddingBottom),"
+                                     " document.querySelector('.ck-footer').offsetHeight]")
+                self.assertAlmostEqual(room[0], room[1], delta=1)
+                write_usage(d, ago=timedelta(hours=3))
+                page.evaluate("window.ConsoleKit.refreshUsage()")
+                self.assertIn("as of 3 h ago", page.locator(".ck-footer").text_content())
+                self.assertEqual(page.locator(".ck-footer").get_attribute("data-stale"), "true")
+                page.set_viewport_size({"width": 375, "height": 800})
+                page.evaluate("window.ConsoleKit.refreshUsage()")
+                self.assertLessEqual(page.evaluate("document.documentElement.scrollWidth"), 375)
+                room = page.evaluate("[parseFloat(getComputedStyle(document.body).paddingBottom),"
+                                     " document.querySelector('.ck-footer').offsetHeight]")
+                self.assertAlmostEqual(room[0], room[1], delta=1)
+                self.assert_not_reloaded(page)
+
 
 # -- 0.8.0: the Next step menu, tag chips, roar, and visuals, against the REAL server ------
 

@@ -1116,3 +1116,27 @@
   border-radius: var(--radius-sm);
   background: #fff; /* a mock paints its own page; this is only its canvas */
 }
+
+/* --- 0.8.6: the usage footer ---
+   A thin bar fixed to the bottom edge, under the kit's panel, strip and stale bar (994 < 995).
+   It wraps rather than clips on a phone, and console.js writes its height to --ck-footer-h so
+   the host page and the stale bar both clear it at any height. Words carry the state; a stale
+   snapshot is also set in italics, never shown by colour alone. */
+.ck-footer {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 994;
+  box-sizing: border-box;
+  padding: 4px 16px calc(4px + env(safe-area-inset-bottom, 0px));
+  font: 12px/1.5 system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  color: var(--c-fg-muted);
+  background: var(--c-surface-alt);
+  border-top: 1px solid var(--c-border);
+  overflow-wrap: anywhere;
+}
+.ck-footer[data-stale="true"] { font-style: italic; }
+html.ck-footer-on body { padding-bottom: var(--ck-footer-h, 28px); }
+html.ck-footer-on .ck-board-stale { bottom: calc(var(--ck-footer-h, 28px) + 8px); }
+@media (min-width: 1024px) {
+  html.ck-dock .ck-footer { right: 44px; }
+  html.ck-dock-open .ck-footer { right: var(--ck-col); }
+}

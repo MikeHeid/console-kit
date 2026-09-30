@@ -9,7 +9,9 @@ so no test reaches the network.
 
 from __future__ import annotations
 
+import contextlib
 import http.client
+import io
 import json
 import os
 import stat
@@ -2096,6 +2098,121 @@ class StewardDoorTests(_Live, unittest.TestCase):
         self.assertIn("steward, agent-5", err)
         rc, out, err = ServerTests.agent_cli(self, "--as", "agent-5", "synced")
         self.assertEqual(rc, 0, out + err)
+
+
+# -- 0.8.6: the footer's usage and account probe ------------------------------------------------
+
+GOOD_USAGE = {
+    "updated_at": "2026-09-30T18:00:00.000Z",
+    "five_hour": {"used_percentage": 42, "resets_at": "2026-09-30T21:00:00.000Z"},
+    "seven_day": {"used_percentage": 18.5, "resets_at": None},
+    "extra_field_never_forwarded": "planted-usage-marker",
+}
+ACCOUNT_DOC = {
+    "oauthAccount": {"emailAddress": "owner@example.com", "accountUuid": "planted-uuid-marker"},
+    "primaryApiKey": "planted-secret-marker",
+    "projects": {"/x": {"history": ["planted-history-marker"]}},
+}
+
+
+class UsageTests(_Live, unittest.TestCase):
+    """GET /api/usage: the footer's probe. Off unless configured, gated, and it forwards only the
+    named fields of two files that belong to someone else."""
+
+    def configure(self, usage=None, account=None):
+        d = Path(self.tmp.name)
+        u = a = None
+        if usage is not None:
+            u = d / "usage.json"
+            u.write_bytes(usage if isinstance(usage, bytes) else json.dumps(usage).encode())
+        if account is not None:
+            a = d / "settings.json"
+            a.write_bytes(account if isinstance(account, bytes) else json.dumps(account).encode())
+        self.console.cfg = SV.Config(**{**self.cfg.__dict__, "usage_file": u, "account_file": a})
+        return u, a
+
+    def usage(self):
+        code, out = self.get("/api/usage")
+        self.assertEqual(code, 200, out)
+        return out
+
+    def test_the_probe_is_behind_the_gate(self):
+        self.configure(GOOD_USAGE, ACCOUNT_DOC)
+        self.assertEqual(self.req("GET", "/api/usage")[0], 403)
+
+    def test_off_unless_configured(self):
+        # Catches: a kit that reads a default path nobody asked it to, on an install with no footer.
+        self.assertEqual(self.usage(), {"enabled": False, "usage": None, "usage_problem": None, "account": None})
+
+    def test_a_good_snapshot_forwards_only_the_named_fields(self):
+        # Catches: passing the file through (the extra field would reach the page), or a number
+        # forwarded as the string it arrived as.
+        self.configure(GOOD_USAGE)
+        out = self.usage()
+        self.assertTrue(out["enabled"])
+        self.assertEqual(out["usage"], {
+            "updated_at": "2026-09-30T18:00:00Z",
+            "five_hour": {"used_percentage": 42.0, "resets_at": "2026-09-30T21:00:00Z"},
+            "seven_day": {"used_percentage": 18.5, "resets_at": None}})
+        self.assertIsNone(out["usage_problem"])
+        self.assertNotIn("planted-usage-marker", json.dumps(out))
+
+    def test_a_bad_snapshot_is_named_never_echoed(self):
+        # Catches: a crash (500) on a file the status line wrote badly, a problem that quotes the
+        # file back, and a percentage or timestamp let through unchecked.
+        cases = [
+            (b"{not json", "is not JSON"),
+            (b"[1, 2]", "is not a JSON object"),
+            (b" " * (SV.USAGE_MAX_BYTES + 1), "larger than 16 KB"),
+            ({**GOOD_USAGE, "five_hour": {"used_percentage": 150, "resets_at": None}}, "percentage is not 0-100"),
+            ({**GOOD_USAGE, "five_hour": {"used_percentage": True, "resets_at": None}}, "percentage is not 0-100"),
+            ({**GOOD_USAGE, "updated_at": "2026-09-30T18:00:00"}, "has no time zone"),
+            ({**GOOD_USAGE, "updated_at": "<script>planted</script>"}, "is not a timestamp"),
+            ({k: v for k, v in GOOD_USAGE.items() if k != "seven_day"}, "has no seven_day window"),
+        ]
+        for body, problem in cases:
+            with self.subTest(problem=problem):
+                self.configure(body)
+                out = self.usage()
+                self.assertIsNone(out["usage"])
+                self.assertIn(problem, out["usage_problem"])
+                self.assertNotIn("planted", json.dumps(out))
+
+    def test_a_missing_snapshot_says_so(self):
+        # The status line writes the file only while a session runs: before its first write the
+        # footer must say "not yet", not fail.
+        u, _ = self.configure(GOOD_USAGE)
+        u.unlink()
+        out = self.usage()
+        self.assertEqual(out["usage_problem"], "the usage file does not exist yet")
+
+    def test_the_account_file_gives_up_its_email_and_nothing_else(self):
+        # Catches: forwarding oauthAccount whole, or any other key of a file that also holds
+        # credentials and project history.
+        self.configure(account=ACCOUNT_DOC)
+        out = self.usage()
+        self.assertEqual(out["account"], "owner@example.com")
+        text = json.dumps(out)
+        for marker in ("planted-uuid-marker", "planted-secret-marker", "planted-history-marker"):
+            self.assertNotIn(marker, text)
+
+    def test_an_unusable_account_file_shows_no_account(self):
+        for doc in (b"{broken", [], {"oauthAccount": "x"}, {"oauthAccount": {"emailAddress": "no-at-sign"}},
+                    {"oauthAccount": {"emailAddress": "a b@example.com"}},
+                    {"oauthAccount": {"emailAddress": "x@y\n<script>"}}):
+            with self.subTest(doc=str(doc)[:40]):
+                self.configure(account=doc)
+                self.assertIsNone(self.usage()["account"])
+        _, a = self.configure(account=ACCOUNT_DOC)
+        a.unlink()
+        self.assertIsNone(self.usage()["account"])
+
+    def test_the_cli_refuses_a_relative_path(self):
+        for flag in ("--usage-file", "--account-file"):
+            with self.subTest(flag=flag), self.assertRaises(SystemExit):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    SV.main(["--root", ".", "--page", "p", "--state", "s", "--adapter", "a", "--team-domain", "t",
+                             "--aud", "x", "--hostname", "h", flag, "relative.json"])
 
 
 if __name__ == "__main__":

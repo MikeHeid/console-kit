@@ -203,6 +203,38 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   item's thread now render their newlines (`white-space: pre-wrap`), as chat
   messages already did. The text is still set as text, never as HTML.
 
+### Back to the inbox, and one lock for many answers (0.8.5)
+
+- **"← Inbox".** An item opened from the inbox has a button back to the inbox,
+  which returns focus to that item's row.
+- **"Lock all N answers".** An item with more than one answered, unlocked
+  question offers one button. It shows every answer it will lock, locks them
+  in order, and stops at the first refusal, naming the question and how many
+  were locked. The message can be dismissed.
+
+### A usage footer (0.8.6)
+
+- **What it shows.** A thin bar at the bottom of the console: Claude usage for
+  the 5-hour and 7-day windows with their reset times, how old that snapshot
+  is, and the signed-in account's email. It polls `GET /api/usage` every 45 s
+  while the tab is visible.
+- **Off unless you ask for it.** The server reads nothing for the footer until
+  it is started with `--usage-file` or `--account-file` (absolute paths), and
+  a page talking to an older server shows no footer.
+- **`--usage-file`** is a status line's usage snapshot (for claude-hud, the
+  file named by `display.externalUsageWritePath`): `updated_at`, and
+  `five_hour` / `seven_day` each with `used_percentage` and `resets_at`. The
+  status line writes it only while a Claude Code session runs, so with none
+  open the footer says how old the numbers are, in italics once they pass
+  10 minutes.
+- **`--account-file`** is Claude Code's settings file. Only
+  `oauthAccount.emailAddress` is read from it; the file also holds other
+  account details and project history, and none of that reaches the page.
+- **Checked, then forwarded.** Both files are read with a size cap, parsed,
+  and reduced to those fields; a percentage must be 0-100 and a timestamp must
+  carry a time zone. A problem is shown as a short sentence, never as the
+  file's contents.
+
 ## How it fits together
 
 ```
