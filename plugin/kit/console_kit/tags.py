@@ -14,7 +14,9 @@ locked, and that spec file has NOT been edited since the lock. "Edited" is:
   uncommitted changes or is untracked;
 - outside git (or a repository with no commits): the file's mtime.
 
-A lock and an edit in the same second count as "not edited since".
+A lock and an edit in the same second count as "not edited since". Every
+git call runs with `--no-optional-locks` and `GIT_OPTIONAL_LOCKS=0` (0.8.1),
+so `git status` never rewrites the index of the service checkout.
 
 **drill**, either of:
 
@@ -83,6 +85,15 @@ MAX_SPEC_FILES = 2000
 MAX_SPEC_BYTES = 16 << 20
 MAX_TERMS = 10
 GIT_TIMEOUT = 10
+# 0.8.1: every git call in the project is READ-ONLY. Plain `git status` refreshes
+# the index's stat cache and rewrites .git/index when it can take the lock, which
+# is a write into the live service checkout; `--no-optional-locks` (and the same
+# as an environment variable, for any git a hook or alias starts) turns that off.
+GIT = ("git", "--no-optional-locks")
+
+
+def git_env() -> dict[str, str]:
+    return {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
 # Pairs every backtick span (so a short `ab` cannot pair its closing tick with the next
 # span's opening one); only a span of 3 to 80 characters is a term.
 BACKTICK = re.compile(r"`([^`\n]{1,80})`")
@@ -211,8 +222,8 @@ class _Git:
 
     def _run(self, args: list[str]) -> str | None:
         try:
-            r = subprocess.run(["git", *args], cwd=self.root, capture_output=True, text=True,
-                               timeout=GIT_TIMEOUT, check=False)
+            r = subprocess.run([*GIT, *args], cwd=self.root, capture_output=True, text=True,
+                               timeout=GIT_TIMEOUT, check=False, env=git_env())
         except (OSError, subprocess.SubprocessError):
             return None
         return r.stdout if r.returncode == 0 else None

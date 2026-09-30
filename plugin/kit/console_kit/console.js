@@ -1257,10 +1257,13 @@
     const form = el('div', { className: 'ck-fork-form ck-visual-form', role: 'group', 'aria-labelledby': id + '-h' });
     form.appendChild(el('div', { className: 'ck-confirm-heading', id: id + '-h' }, ['Request a visual of ' + itemId]));
     const where = view.config && view.config.visuals_dir;
-    form.appendChild(el('p', { className: 'ck-muted' }, [where
-      ? 'An agent answers with a Mermaid diagram or a static HTML mock and a short doc, stored under ' + where +
-        '/ and listed in its INDEX.md. It shows here, a mock only inside a sandbox that runs no script.'
-      : 'This project sets no visuals_dir in .console-kit.json, so an agent has nowhere to store a visual yet.']));
+    // 0.8.1: the console stores the visual itself; visuals_dir is only where a PR lands it.
+    form.appendChild(el('p', { className: 'ck-muted' }, [
+      'An agent answers with a Mermaid diagram or a static HTML mock and a short doc. The console keeps it and ' +
+      'shows it here, a mock only inside a sandbox that runs no script. ' + (where
+        ? 'An agent can land it in the repository under ' + where + '/ by a pull request.'
+        : 'This project sets no visuals_dir in .console-kit.json, so it stays in the console and is not landed ' +
+          'in the repository.')]));
     const noteId = id + '-note';
     const text = el('textarea', { className: 'ck-textarea', rows: '3', id: noteId,
       placeholder: 'e.g. The grid page at phone width, with the session block open' });
@@ -1271,7 +1274,6 @@
     const err = el('p', { className: 'ck-error-msg', role: 'status', 'aria-live': 'polite' });
     form.appendChild(err);
     const send = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' }, ['Request the visual']);
-    if (!where) send.disabled = true;
     send.addEventListener('click', async () => {
       err.textContent = '';
       if (!text.value.trim()) { err.textContent = 'Say what the visual should show.'; announce(err.textContent); return; }
@@ -1311,7 +1313,8 @@
     const box = el('div', { className: 'ck-visual', dataFormat: v.format, dataVisual: v.id });
     box.appendChild(el('div', { className: 'ck-visual-title' }, [v.title]));
     box.appendChild(el('div', { className: 'ck-muted' }, [
-      (v.format === 'html' ? 'HTML mock' : 'Mermaid diagram') + ' · ' + v.path + ' · ' + relTime(v.ts)]));
+      (v.format === 'html' ? 'HTML mock' : 'Mermaid diagram') + ' · ' + String(v.path).split('/').pop() +
+      ' · ' + relTime(v.ts)]));
     const doc = el('div', { className: 'ck-visual-doc' });
     doc.textContent = v.text;
     box.appendChild(doc);

@@ -102,7 +102,12 @@ heartbeat `agent.py watch` writes while it waits (0.6.0).
   (shown as its source text) or a static HTML mock (shown **only** inside
   `<iframe sandbox="">`, served under a `sandbox` Content-Security-Policy, so
   no script in it runs, even opened on its own), plus a short doc. The server
-  writes both under `visuals_dir` and regenerates its `INDEX.md`.
+  stores both in its state directory, beside `store.jsonl`, and **never writes
+  into the project's working tree** (0.8.1). To land a visual in the
+  repository, an agent runs `agent.py visual-export --project <its own
+  worktree>`, which copies it under `visuals_dir` there and regenerates that
+  folder's `INDEX.md`; the agent then opens a pull request. The checkout the server runs
+  from keeps following main with a plain `git merge --ff-only`.
 
 `docs/ADAPTER.md` documents `specs_dir`, `visuals_dir` and `next_step`.
 

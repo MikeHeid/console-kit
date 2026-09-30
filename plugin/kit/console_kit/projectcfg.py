@@ -5,8 +5,12 @@ The file is the repository's DATA, never a path anything executes from
 
     specs_dir    where the project keeps its specs, e.g. "architect/40-specs/".
                  Read only: the "refine" and "drill" tags look in it.
-    visuals_dir  where agent-made visuals are written, e.g. "architect/visuals/".
-                 The kit writes the visual files and a generated INDEX.md there.
+    visuals_dir  where agent-made visuals LAND by pull request, e.g. "architect/visuals/".
+                 A destination only (0.8.1): the server validates it and never writes
+                 there. It stores visuals in its STATE directory; `agent.py
+                 visual-export` copies them, and a generated INDEX.md, into the
+                 agent's own worktree under this path. Without it a visual is still
+                 requested, stored and shown; only landing it needs this key.
     next_step    {"refine": "<skill>", "drill": "<skill>"}: the skill a session
                  runs for each kind of fork. The server never reads it; the
                  console-fork skill does, and it is checked here only so a typo
