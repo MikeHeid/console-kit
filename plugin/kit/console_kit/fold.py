@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Protocol
 
 from . import anchors as A
+from . import names as N
 from . import schema as S
 from .store import Store
 
@@ -67,8 +68,19 @@ def locked_filename(qid: str) -> str:
     return qid.replace("/", "__") + ".json"
 
 
-def export(store: Store) -> dict[str, dict]:
-    """Return filename -> entry for every question whose CURRENT answer is locked."""
+def names_beside(store_path: Path) -> dict[str, str]:
+    """Record id -> agent name from the names file beside a store (0.8.2); {} when there is none."""
+    return N.load_beside(store_path)
+
+
+def export(store: Store, names: dict[str, str] | None = None) -> dict[str, dict]:
+    """Return filename -> entry for every question whose CURRENT answer is locked.
+
+    `names` (0.8.2) maps record id -> agent name: a question an agent asked
+    under a name carries `asked_by_agent`, so a ruling can say which agent
+    asked. A question with no name gets no such key, so its file is byte for
+    byte what 0.8.1 exported.
+    """
     out: dict[str, dict] = {}
     for q in (r for r in store.records() if r["type"] == "question"):
         answers = store.answers(q["qid"])
@@ -101,6 +113,8 @@ def export(store: Store) -> dict[str, dict]:
         }
         # `evidence` (0.7.0) only when present, so a file for a question without it is byte-identical to 0.6.0.
         entry.update({k: q[k] for k in ("forked_from", "star_by", "evidence") if k in q})
+        if names and names.get(q["id"]):
+            entry["asked_by_agent"] = names[q["id"]]
         if "forked_from" in q:
             # The fork message travels with the file, so `fold`, which never reads
             # the store (R1), can still check the id against the message it names.
@@ -201,6 +215,12 @@ def check_entry(name: str, e: object, items: dict[str, dict]) -> list[str]:
     errs += [f"{name}: {m}" for m in S.validate(as_record)]
     if not isinstance(e.get("asked_at"), str) or not TS.match(e["asked_at"]):
         errs.append(f"{name}: asked_at {e.get('asked_at')!r} is not a store timestamp")
+    if "asked_by_agent" in e:  # 0.8.2: printed into the rulings record, so held to the name's shape
+        why = N.problem(e["asked_by_agent"])
+        if why:
+            errs.append(f"{name}: asked_by_agent: {why}")
+        elif e.get("asked_by") != "agent":
+            errs.append(f"{name}: asked_by_agent names an agent, but asked_by is {e.get('asked_by')!r}")
     opts = e.get("options")
     ok_opts = isinstance(opts, list) and all(isinstance(o, dict) for o in opts)
     ids = [o.get("id") for o in opts] if ok_opts else []
@@ -476,7 +496,7 @@ def main(argv: list[str] | None = None) -> int:
                                              inside(a.root, a.ledger, "--ledger"),
                                              inside(a.root, a.adapter, "--adapter"))
         if a.cmd == "export":
-            for name in write_export(export(Store(a.store)), a.out):
+            for name in write_export(export(Store(a.store), names_beside(a.store)), a.out):
                 print(f"wrote {a.out / name}")
             return 0
         written, skipped = fold(a.locked, a.ledger, load_adapter(a.adapter), dry_run=a.dry_run)

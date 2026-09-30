@@ -111,6 +111,28 @@ heartbeat `agent.py watch` writes while it waits (0.6.0).
 
 `docs/ADAPTER.md` documents `specs_dir`, `visuals_dir` and `next_step`.
 
+### Several agents, one console (0.8.2)
+
+- **Agent names.** A session may say who it is: `agent.py --as agent-6`, or
+  `CONSOLE_KIT_AGENT=agent-6`. The console shows the name wherever it shows
+  an agent as the author: "asked by agent-6" on a question, on replies and
+  chat messages, visuals, roar transcripts and Feed rows. `fold.py export`
+  carries it as `asked_by_agent`, so a ruling can say which agent asked. A
+  name is 1 to 32 lowercase letters, digits and single hyphens, and anything
+  else is refused by name. With no name, everything reads as in 0.8.1.
+- **Names live beside the store, not in it** (`<state>/names.jsonl`). The
+  store, its records and `SCHEMA_VERSION` are unchanged, so a 0.8.1 kit still
+  starts on a store 0.8.2 wrote; it would refuse a record carrying a field it
+  does not know.
+- **Each agent's own "agent active" marks.** `working` marks are kept per
+  name, and a session's `synced` clears only its own. Unnamed sessions share
+  one set, as before. The doorbell cursor is still one for all sessions.
+- `agent.py visual-export` exits **3** when it wrote files but refused a
+  visual (each refusal named), and 1 only when nothing was written. Its
+  directory walk holds each folder open as it goes (`O_DIRECTORY|O_NOFOLLOW`
+  with `dir_fd`), so a folder swapped for a symlink mid-export cannot redirect
+  a write.
+
 ## How it fits together
 
 ```
@@ -174,7 +196,8 @@ new record in the store, and nothing already written changes.
   `working` (shows you "agent active" on the items it has picked up),
   `synced`, `fork-context`, `check` (why each stale answer is stale), `reanchor`,
   `transcript` (a roar's transcript), `visual` (an answer to a visual request),
-  and `register`, which **only you** run.
+  `visual-export`, and `register`, which **only you** run. `--as NAME` names
+  the session (0.8.2).
 - **`fold.py`** writes locked answers into your project through the adapter.
 - **`plugin/`** holds the Claude Code plugin: the hook, the skills and the
   committee agents.

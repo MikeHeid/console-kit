@@ -29,16 +29,22 @@
     agent.py --state DIR visual-export --project WORKTREE [--visual ID ...]
                                                 copy stored visuals (default: all; identical files are
                                                 skipped) into WORKTREE/<visuals_dir>/ and regenerate its
-                                                INDEX.md there, to land by PR. WORKTREE is your own
-                                                worktree on a branch, never the server's checkout; a
-                                                different file already at a target path is refused
+                                                INDEX.md there, to land by PR. WORKTREE is the TOP of
+                                                your own git work tree, on a branch (never a folder
+                                                inside it, never the server's checkout); a different
+                                                file already at a target path is refused. Exits 0 when
+                                                every chosen visual was exported, 3 when files were
+                                                written but at least one visual was refused (each is
+                                                named), 1 when nothing was written, 2 when the server
+                                                cannot be reached
     agent.py --state DIR next-step refine|drill --project DIR
                                                 print the installed user skill .console-kit.json's
                                                 `next_step` names for that kind; exit 1 naming why when
                                                 it is unset, not installed, or resolves into the project
     agent.py --state DIR working ITEM [ITEM ...]
-                                                show the owner "agent active" on these items; the next
-                                                `synced` clears it, and it lapses after an hour
+                                                show the owner "agent active" on these items; this
+                                                session's next `synced` clears it (0.8.2: only its own
+                                                marks, by --as name), and it lapses after an hour
     agent.py --state DIR synced [--through SEQ] [--error MSG]
                                                 record that the agent has processed the doorbell up to SEQ
     agent.py --state DIR register --project DIR
@@ -57,11 +63,23 @@ agent's cursor moves only through `synced --through`, and never backwards, so
 a signal that arrives while the agent works is not marked processed.
 
 The server stamps every write from this door `by: agent`.
+
+**Agent names (0.8.2).** When several sessions share one console, each may
+say who it is: `agent.py --as agent-6 ...` (before the subcommand), or
+CONSOLE_KIT_AGENT=agent-6 in its environment; `--as` wins. The name is 1 to 32
+lowercase letters, digits and single hyphens, starting with a letter, and
+neither "agent" nor "owner"; anything else is refused by name (exit 2) and
+nothing is sent. The owner's console shows it on the questions, replies,
+visuals and transcripts this session writes, and `working`/`synced` then keep
+and clear this session's own "agent active" marks, never another's. With no
+name, everything is exactly as in 0.8.1, and the unnamed sessions share one
+set of marks.
 """
 
 import argparse
 import datetime as dt
 import json
+import os
 import secrets
 import signal
 import sys
@@ -70,6 +88,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from console_kit import bundle as B  # noqa: E402
 from console_kit import doorbell as D  # noqa: E402
+from console_kit import names as N  # noqa: E402
 from console_kit import registry as R  # noqa: E402
 from console_kit import view as V  # noqa: E402
 from console_kit.server import agent_request  # noqa: E402
@@ -168,9 +187,9 @@ def _reanchor(state: Path, dry_run: bool, as_json: bool) -> int:
     return 0
 
 
-def _call(state: Path, method: str, path: str, body=None) -> int:
+def _call(state: Path, method: str, path: str, body=None, agent: str | None = None) -> int:
     try:
-        code, out = agent_request(state / "agent.sock", method, path, body)
+        code, out = agent_request(state / "agent.sock", method, path, body, agent=agent)
     except OSError as e:
         print(f"cannot reach the console server at {state / 'agent.sock'}: {e}", file=sys.stderr)
         return 2
@@ -224,6 +243,11 @@ def _visual_export(state: Path, project: Path, ids: list[str]) -> int:
     must be the top of a git work tree, and it is refused when it is the
     directory the console server runs from (or that directory's work tree):
     the server's checkout follows main and must never gain untracked files.
+
+    Exit codes (0.8.2): 0 every chosen visual exported (or already there,
+    identical); 3 some files written, at least one visual refused and named;
+    1 nothing written (refused, or every chosen visual refused); 2 the server
+    cannot be reached.
     """
     from console_kit import projectcfg as PC
     from console_kit import visuals as VIS
@@ -253,6 +277,13 @@ def _visual_export(state: Path, project: Path, ids: list[str]) -> int:
               f"worktree on a branch (git worktree add ../visuals-branch -b visuals) and land it by PR",
               file=sys.stderr)
         return 1
+    for r in out["refused"]:
+        print(f"not exported: visual {r['id']}: {r['why']}", file=sys.stderr)
+    if out["refused"] and not out["visuals"]:
+        # Every chosen visual was refused: write nothing at all, not even a regenerated INDEX.md.
+        print(f"refused: none of the {len(out['refused'])} chosen visual(s) could be exported; nothing was "
+              f"written", file=sys.stderr)
+        return 1
     try:
         vdir = PC._dir(dest, out["visuals_dir"], "visuals_dir")   # the same jail, now against YOUR tree
         plan = VIS.export_plan(dest, vdir, out["visuals"])
@@ -261,11 +292,12 @@ def _visual_export(state: Path, project: Path, ids: list[str]) -> int:
     except (PC.ConfigError, VIS.VisualError, OSError) as e:
         print(f"refused, nothing overwritten: {e}", file=sys.stderr)
         return 1
-    for r in out["refused"]:
-        print(f"not exported: visual {r['id']}: {r['why']}", file=sys.stderr)
     print(json.dumps({"project": str(dest), "visuals_dir": vdir, **done, "refused": out["refused"]},
                      indent=2, ensure_ascii=False))
-    return 1 if out["refused"] else 0
+    if not out["refused"]:
+        return 0
+    # 3: a partial export, told apart from 1 ("nothing was written") so a caller knows files landed.
+    return 3 if done["written"] else 1
 
 
 def _refused_note(files: list, n: int, why: str | None, rc: int = 1) -> int:
@@ -280,6 +312,8 @@ def _refused_note(files: list, n: int, why: str | None, rc: int = 1) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--state", type=Path, required=True)
+    ap.add_argument("--as", dest="agent", metavar="NAME",
+                    help=f"this session's agent name, e.g. agent-6 (default: ${N.ENV}; none: unnamed, as in 0.8.1)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("inbox")
     g = s.add_mutually_exclusive_group()
@@ -317,9 +351,14 @@ def main(argv=None) -> int:
     s.add_argument("--file", type=Path, required=True)
     s.add_argument("--doc", type=Path, required=True)
     s.add_argument("--title", required=True)
-    s = sub.add_parser("visual-export")
+    s = sub.add_parser("visual-export", description=(
+        "Copy stored visuals into PROJECT/<visuals_dir>/ and regenerate its INDEX.md, to land by PR. PROJECT "
+        "must be the top of your own git work tree (visuals_dir is a path from the repository's top), never a "
+        "folder inside it and never the server's checkout. It exits 0 when every chosen visual was exported, "
+        "exits 3 when files were written but at least one visual was refused (each refusal is named), exits 1 "
+        "when nothing was written, and exits 2 when the server cannot be reached."))
     s.add_argument("--project", type=Path, required=True,
-                   help="YOUR worktree (top of a git work tree), never the server's checkout")
+                   help="YOUR worktree: the TOP of a git work tree, never a folder inside it or the server's checkout")
     s.add_argument("--visual", action="append", default=[], metavar="ID",
                    help="a visual record id; repeat for more (default: every stored visual)")
     s = sub.add_parser("next-step")
@@ -333,6 +372,16 @@ def main(argv=None) -> int:
     s = sub.add_parser("register")
     s.add_argument("--project", type=Path, required=True)
     a = ap.parse_args(argv)
+    # The agent name (0.8.2): --as wins over the environment; an empty variable counts as unset.
+    if a.agent is None and os.environ.get(N.ENV):
+        a.agent, where = os.environ[N.ENV], N.ENV
+    else:
+        where = "--as"
+    if a.agent is not None:
+        why = N.problem(a.agent)
+        if why:
+            print(f"agent.py: {where}: {why}; nothing was sent", file=sys.stderr)
+            return 2
     bell = a.state / "inbox.jsonl"
     try:
         return _run(a, bell)
@@ -387,9 +436,9 @@ def _run(a, bell: Path) -> int:
         body = {"item": a.item, "text": a.text, "nonce": secrets.token_urlsafe(12)}
         if a.reply_to:
             body["reply_to"] = a.reply_to
-        return _call(a.state, "POST", "/message", body)
+        return _call(a.state, "POST", "/message", body, agent=a.agent)
     if a.cmd == "working":
-        return _call(a.state, "POST", "/working", {"items": a.items})
+        return _call(a.state, "POST", "/working", {"items": a.items}, agent=a.agent)
     if a.cmd == "next-step":
         from console_kit import projectcfg as PC
         try:
@@ -408,14 +457,14 @@ def _run(a, bell: Path) -> int:
         if text is None:
             return 1
         return _call(a.state, "POST", "/transcript", {"fork": a.fork, "text": text,
-                                                       "nonce": secrets.token_urlsafe(12)})
+                                                       "nonce": secrets.token_urlsafe(12)}, agent=a.agent)
     if a.cmd == "visual":
         content, doc = _read_text(a.file, "visual"), _read_text(a.doc, "doc")
         if content is None or doc is None:
             return 1
         return _call(a.state, "POST", "/visual", {"request": a.request, "format": a.format, "title": a.title,
                                                   "content": content, "text": doc,
-                                                  "nonce": secrets.token_urlsafe(12)})
+                                                  "nonce": secrets.token_urlsafe(12)}, agent=a.agent)
     if a.cmd == "visual-export":
         return _visual_export(a.state, a.project, a.visual)
     if a.cmd == "ask":
@@ -427,7 +476,7 @@ def _run(a, bell: Path) -> int:
             if not isinstance(body, dict):
                 return _refused_note(a.files, n, f"{f} is not a JSON object")
             body.setdefault("nonce", secrets.token_urlsafe(12))
-            rc = _call(a.state, "POST", "/question", body)
+            rc = _call(a.state, "POST", "/question", body, agent=a.agent)
             if rc:
                 return _refused_note(a.files, n, None, rc)
         if len(a.files) > 1:
@@ -440,7 +489,7 @@ def _run(a, bell: Path) -> int:
         held = D.write_cursor(a.state, a.through)
         print(f"agent cursor: processed through seq {held}", file=sys.stderr)
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return _call(a.state, "POST", "/cursor", {"last_synced_at": now, "last_error": a.error})
+    return _call(a.state, "POST", "/cursor", {"last_synced_at": now, "last_error": a.error}, agent=a.agent)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 """Tests for plugin/kit/tools/verify_vendor.py (0.6.0): a vendored copy must be one kit release, exactly.
 
 Each test builds a throwaway kit repository with git, tags it, vendors it the
-way gradiance does, and then breaks the copy one way at a time.
+way a project that vendors the kit flat does, and then breaks the copy one way at a time.
 
     python3 -m unittest test_vendor
 """
@@ -30,7 +30,7 @@ KIT_FILES = {
     "plugin/kit/publish.py": "publish\n",
     "plugin/kit/server.py": "shim\n",
     "plugin/kit/requirements.txt": "PyJWT==2\n",
-    "plugin/kit/onboard.py": "not vendored by gradiance\n",
+    "plugin/kit/onboard.py": "not vendored by the flat layout\n",
     "plugin/.claude-plugin/plugin.json": '{"version": "1.0.0"}\n',
     "plugin/hooks/hooks.json": "{}\n",
     "plugin/hooks/session_start.py": "hook\n",
@@ -68,7 +68,7 @@ class VerifyVendorTests(unittest.TestCase):
             if dst:
                 (self.copy / dst).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(self.kit / rel, self.copy / dst)
-        # What gradiance adapts: its tests point at a flat layout.
+        # What a flat vendoring project adapts: its tests point at a flat layout.
         (self.copy / "test_kit.py").write_text("KIT = HERE\n")
         (self.copy / "console_kit" / "__pycache__").mkdir()
         (self.copy / "console_kit" / "__pycache__" / "server.cpython-312.pyc").write_bytes(b"\0")
@@ -120,7 +120,7 @@ class VerifyVendorTests(unittest.TestCase):
         self.assertFalse(rep["ok"])
 
     def test_skills_may_be_left_out_but_one_taken_is_taken_whole(self):
-        # gradiance has no console-onboard: that is allowed. A skill it has must be complete.
+        # A vendoring project may leave out console-onboard: that is allowed. A skill it has must be complete.
         self.assertEqual(VV.verify(self.kit, "v1.0.0", self.copy)["missing"], [])
         (self.kit / "plugin/skills/console-fold/reference.md").write_text("more\n")
         self.git("add", "-A")
@@ -163,7 +163,7 @@ class VerifyVendorTests(unittest.TestCase):
         shutil.rmtree(self.kit / ".git")
         self.assertEqual(self.run_cli()[0], 2)
 
-    def test_the_real_kit_maps_every_file_gradiance_vendors(self):
+    def test_the_real_kit_maps_every_file_a_flat_vendor_takes(self):
         # The table must cover this repository's own layout: every kit file a rule names exists here.
         for r in VV.RULES:
             with self.subTest(rule=r.kit):

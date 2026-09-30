@@ -40,8 +40,8 @@ class Rule:
     #                      "subdir" every kit file under each first-level folder the copy holds
 
 
-# How gradiance vendors the kit, flat under tools/console-kit. A project that
-# vendors differently copies this script and edits this table, nothing else.
+# How a project that vendors the kit flat, under tools/console-kit, lays it out. A
+# project that vendors differently copies this script and edits this table, nothing else.
 RULES = (
     Rule("console_kit/", "plugin/kit/console_kit/", "all"),
     Rule("agent.py", "plugin/kit/agent.py"),
@@ -52,7 +52,7 @@ RULES = (
     Rule("plugin/.claude-plugin/plugin.json", "plugin/.claude-plugin/plugin.json"),
     Rule("plugin/hooks/", "plugin/hooks/", "all"),
     Rule("plugin/agents/", "plugin/agents/", "all"),
-    # A project may take some skills and not others (gradiance has no console-onboard),
+    # A project may take some skills and not others (a vendoring project may leave out console-onboard),
     # but a skill it takes, it takes whole.
     Rule("plugin/skills/", "plugin/skills/", "subdir"),
 )

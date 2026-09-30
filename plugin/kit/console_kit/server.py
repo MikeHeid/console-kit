@@ -36,6 +36,13 @@ there; it never writes into the project's working tree (`visuals.py`). The
 agent's door gains `POST /visual-export`, a read that hands stored visuals to
 `agent.py visual-export`, which writes them into the agent's own worktree.
 
+0.8.2: an agent may name itself on the agent's door, in the `X-Console-Agent`
+header (`agent.py --as NAME`). The name is checked (`names.problem`) and kept
+in STATE/names.jsonl beside the store, never in a store record, so a 0.8.1 kit
+still reads the store (see `names.py`). The "agent active" marks are kept per
+agent name (unnamed sessions share the bucket "agent"), and a cursor post
+clears only the caller's bucket.
+
 `/health` (0.6.0) is answered on the agent's door, and on a third door only
 when `--health-port` asks for one. It is NEVER answered on the owner's door
 without the Access token: that door keeps its rule that no path skips the
@@ -68,6 +75,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from . import anchors as A
 from . import doorbell as D
+from . import names as N
 from . import projectcfg as PC
 from . import publish as P
 from . import schema as S
@@ -206,7 +214,9 @@ class Console:
         # a bad key raises ConfigError here, by name, so the server never starts half-configured).
         self.project = PC.load(cfg.root)
         self.store = Store(cfg.store)
+        self.names = N.Names(cfg.state)   # 0.8.2: record id -> agent name, beside the store
         self._lock = threading.Lock()
+        self._working_lock = threading.Lock()   # working.json is read, changed and replaced by several agents
         # The live console (0.7.0): every change a page could show bumps `_epoch`
         # and wakes the long polls waiting on `_changed`. `_boot` tells a page
         # that the server restarted, so its old token can never match by luck.
@@ -248,7 +258,8 @@ class Console:
         return {"seq": seq, "ver": ver_now, "changed": seq != since, "cursor": self.read_cursor()}
 
     def feed(self, kinds: set[str] | None, item: str | None, before: int | None, limit: int) -> dict:
-        return V.feed(self.store, self.items(), kinds=kinds, item=item, before=before, limit=limit)
+        return V.feed(self.store, self.items(), kinds=kinds, item=item, before=before, limit=limit,
+                      names=self.names.mapping())
 
     def evidence(self, qid: str) -> dict:
         """A question's evidence rows with the cited lines as they are now, read server-side (0.7.0)."""
@@ -309,7 +320,7 @@ class Console:
     def payload(self) -> dict:
         items = self.items()
         holds = A.evaluator(self.cfg.root, self._status(items), snapshot=True)  # one reading per request
-        view = V.build(self.store, items, holds)
+        view = V.build(self.store, items, holds, names=self.names.mapping())
         view["tags"] = self.tags(view, items)
         view["config"] = {"specs_dir": self.project.specs_dir, "visuals_dir": self.project.visuals_dir}
         return {"view": view, "items": items, "cursor": self.read_cursor()}
@@ -325,7 +336,7 @@ class Console:
 
     # -- visuals (0.8.0) -----------------------------------------------------------
 
-    def add_visual(self, body: object) -> dict:
+    def add_visual(self, body: object, agent: str | None = None) -> dict:
         """Store an agent's visual in STATE/visuals/ and append its record (0.8.1: never in the project).
 
         The request is checked against the store's rules on a trial copy
@@ -370,6 +381,7 @@ class Console:
             except (VIS.VisualError, OSError) as e:
                 raise RequestError(409, f"the visual was not stored: {e}") from None
             stored = done or self._append("visual", rec, "agent", items)
+            self._name(stored, agent)
         vdir = self.project.visuals_dir
         land = (f"stored in the console's state; land it by PR with `agent.py visual-export --project "
                 f"YOUR_WORKTREE`, which writes it under {vdir}/ there" if vdir else
@@ -678,7 +690,9 @@ class Console:
         lk = put("lock", {"qid": qid, "answer": ans["id"], "nonce": f"{nonce}-{n}l"})
         return ans, lk
 
-    def write(self, kind: str, body: object, by: str) -> dict:
+    def write(self, kind: str, body: object, by: str, agent: str | None = None) -> dict:
+        if agent is not None and by != "agent":
+            raise RequestError(400, "only the agent's door names an agent")
         if not isinstance(body, dict):
             raise RequestError(400, "the body must be a JSON object")
         named = [f for f in WRITER_FIELDS + (SERVER_LOCK_FIELDS if kind == "lock" else ()) if f in body]
@@ -697,7 +711,25 @@ class Console:
             rec = self._append(kind, body, by, self.items())
             if chat and self.store.seq() > before:
                 self._chat_times.append(time.monotonic())
+            self._name(rec, agent)
             return rec
+
+    def _name(self, rec: dict, agent: str | None) -> None:
+        """Keep the agent's name for `rec` beside the store (0.8.2); the caller holds `self._lock`.
+
+        The record is already stored. If the name cannot be written (a full
+        disk), the record stays, unnamed, and the failure is logged by name:
+        the name is who wrote it, never what was written.
+        """
+        if agent is None:
+            return
+        try:
+            added = self.names.add(rec["id"], agent)
+        except (OSError, N.NamesError) as e:
+            sys.stderr.write(f"console names: record {rec['id']} stays unnamed: {type(e).__name__}: {e}\n")
+            return
+        if added:
+            self._bump()   # an open page shows the name without waiting out a poll
 
     def _append(self, kind: str, body: dict, by: str, items: dict[str, dict]) -> dict:
         """Append one record; the caller holds `self._lock`."""
@@ -730,8 +762,9 @@ class Console:
             cur = json.loads(self.cfg.cursor.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             cur = {}
+        by = self.read_working_by()
         return {"last_synced_at": cur.get("last_synced_at"), "last_error": cur.get("last_error"),
-                "working": self.read_working(), "listening": D.listening(self.cfg.state)}
+                "working": self._merged(by), "working_by": by, "listening": D.listening(self.cfg.state)}
 
     def health(self) -> tuple[bool, dict]:
         """Whether the server can do its job, in words that hold no owner content and no secret.
@@ -757,36 +790,79 @@ class Console:
     # is just as true when no session is running, so the console says "active"
     # only on this mark, and only while it is fresh: a session that dies
     # mid-work cannot leave the owner a standing false "active".
+    #
+    # 0.8.2 (owner, 2026-09-30, "Names + own markers ★"): the marks are kept per
+    # agent, {bucket: {item: time}}, where a bucket is an agent's name and every
+    # session that gives none shares the bucket "agent". A cursor post clears
+    # only the caller's bucket, so one session finishing never wipes another's
+    # marks. A 0.8.1 file (a flat {item: time}) reads as the "agent" bucket. A
+    # 0.8.1 kit reading a 0.8.2 file skips every entry (a bucket's value is not a
+    # time) and shows no marks: nothing breaks, the marks are only not shown.
     def read_working(self) -> dict:
+        """Every fresh mark as {item: time}, the newest time where several agents mark one item."""
+        return self._merged(self.read_working_by())
+
+    @staticmethod
+    def _merged(by: dict[str, dict[str, str]]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for marks in by.values():
+            for item, ts in marks.items():
+                if ts > out.get(item, ""):
+                    out[item] = ts
+        return out
+
+    def read_working_by(self) -> dict[str, dict[str, str]]:
+        """Every fresh mark by bucket: {agent name or "agent": {item: time}}; an empty bucket is left out."""
         try:
             raw = json.loads(self.cfg.working.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
+        if not isinstance(raw, dict):
+            return {}
         now = time.time()
-        out = {}
-        for item, ts in (raw.items() if isinstance(raw, dict) else ()):
-            try:
-                age = now - calendar.timegm(time.strptime(ts, TS_FORMAT))
-            except (TypeError, ValueError):
-                continue
-            if isinstance(item, str) and S.ITEM_ID.match(item) and 0 <= age < WORKING_TTL:
-                out[item] = ts
-        return out
 
-    def set_working(self, body: object) -> dict:
+        def fresh(marks: dict) -> dict[str, str]:
+            got = {}
+            for item, ts in marks.items():
+                try:
+                    age = now - calendar.timegm(time.strptime(ts, TS_FORMAT))
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(item, str) and S.ITEM_ID.match(item) and 0 <= age < WORKING_TTL:
+                    got[item] = ts
+            return got
+
+        out: dict[str, dict[str, str]] = {}
+        legacy = {k: v for k, v in raw.items() if isinstance(v, str)}      # a 0.8.1 file: item -> time
+        for bucket, marks in raw.items():
+            if isinstance(marks, dict) and (bucket == N.UNNAMED or N.problem(bucket) is None):
+                out[bucket] = fresh(marks)
+        if legacy:
+            out[N.UNNAMED] = {**fresh(legacy), **out.get(N.UNNAMED, {})}
+        return {b: m for b, m in sorted(out.items()) if m}
+
+    def _write_working(self, by: dict[str, dict[str, str]]) -> None:
+        tmp = self.cfg.working.with_suffix(".tmp")
+        tmp.write_text(json.dumps({b: m for b, m in by.items() if m}, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, self.cfg.working)
+
+    def set_working(self, body: object, agent: str | None = None) -> dict:
         items = body.get("items") if isinstance(body, dict) and set(body) == {"items"} else None
         if not (isinstance(items, list) and 0 < len(items) <= MAX_WORKING
                 and all(isinstance(i, str) and len(i) <= 128 and S.ITEM_ID.match(i) for i in items)):
             raise RequestError(400, f"working takes {{\"items\": [1 to {MAX_WORKING} item ids]}}")
         now = time.strftime(TS_FORMAT, time.gmtime())
-        marks = {**self.read_working(), **{i: now for i in items}}
-        tmp = self.cfg.working.with_suffix(".tmp")
-        tmp.write_text(json.dumps(marks, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, self.cfg.working)
+        bucket = agent or N.UNNAMED
+        with self._working_lock:
+            by = self.read_working_by()
+            by[bucket] = {**by.get(bucket, {}), **{i: now for i in items}}
+            if len(by[bucket]) > MAX_WORKING:  # one agent holds at most MAX_WORKING marks: its newest
+                by[bucket] = dict(sorted(by[bucket].items(), key=lambda kv: kv[1])[-MAX_WORKING:])
+            self._write_working(by)
         self._bump()  # the page shows "agent active" without waiting out a poll
-        return marks
+        return self._merged(by)
 
-    def set_cursor(self, body: object) -> dict:
+    def set_cursor(self, body: object, agent: str | None = None) -> dict:
         if not isinstance(body, dict) or set(body) - {"last_synced_at", "last_error"}:
             raise RequestError(400, "the cursor takes only last_synced_at and last_error")
         synced, err = body.get("last_synced_at"), body.get("last_error")
@@ -798,7 +874,11 @@ class Console:
         tmp = self.cfg.cursor.with_suffix(".tmp")
         tmp.write_text(json.dumps(cur, sort_keys=True), encoding="utf-8")
         os.replace(tmp, self.cfg.cursor)
-        self.cfg.working.unlink(missing_ok=True)  # synced or failed, the agent is no longer at work
+        # Synced or failed, THIS agent is no longer at work; every other agent's marks stay (0.8.2).
+        with self._working_lock:
+            by = self.read_working_by()
+            if by.pop(agent or N.UNNAMED, None) is not None:
+                self._write_working(by)
         self._bump()
         return cur
 
@@ -1039,22 +1119,35 @@ class AgentHandler(_Handler):
             return self._send(200 if ok else 503, body)
         self._send(404, {"error": "not found"})
 
+    def _agent(self) -> str | None:
+        """The caller's agent name from `X-Console-Agent` (0.8.2), None when it gives none; refused by name when bad."""
+        values = self.headers.get_all(N.HEADER) or []
+        if not values:
+            return None
+        if len(values) > 1:
+            raise RequestError(400, f"{N.HEADER} is sent once")
+        why = N.problem(values[0])
+        if why:
+            raise RequestError(400, why)
+        return values[0]
+
     def do_POST(self) -> None:
         try:
+            agent = self._agent()
             if self.path == "/cursor":
-                return self._send(200, {"cursor": self.console.set_cursor(self._body())})
+                return self._send(200, {"cursor": self.console.set_cursor(self._body(), agent)})
             if self.path == "/working":  # the agent socket only: the owner's side cannot set it
-                return self._send(200, {"working": self.console.set_working(self._body())})
+                return self._send(200, {"working": self.console.set_working(self._body(), agent)})
             if self.path == "/reanchor":
                 return self._send(200, self.console.reanchor(self._body()))
             if self.path == "/visual":  # 0.8.1: the server stores the file in STATE, never in the project
-                return self._send(200, self.console.add_visual(self._body()))
+                return self._send(200, self.console.add_visual(self._body(), agent))
             if self.path == "/visual-export":  # 0.8.1: a read; agent.py writes into the agent's own worktree
                 return self._send(200, self.console.visual_export(self._body()))
             kind = AGENT_ROUTES.get(self.path)
             if kind is None:
                 return self._send(404, {"error": "not found"})
-            self._send(200, {"record": self.console.write(kind, self._body(), "agent")})
+            self._send(200, {"record": self.console.write(kind, self._body(), "agent", agent)})
         except RequestError as e:
             self._send(e.code, {"error": str(e)})
 
@@ -1171,7 +1264,7 @@ def agent_server(console: Console) -> UnixHTTPServer:
 def serve(cfg: Config, verify: Callable[[str | None], dict] | None = None) -> None:
     try:
         console = Console(cfg, load_adapter(cfg.adapter))
-    except PC.ConfigError as e:
+    except (PC.ConfigError, N.NamesError) as e:
         raise SystemExit(f"console: {e}") from None
     added = console.seed()
     sys.stderr.write(f"console: {len(added)} seed question(s) added; store {cfg.store}\n")
@@ -1192,8 +1285,9 @@ def serve(cfg: Config, verify: Callable[[str | None], dict] | None = None) -> No
         cfg.socket.unlink(missing_ok=True)
 
 
-def agent_request(sock_path: Path, method: str, path: str, body: object = None) -> tuple[int, dict]:
-    """Call the agent door. Used by `agent.py` and the tests."""
+def agent_request(sock_path: Path, method: str, path: str, body: object = None,
+                  agent: str | None = None) -> tuple[int, dict]:
+    """Call the agent door. Used by `agent.py` and the tests. `agent` (0.8.2) names the calling session."""
     import http.client
 
     class _Conn(http.client.HTTPConnection):
@@ -1204,6 +1298,8 @@ def agent_request(sock_path: Path, method: str, path: str, body: object = None) 
     conn = _Conn("localhost", timeout=10)
     data = None if body is None else json.dumps(body).encode("utf-8")
     headers = {} if data is None else {"Content-Type": "application/json"}
+    if agent is not None:
+        headers[N.HEADER] = agent
     conn.request(method, path, body=data, headers=headers)
     resp = conn.getresponse()
     out = json.loads(resp.read() or b"{}")

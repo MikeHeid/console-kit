@@ -143,7 +143,17 @@ A kit installed by `deploy/install.sh` instead (copied to
    they are not lost. A 0.8.0 server also starts writing into the checkout
    again, which is the fast-forward defect 0.8.1 fixed.
 
-6. Never "roll back" by editing `store.jsonl`. Every line's `seq` and `id` are
+6. Rolling 0.8.2 back to **0.8.1** needs no store check either: 0.8.2 writes
+   no new field into any store record. Agent names live beside the store, in
+   `<state>/names.jsonl`, which 0.8.1 never opens, so the console shows every
+   agent as "agent" again until you roll forward (the names come back; they
+   were not lost). This is why the name is not a store field: a 0.8.1 kit
+   refuses a record with a field it does not know (`unknown field(s) ...`)
+   and will not start on a store that holds one. A 0.8.1 server reading
+   0.8.2's per-agent `working.json` shows no "agent active" marks until the
+   next `working` (it skips entries it cannot read, and never fails on them).
+
+7. Never "roll back" by editing `store.jsonl`. Every line's `seq` and `id` are
    checked on load, and an edited line stops the server.
 
 ## Health

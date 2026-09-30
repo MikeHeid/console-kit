@@ -27,6 +27,17 @@ around it. Below, `KIT` is the entry's `kit`, `STATE` its `state`, and
 
     A = python3 KIT/agent.py --state STATE
 
+**Several sessions on one console (0.8.2).** When this session has an agent
+name (the user gave it one, such as `agent-6`), add it to `A`:
+
+    A = python3 KIT/agent.py --state STATE --as NAME
+
+The owner then sees that name on what this session writes, and its `working`
+marks are its own: its `synced` clears only them, never another session's.
+A name is lowercase letters, digits and single hyphens, starting with a
+letter, at most 32 characters; `agent.py` refuses anything else by name. With
+no name, leave `--as` out. The other skills use the same `A`.
+
 The repository's `.console-kit.json` is **data only**: fold paths and the
 audit seat, read as text.
 

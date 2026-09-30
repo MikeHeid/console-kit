@@ -148,6 +148,18 @@ console-visual skill exports instead of copying from the checkout. A 0.8.1
 server also runs every git command in the project with
 `--no-optional-locks`, so reading it never rewrites `.git/index`.
 
+**Upgrading to 0.8.2.** Nothing to migrate: the store, its schema (1) and
+every record shape are unchanged. Sessions may now name themselves
+(`agent.py --as agent-6`, or `CONSOLE_KIT_AGENT=agent-6`), and the console
+shows the name on what each writes; update the plugin so the console-process
+skill says how. Each session's "agent active" marks are now its own, so one
+session's `synced` no longer clears another's; a `working.json` a 0.8.1
+server wrote is read as the unnamed sessions' marks. `agent.py
+visual-export` now exits 3, not 1, when it wrote files but refused a visual.
+A 0.8.1 kit reads a store 0.8.2 wrote without a change: the names are kept
+beside it, in `<state>/names.jsonl`, and a 0.8.1 kit shows every agent as
+"agent" (`kit/docs/DEPLOY.md`, "Rollback").
+
 **Going back to an older kit.** A 0.8.0 kit reads a store 0.8.1 wrote, but
 it looks for each visual 0.8.1 stored in its own checkout: it refuses the
 path by name (`not under visuals_dir`), or, if its `visuals_dir` is

@@ -87,8 +87,12 @@ naming why.
     git worktree add <scratch>/visuals-<item> -b visuals/<item> origin/main
     A visual-export --project <scratch>/visuals-<item> --visual VISUAL_RECORD_ID
 
+`--project` must be the TOP of that worktree, never a folder inside it.
 `--visual` may repeat; without it every stored visual is exported, and one
-already in the worktree with the same bytes is skipped. It writes
+already in the worktree with the same bytes is skipped. It exits 0 when every
+chosen visual was exported, **3 when files were written but a visual was
+refused** (each refusal is named on stderr: land what was written and say in
+the reply which one was not), and 1 when nothing was written. It writes
 `<visuals_dir>/<item>/<name>.*` and regenerates `<visuals_dir>/INDEX.md` from
 what is in that folder. It refuses, writing nothing, a different file already
 at a target path, or an `INDEX.md` it did not generate: look, move the file

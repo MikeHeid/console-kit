@@ -58,6 +58,9 @@ def _render(e: dict) -> str:
                if "roar" in (fork.get("roles") or []) else
                f"a {fork['step']}" if fork.get("step") else "a deliberation round")
         out += ["", f"**Asked by:** {how} (fork `{e['forked_from']}`)."]
+    if e.get("asked_by_agent"):
+        # Which agent session asked (0.8.2), only when it gave a name; fold has checked its shape.
+        out += ["", f"**Agent:** `{e['asked_by_agent']}`."]
     return "\n".join(out) + "\n"
 
 

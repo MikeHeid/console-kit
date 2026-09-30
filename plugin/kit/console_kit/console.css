@@ -227,6 +227,8 @@
   color: var(--c-fg-muted);
   margin-top: 4px;
 }
+/* 0.8.2: which agent session asked, when it gave a name */
+.ck-q-agent { font-size: 11px; color: var(--c-fg-muted); margin-top: 2px; overflow-wrap: anywhere; }
 .ck-q-body { padding: 14px; }
 
 /* --- Options (radio/checkbox) --- */
@@ -1017,6 +1019,7 @@
 .ck-feed-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
 .ck-feed-kind { font-weight: 600; }
 .ck-feed-time { margin-left: auto; color: var(--c-fg-muted); font-size: 12px; white-space: nowrap; }
+.ck-feed-agent { color: var(--c-fg-muted); font-size: 12px; overflow-wrap: anywhere; }
 .ck-feed-newtag {
   font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 8px;
   background: var(--c-accent); color: var(--c-accent-fg, #fff);

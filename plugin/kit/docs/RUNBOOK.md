@@ -215,6 +215,48 @@ names the file to move.
 - **"INDEX.md was not written by the kit"**: a hand-written `INDEX.md` sits in
   your worktree's `visuals_dir`. Nothing was written; move it aside and export
   again.
+- **`visual-export` says "... is inside the work tree ..."**: `--project` must
+  be the **top** of your worktree (the folder `git rev-parse --show-toplevel`
+  prints), never a folder inside it, because `visuals_dir` is a path from the
+  repository's top. Nothing was written.
+- **What `visual-export`'s exit code means (0.8.2)**:
+
+  | Exit | Meaning |
+  |---|---|
+  | 0 | every chosen visual was exported (or was already there, identical) |
+  | 3 | files were written, but at least one visual was refused; each is named on stderr as `not exported: visual <id>: <why>`, and listed under `refused` in the JSON |
+  | 1 | nothing was written: the export was refused, or every chosen visual was |
+  | 2 | the console server could not be reached |
+
+  Before 0.8.2 a partial export exited 1, the same as "nothing was written".
+  On 3, land what was written and fix the refused visual as the bullets above
+  say (a refused visual is usually one whose file under `<state>/visuals/`
+  changed since it was stored).
+
+## Several agents on one console (0.8.2)
+
+- **Every reply says "agent", and you cannot tell the sessions apart**: give
+  each session a name. It runs `agent.py --as agent-6 ...` (or sets
+  `CONSOLE_KIT_AGENT=agent-6`); the console-process skill says where. The
+  name then shows on its questions ("asked by agent-6"), replies, chat
+  messages, visuals, roar transcripts and Feed rows. A record written with no
+  name shows as before.
+- **`agent.py` exits 2 with "agent name ... is refused"**: a name is 1 to 32
+  lowercase letters, digits and single hyphens, starting with a letter, and
+  never `agent` or `owner`. Nothing was sent.
+- **One session's `synced` cleared another's "agent active"**: that was 0.8.1,
+  where any `synced` deleted `working.json` whole. From 0.8.2 the marks are
+  kept per name (`{"agent-6": {"ITEM": "time"}, "agent": {...}}`, where
+  `agent` is every unnamed session together), and `synced` clears only the
+  caller's own. Two unnamed sessions still share one set of marks: name them.
+- **Where the names are kept**: `<state>/names.jsonl`, one line per named
+  record, beside `store.jsonl`, never inside it. The server refuses to start
+  on a line it cannot read, naming the line (`names.jsonl:N: ...`); move that
+  line aside by hand, which only makes that record unnamed. Deleting the file
+  unnames every record and loses nothing else.
+- **The doorbell cursor is still one for all sessions**: whichever session
+  runs `synced --through SEQ` moves it. Routing a request to one session is
+  not in 0.8.2.
 
 ## Roar is refused (0.8.0)
 

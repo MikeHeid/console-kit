@@ -123,6 +123,21 @@ class RefusalTests(Base):
         B.scan(top, ["example-deploy.net"])
 
 
+class NeutralTests(unittest.TestCase):
+    """0.8.2 (owner, 2026-09-30, "Scrub in 0.8.2 ★"): the public kit names no project that vendors it."""
+
+    # Spelled in two halves, so this test's own source is not a match for the search it runs.
+    CONSUMER = "gradi" + "ance"
+
+    @unittest.skipUnless((B.ROOT / ".git").exists() and shutil.which("git"), "not a git checkout")
+    def test_no_tracked_file_names_the_reference_consumer(self):
+        # Catches: a comment, a test string or a function name that still names the one project the
+        # kit was first built for. `git grep` exits 1 when nothing matches, 0 when something does.
+        r = subprocess.run(["git", "-C", str(B.ROOT), "grep", "-n", "-i", self.CONSUMER], capture_output=True,
+                           text=True, timeout=60)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
+
 @unittest.skipUnless(shutil.which("claude"), "`claude` is not on PATH")
 class ValidateTests(Base):
     def test_claude_validates_the_marketplace_and_the_plugin_strictly(self):
