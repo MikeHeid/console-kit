@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 from typing import Protocol
 
+from . import anchors as A
 from . import schema as S
 from .store import Store
 
@@ -75,7 +76,7 @@ def export(store: Store) -> dict[str, dict]:
         locked = [(a, lk) for a, lk in locks if lk is not None]
         if not locked or locked[-1][0]["id"] != answers[-1]["id"]:
             continue
-        history = [_entry_answer(q, a, lk) for a, lk in locked]
+        history = [_entry_answer(store, q, a, lk) for a, lk in locked]
         # An answer changed before it was locked is still what the owner said.
         # Dropping it lost the owner's own words from the record (2026-09-28,
         # TC-lane/Q1), so every unlocked answer is carried as `earlier`.
@@ -119,7 +120,7 @@ def _entry_earlier(q: dict, a: dict) -> dict:
     return e
 
 
-def _entry_answer(q: dict, a: dict, lk: dict) -> dict:
+def _entry_answer(store: Store, q: dict, a: dict, lk: dict) -> dict:
     labels = {o["id"]: o["label"] for o in q["options"]}
     e = {
         "answer_id": a["id"],
@@ -137,7 +138,26 @@ def _entry_answer(q: dict, a: dict, lk: dict) -> dict:
     if "supersedes" in a:
         e["supersedes"] = a["supersedes"]
         e["reason"] = a["reason"]
+    e.update(_entry_anchors(store, q, lk))
     return e
+
+
+def _entry_anchors(store: Store, q: dict, lk: dict) -> dict:
+    """What this lock is actually checked against, when that is not the question's `valid_if` (0.5.0).
+
+    The file keeps `valid_if` as the question put it. A lock re-anchored on
+    re-lock carries `anchored_by: lock` and its `anchors`; one re-anchored by
+    `agent.py reanchor` also names the `anchor` record, its evidence (`basis`)
+    and when it was written. A lock decided by `valid_if` adds nothing, so its
+    file is byte for byte what 0.4.0 exported.
+    """
+    conds, origin, rec = A.lock_conditions(store, q, lk)
+    if origin == "question":
+        return {}
+    out = {"anchored_by": origin, "anchors": conds}
+    if rec is not None:
+        out.update({"anchor_id": rec["id"], "anchor_basis": rec["basis"], "anchored_at": rec["ts"]})
+    return out
 
 
 def write_export(entries: dict[str, dict], out: Path) -> list[str]:
@@ -321,6 +341,7 @@ def _check_locked_answer(name: str, a: object, option_ids: list, labels: dict, s
                 errs.append(f"{name}: {k} does not match the options and picks")
     if not a.get("lock_id") or a.get("locked_by") != "owner":
         errs.append(f"{name}: answer {a.get('answer_id')} is not locked by the owner")
+    errs += _check_anchor_fields(name, a)
     if a.get("by") != "owner":
         errs.append(f"{name}: answer {a.get('answer_id')} has by={a.get('by')!r}; only the owner answers")
     picks = a.get("picks")
@@ -333,6 +354,29 @@ def _check_locked_answer(name: str, a: object, option_ids: list, labels: dict, s
                         f"the owner's own words belong in own_text")
         if not picks and not (isinstance(a.get("own_text"), str) and a["own_text"].strip()):
             errs.append(f"{name}: answer {a.get('answer_id')} has neither a pick nor own words")
+    return errs
+
+
+def _check_anchor_fields(name: str, a: dict) -> list[str]:
+    """A lock's anchors and their provenance (0.5.0), checked with the store's own rules; absent is fine."""
+    keys = {"anchored_by", "anchors", "anchor_id", "anchor_basis", "anchored_at"}
+    if not keys & set(a):
+        return []
+    aid = a.get("answer_id")
+    origin = a.get("anchored_by")
+    want = {"anchored_by", "anchors"} | ({"anchor_id", "anchor_basis", "anchored_at"} if origin == "reanchor" else set())
+    if origin not in ("lock", "reanchor") or keys & set(a) != want:
+        return [f"{name}: answer {aid}: anchored_by is 'lock' (with anchors) or 'reanchor' (with anchors, "
+                f"anchor_id, anchor_basis and anchored_at)"]
+    errs = [f"{name}: answer {aid}: {m}" for m in S.check_conditions(a["anchors"], "anchors", allow_empty=False)]
+    if origin == "reanchor":
+        if not isinstance(a["anchor_id"], str) or not RECORD_ID.match(a["anchor_id"]):
+            errs.append(f"{name}: answer {aid}: anchor_id {a['anchor_id']!r} is not a store record id")
+        if not isinstance(a["anchored_at"], str) or not TS.match(a["anchored_at"]):
+            errs.append(f"{name}: answer {aid}: anchored_at {a['anchored_at']!r} is not a store timestamp")
+        b = a["anchor_basis"]
+        if not isinstance(b, str) or not b.strip() or len(b) > S.MAX_TEXT:
+            errs.append(f"{name}: answer {aid}: anchor_basis must be non-empty text of at most {S.MAX_TEXT} characters")
     return errs
 
 

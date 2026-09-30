@@ -100,6 +100,22 @@ Restart the session. Then, for each onboarded project, re-run
 `bash ~/console-kit/plugins/console-kit/kit/deploy/install.sh --project <dir> --start`.
 It copies the new kit and restarts that project's server.
 
+**Upgrading to 0.5.0.** Answers locked before 0.5.0 still go stale whenever
+the whole file they hash changes. To re-anchor the ones git history can
+justify, run this in each project, from a session:
+
+    python3 <kit>/agent.py --state <state dir> reanchor --dry-run   # lists what would change, writes nothing
+    python3 <kit>/agent.py --state <state dir> reanchor
+
+`agent.py check` shows why each answer that is left is still stale.
+
+**Going back to an older kit.** A 0.4.0 kit refuses a store that holds a
+0.5.0 record, and names the line and the field (for example `lock: unknown
+field(s) anchors`). It never drops a field it does not know. The first such
+record appears when you re-lock an answer and it is re-anchored, or when
+`reanchor` or a question with an `excerpt` is written. After that, going back
+means moving to 0.5.0 or later again, not to 0.4.0.
+
 ## Removing
 
     systemctl --user disable --now <name>-console <name>-console-tunnel

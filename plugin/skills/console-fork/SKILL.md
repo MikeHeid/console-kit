@@ -90,8 +90,22 @@ agent. Each question is a JSON file for `A ask FILE`:
   names (`determinism` is), and otherwise `other:<audit.seat>`: the schema
   accepts a fixed list plus typed `other:` seats, never a free name.
 - `valid_if` lists what must stay true for the answer to stand:
-  `{"kind": "file_sha256", "path": "...", "sha256": "..."}` or
-  `{"kind": "item_status", "item": "...", "status": "..."}`.
+  - **`{"kind": "excerpt", "path": "...", "text": "..."}`**: prefer this one.
+    `text` is the passage the question rests on, copied exactly from the
+    file: at least 8 and at most 4000 characters. It holds while that text is
+    anywhere in the file, and whitespace and line breaks do not count. Moving
+    it keeps the answer standing; changing or deleting it makes it stale. Cite
+    the sentence or lines that carry the claim, not a whole section.
+  - `{"kind": "file_sha256", "path": "...", "sha256": "..."}`: the whole file,
+    byte for byte. Use it only for a small file that should not change at all.
+    **Never use it on a big file that keeps growing**, such as a findings
+    register, a status file or a decision log: any unrelated edit makes the
+    answer stale.
+  - `{"kind": "item_status", "item": "...", "status": "..."}`.
+
+  Paths are relative to the project root. Keep `source` as `path:start-end`
+  on the same file: `agent.py reanchor` needs that range to re-anchor an old
+  whole-file hash.
 - **Tighten mode:** every finding is one question with exactly three options,
   "Fix now", "Record in findings.md" and "Leave it" (D11). Nothing happens on
   a pick alone: it acts only once the owner locks it and it is folded.

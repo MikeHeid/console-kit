@@ -1625,5 +1625,293 @@ class AnswersSheetTests(Tmp):
         self.assertEqual(V.subtree(items, "A"), {"A", "B"})
 
 
+
+# -- 0.5.0: anchors on the lock, excerpt conditions, why stale, reanchor ----------------
+
+from console_kit import anchors as A  # noqa: E402
+
+SPEC = "# Spec\n\nIntro line.\n\nThe console refuses a write from any other origin.\nIt says why.\n\nTail.\n"
+CITED = "The console refuses a write from any other origin.\nIt says why."
+
+
+def excerpt(text=CITED, path="spec.md"):
+    return {"kind": "excerpt", "path": path, "text": text}
+
+
+def sha(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def git(d, *args):
+    subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+                    *args], cwd=d, check=True, capture_output=True)
+
+
+class ExcerptSchemaTests(unittest.TestCase):
+    def refused(self, cond, pattern):
+        errs = S.validate(question(valid_if=[cond]))
+        self.assertTrue(any(re.search(pattern, e) for e in errs), errs)
+
+    def test_a_good_excerpt_is_accepted(self):
+        self.assertEqual(S.validate(question(valid_if=[excerpt()])), [])
+
+    def test_bad_excerpts_are_refused_by_name(self):
+        # Catches: an excerpt check that trusts its path or matches anything.
+        self.refused(excerpt(path="/etc/passwd"), "must be relative")
+        self.refused(excerpt(path="docs/../../x.md"), "must be relative")
+        self.refused(excerpt(path="a\nb.md"), "one line")
+        self.refused(excerpt(text=""), "non-empty")
+        self.refused(excerpt(text="  a  b  "), "at least 8")
+        self.refused(excerpt(text="x" * (S.MAX_EXCERPT + 1)), "the limit is 4000")
+        self.refused({**excerpt(), "sha256": "0" * 64}, "takes exactly")
+
+    def test_lock_anchors_are_checked_like_valid_if(self):
+        a = {"id": "0" * 24, "qid": "LANE.1/Q1"}
+        self.assertEqual(S.validate(lock(a, anchors=[excerpt()])), [])
+        self.assertTrue(S.validate(lock(a, anchors=[])))
+        self.assertTrue(S.validate(lock(a, anchors=[excerpt(path="/abs")])))
+
+    def test_only_the_agent_writes_an_anchor_record(self):
+        rec = {"type": "anchor", "schemaVersion": 1, "qid": "LANE.1/Q1", "lock": "0" * 24,
+               "anchors": [excerpt()], "basis": "why", "by": "owner", "nonce": nonce()}
+        self.assertTrue(any("only ['agent']" in e for e in S.validate(rec)))
+        self.assertEqual(S.validate({**rec, "by": "agent"}), [])
+
+
+class ExcerptViewTests(Tmp):
+    def setUp(self):
+        super().setUp()
+        self.spec = self.dir / "spec.md"
+        self.spec.write_text(SPEC)
+
+    def locked(self, valid_if, **lock_kw):
+        st = self.store()
+        st.append(question(valid_if=valid_if))
+        a = st.append(answer())
+        st.append(lock(a, **lock_kw))
+        return st
+
+    def state(self, st):
+        return V.question_state(st, st.question("LANE.1/Q1"), V.make_evaluator(self.dir, {"LANE.1": "open"}))
+
+    def test_moving_the_cited_text_keeps_the_answer_locked(self):
+        # Catches: an excerpt compared by position or line number, or a whole-file hash in disguise.
+        st = self.locked([excerpt()])
+        self.assertEqual(self.state(st), "locked")
+        self.spec.write_text("New first line.\r\n\r\n" + SPEC.replace("It says why.", "It   says\r\nwhy.") + "More.\n")
+        self.assertEqual(self.state(st), "locked")
+
+    def test_changing_the_cited_text_makes_it_stale(self):
+        st = self.locked([excerpt()])
+        self.spec.write_text(SPEC.replace("any other origin", "a different origin"))
+        self.assertEqual(self.state(st), "stale")
+
+    def test_deleting_the_file_makes_it_stale_and_says_file_missing(self):
+        st = self.locked([excerpt()])
+        self.spec.unlink()
+        self.assertEqual(self.state(st), "stale")
+        got = A.check(st, self.dir, {"LANE.1": "open"})["LANE.1/Q1"]["conditions"][0]
+        self.assertEqual((got["holds"], got["reason"]), (False, "file_missing"))
+
+    def test_a_lock_with_no_anchors_evaluates_exactly_as_0_4_0(self):
+        # Catches: a new rule leaking into old records (the question's valid_if must still decide).
+        st = self.locked([{"kind": "file_sha256", "path": "spec.md", "sha256": sha(SPEC)}])
+        v = V.build(st, ITEMS, V.make_evaluator(self.dir, {}))
+        self.assertEqual((v["questions"]["LANE.1/Q1"]["state"], v["questions"]["LANE.1/Q1"]["anchored_by"]),
+                         ("locked", "question"))
+        self.spec.write_text(SPEC + "unrelated\n")
+        self.assertEqual(self.state(st), "stale")
+        self.assertNotIn("anchors", st.lock_of(st.head("LANE.1/Q1")["id"]))
+
+    def test_the_locks_anchors_decide_over_the_questions_valid_if(self):
+        stale_hash = {"kind": "file_sha256", "path": "spec.md", "sha256": "0" * 64}
+        st = self.locked([stale_hash], anchors=[excerpt()])
+        self.assertEqual(self.state(st), "locked")
+        self.assertEqual(A.conditions_for(st, st.question("LANE.1/Q1"))[1], "lock")
+        # ...but only for the lock that carries them: a new answer is decided by valid_if again.
+        head = st.head("LANE.1/Q1")
+        st.append(answer(supersedes=head["id"], reason="changed my mind"))
+        self.assertEqual(A.conditions_for(st, st.question("LANE.1/Q1"))[0], [stale_hash])
+
+    def test_an_anchor_record_reanchors_only_the_current_lock(self):
+        stale_hash = {"kind": "file_sha256", "path": "spec.md", "sha256": "0" * 64}
+        st = self.locked([stale_hash])
+        lk = st.lock_of(st.head("LANE.1/Q1")["id"])
+        rec = {"type": "anchor", "schemaVersion": 1, "qid": "LANE.1/Q1", "lock": lk["id"],
+               "anchors": [excerpt()], "basis": "evidence", "by": "agent", "nonce": nonce()}
+        st.append(rec)
+        self.assertEqual(self.state(st), "locked")
+        self.assertEqual(Store(self.path).anchor_of(lk["id"])["anchors"], [excerpt()])  # it reloads
+        st.append(answer(supersedes=st.head("LANE.1/Q1")["id"], reason="new"))
+        with self.assertRaisesRegex(StoreError, "not on the current answer"):
+            st.append({**rec, "nonce": nonce()})
+
+    def test_why_stale_names_what_changed(self):
+        st = self.store()
+        st.append(question(qid="LANE.1/Q1", valid_if=[excerpt()]))
+        st.append(question(qid="LANE.1/Q2", valid_if=[{"kind": "item_status", "item": "LANE.1", "status": "open"}]))
+        for q in ("LANE.1/Q1", "LANE.1/Q2"):
+            st.append(lock(st.append(answer(qid=q))))
+        self.spec.write_text(SPEC.replace("It says why.", "It says why not."))
+        got = A.check(st, self.dir, {"LANE.1": "built"})
+        c1 = got["LANE.1/Q1"]["conditions"][0]
+        self.assertEqual(c1["reason"], "text_changed")
+        self.assertIn("+It says why not.", c1["diff"])
+        self.assertIn("-It says why.", c1["diff"])
+        c2 = got["LANE.1/Q2"]["conditions"][0]
+        self.assertEqual((c2["reason"], c2["expected"], c2["actual"]), ("status_changed", "open", "built"))
+        self.assertIn("now built", c2["words"])
+
+    def test_the_diff_is_capped(self):
+        big = "\n".join(f"line {n} of the cited block" for n in range(200))
+        self.spec.write_text(big)
+        got = A.nearest(big.replace("of the", "in a"), big)
+        self.assertLessEqual(len(got["diff"]), A.DIFF_CHARS)
+        self.assertIn("more line(s) not shown", got["diff"])
+
+
+class ReanchorTests(Tmp):
+    """`plan_reanchor` against a real git history: evidence or nothing."""
+
+    def setUp(self):
+        super().setUp()
+        self.spec = self.dir / "spec.md"
+        self.spec.write_text(SPEC)
+        git(self.dir, "init", "-q")
+        git(self.dir, "add", "spec.md")
+        git(self.dir, "commit", "-qm", "v1")
+
+    def locked(self, source="spec.md:5-6"):
+        st = self.store()
+        st.append(question(valid_if=[{"kind": "file_sha256", "path": "spec.md", "sha256": sha(SPEC)}],
+                           source=source))
+        st.append(lock(st.append(answer())))
+        return st
+
+    def commit(self, text):
+        self.spec.write_text(text)
+        git(self.dir, "commit", "-qam", "change")
+
+    def plan(self, st):
+        return A.plan_reanchor(st, self.dir, {})
+
+    def test_an_unrelated_change_is_reanchored_to_the_cited_lines(self):
+        st = self.locked()
+        self.commit("Added above.\n" + SPEC + "Added below.\n")
+        [p] = self.plan(st)
+        self.assertTrue(p["fresh"])
+        self.assertEqual(p["anchors"], [excerpt()])
+        self.assertIn("unchanged", p["changes"][0]["why"])
+        # check() says the same thing in plain words, before anything is written.
+        c = A.check(st, self.dir, {})["LANE.1/Q1"]["conditions"][0]
+        self.assertEqual((c["reason"], c["cited_text"]), ("file_changed", "unchanged"))
+
+    def test_a_change_to_the_cited_lines_stays_stale(self):
+        # Catches: a re-anchor that takes the CURRENT lines at the range and so marks anything fresh.
+        st = self.locked()
+        self.commit(SPEC.replace("any other origin", "a different origin"))
+        [p] = self.plan(st)
+        self.assertEqual((p["changes"], p["fresh"]), ([], False))
+        self.assertIn("really stale", p["unresolved"][0]["why"])
+
+    def test_no_line_range_means_no_evidence(self):
+        st = self.locked(source="spec.md")
+        self.commit(SPEC + "more\n")
+        [p] = self.plan(st)
+        self.assertEqual(p["changes"], [])
+        self.assertIn("names no line range", p["unresolved"][0]["why"])
+
+    def test_a_version_not_in_history_means_no_evidence(self):
+        st = self.store()
+        st.append(question(valid_if=[{"kind": "file_sha256", "path": "spec.md", "sha256": "1" * 64}],
+                           source="spec.md:5-6"))
+        st.append(lock(st.append(answer())))
+        [p] = self.plan(st)
+        self.assertEqual(p["changes"], [])
+        self.assertIn("not in the last", p["unresolved"][0]["why"])
+
+    def test_without_git_nothing_is_reanchored(self):
+        st = self.locked()
+        self.commit(SPEC + "more\n")
+        (self.dir / ".git").rename(self.dir / "not-git")
+        [p] = self.plan(st)
+        self.assertEqual(p["changes"], [])
+
+
+    def test_text_that_now_appears_twice_is_not_enough(self):
+        # Catches: an excerpt that would stay true while the copy the question meant is edited.
+        st = self.locked()
+        self.commit(SPEC + "\nQuoted elsewhere: " + CITED + "\n")
+        [p] = self.plan(st)
+        self.assertEqual(p["changes"], [])
+        self.assertIn("appear 2 times", p["unresolved"][0]["why"])
+
+
+
+class AnchorExportTests(Tmp):
+    """0.5.0 review HIGH: an exported ruling says what the lock is actually checked against."""
+
+    V040_LOCKED_KEYS = {"answer_id", "picks", "picked_labels", "picked_star", "rejected_labels", "own_text",
+                        "by", "answered_at", "lock_id", "locked_by", "locked_at"}
+    HASH = {"kind": "file_sha256", "path": "spec.md", "sha256": "0" * 64}
+
+    def setUp(self):
+        super().setUp()
+        self.st = self.store()
+        self.st.append(question(valid_if=[self.HASH]))
+        self.a1 = self.st.append(answer())
+        self.lk1 = self.st.append(lock(self.a1))
+
+    def entry(self):
+        [(name, e)] = F.export(self.st).items()
+        self.assertEqual(F.check_entry(name, e, ITEMS), [])
+        return name, e
+
+    def fold_it(self):
+        out = self.dir / "locked"
+        F.write_export(F.export(self.st), out)
+        ad = FakeAdapter(ITEMS)
+        F.fold(out, self.dir / "ledger.txt", ad, dry_run=False)
+        return ad.recorded[0][0]
+
+    def test_a_plain_lock_exports_exactly_as_0_4_0_did(self):
+        _, e = self.entry()
+        self.assertEqual(set(e["locked"]), self.V040_LOCKED_KEYS)
+        self.assertEqual(e["valid_if"], [self.HASH])
+
+    def test_a_relocked_answer_exports_its_locks_anchors(self):
+        a2 = self.st.append(answer(supersedes=self.a1["id"], reason="still holds"))
+        self.st.append(lock(a2, anchors=[excerpt()]))
+        _, e = self.entry()
+        self.assertEqual((e["locked"]["anchored_by"], e["locked"]["anchors"]), ("lock", [excerpt()]))
+        self.assertEqual(e["valid_if"], [self.HASH])  # the question as put
+        self.assertEqual(set(e["history"][0]), self.V040_LOCKED_KEYS)  # the first lock had none
+        self.assertEqual(self.fold_it()["locked"]["anchors"], [excerpt()])
+
+    def test_a_reanchored_answer_exports_its_anchors_and_evidence(self):
+        rec = self.st.append({"type": "anchor", "schemaVersion": 1, "qid": "LANE.1/Q1", "lock": self.lk1["id"],
+                              "anchors": [excerpt()], "basis": "spec.md: lines 5-6 as locked (commit abc) unchanged",
+                              "by": "agent", "nonce": nonce()})
+        _, e = self.entry()
+        lk = e["locked"]
+        self.assertEqual((lk["anchored_by"], lk["anchors"], lk["anchor_id"], lk["anchor_basis"], lk["anchored_at"]),
+                         ("reanchor", [excerpt()], rec["id"], rec["basis"], rec["ts"]))
+        self.assertEqual(self.fold_it()["locked"]["anchor_id"], rec["id"])
+
+    def test_fold_refuses_malformed_anchor_fields(self):
+        self.st.append({"type": "anchor", "schemaVersion": 1, "qid": "LANE.1/Q1", "lock": self.lk1["id"],
+                        "anchors": [excerpt()], "basis": "evidence", "by": "agent", "nonce": nonce()})
+        name, e = self.entry()
+        for bad in ({"anchors": [excerpt(path="../x.md")]}, {"anchor_basis": ""}, {"anchor_id": "nope"},
+                    {"anchored_by": "question"}, {"anchored_at": "yesterday"}):
+            with self.subTest(bad=bad):
+                tampered = json.loads(json.dumps(e))
+                tampered["locked"].update(bad)
+                self.assertTrue(F.check_entry(name, tampered, ITEMS))
+        missing = json.loads(json.dumps(e))
+        del missing["locked"]["anchor_basis"]
+        self.assertTrue(F.check_entry(name, missing, ITEMS))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

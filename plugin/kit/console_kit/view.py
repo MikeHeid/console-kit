@@ -8,8 +8,11 @@ Question states:
 
     awaiting_you    the agent asked; there is no answer yet
     unlocked        answered, not locked
-    locked          locked, and every `valid_if` condition still holds
-    stale           locked, but a condition no longer holds; supersede it (D3)
+    locked          locked, and every condition still holds
+    stale           locked, but a condition no longer holds; supersede it (D3), or re-lock it
+
+A locked answer is decided by its lock's anchors when it has them, and by the
+question's `valid_if` otherwise (0.5.0; see `anchors.py`).
 
 A thread is `awaiting_agent` when the owner's latest message on an item is
 newer than the agent's latest message there.
@@ -17,10 +20,10 @@ newer than the agent's latest message there.
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import Callable, Mapping
 
+from . import anchors as A
 from .store import Store
 
 STATES = ("awaiting_you", "unlocked", "locked", "stale")
@@ -28,18 +31,12 @@ COUNTED = ("awaiting_you", "awaiting_agent", "unlocked", "stale")
 
 
 def make_evaluator(root: Path, item_status: Mapping[str, str]) -> Callable[[dict], bool]:
-    """Return a function that says whether a `valid_if` condition holds for the project as it is now."""
-    root = Path(root).resolve()
+    """Return a function that says whether a condition holds for the project as it is now.
 
-    def holds(c: dict) -> bool:
-        if c["kind"] == "item_status":
-            return item_status.get(c["item"]) == c["status"]
-        p = (root / c["path"]).resolve()
-        if root not in p.parents or not p.is_file():
-            return False
-        return hashlib.sha256(p.read_bytes()).hexdigest() == c["sha256"]
-
-    return holds
+    Each file is read and hashed at most once per evaluator, and a view builds
+    one evaluator per request.
+    """
+    return A.evaluator(root, item_status)
 
 
 def question_state(store: Store, q: dict, holds: Callable[[dict], bool]) -> str:
@@ -48,7 +45,8 @@ def question_state(store: Store, q: dict, holds: Callable[[dict], bool]) -> str:
         return "awaiting_you"
     if store.lock_of(head["id"]) is None:
         return "unlocked"
-    return "locked" if all(holds(c) for c in q["valid_if"]) else "stale"
+    conds, _ = A.conditions_for(store, q)
+    return "locked" if all(holds(c) for c in conds) else "stale"
 
 
 def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]) -> dict:
@@ -62,11 +60,15 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
         if r["type"] != "question":
             continue
         answers = store.answers(r["qid"])
+        conds, origin = A.conditions_for(store, r)
         questions[r["qid"]] = {
             "question": r,
             "state": question_state(store, r, holds),
             "answers": [dict(a, locked=store.lock_of(a["id"]) is not None) for a in answers],
-            "failing": [c for c in r["valid_if"] if not holds(c)],
+            "failing": [c for c in conds if not holds(c)],
+            # Where the conditions deciding it came from: the question's valid_if,
+            # the re-lock's own anchors, or an `agent.py reanchor` record.
+            "anchored_by": origin,
         }
 
     threads: dict[str, list[dict]] = {}
@@ -194,7 +196,9 @@ def condition_words(c: dict) -> str:
     """A `valid_if` condition as a reader would say it."""
     if c["kind"] == "item_status":
         return f"item `{c['item']}` has status `{c['status']}`"
-    return f"`{c['path']}` is unchanged since the question was asked"
+    if c["kind"] == "excerpt":
+        return f"`{c['path']}` still contains the text the question cites"
+    return f"`{c['path']}` is unchanged (a whole-file check)"
 
 
 def sheet_markdown(sheet: dict) -> str:

@@ -521,5 +521,181 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(len(again.store.records()), 1)
 
 
+    # -- 0.5.0: re-lock re-anchors; /check; reanchor ---------------------------------
+
+    SPEC = "# Spec\n\nIntro.\n\nThe cited claim, line one.\nThe cited claim, line two.\n\nTail.\n"
+
+    def git(self, *args):
+        import subprocess
+        subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+                        *args], cwd=self.cfg.root, check=True, capture_output=True)
+
+    def locked_on_spec(self, source="spec.md:5-6"):
+        """LANE.1/Q2 asked against spec.md's whole-file hash, answered and locked through the owner door."""
+        import hashlib
+        spec = self.cfg.root / "spec.md"
+        spec.write_text(self.SPEC)
+        q = {"qid": "LANE.1/Q2", "item": "LANE.1", "text": "Still?", "kind": "single",
+             "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}], "star": None,
+             "valid_if": [{"kind": "file_sha256", "path": "spec.md",
+                           "sha256": hashlib.sha256(self.SPEC.encode()).hexdigest()}],
+             "source": source, "nonce": "askspec00001"}
+        self.assertEqual(SV.agent_request(self.cfg.socket, "POST", "/question", q)[0], 200)
+        code, a = self.req("POST", "/api/answer", self.answer(qid="LANE.1/Q2", nonce="answerspec01"), tok=token())
+        self.assertEqual(code, 200, a)
+        code, lk = self.req("POST", "/api/lock", {"qid": "LANE.1/Q2", "answer": a["record"]["id"],
+                                                  "nonce": "lockspec0001"}, tok=token())
+        self.assertEqual(code, 200, lk)
+        return spec, a["record"], lk["record"]
+
+    def state_of(self, qid):
+        return self.req("GET", "/api/view", tok=token())[1]["view"]["questions"][qid]
+
+    def test_a_first_lock_carries_no_anchors(self):
+        # Catches: every lock growing a field, which would make every store unreadable by a 0.4.0 kit.
+        _, _, lk = self.locked_on_spec()
+        self.assertNotIn("anchors", lk)
+        self.assertEqual(self.state_of("LANE.1/Q2")["state"], "locked")
+
+    def test_the_page_cannot_send_anchors_on_a_lock(self):
+        spec, a, _ = self.locked_on_spec()
+        code, b = self.req("POST", "/api/answer", self.answer(qid="LANE.1/Q2", supersedes=a["id"],
+                                                              reason="again", nonce="answerspec02"), tok=token())
+        self.assertEqual(code, 200, b)
+        before = self.cfg.store.read_bytes()
+        forged = [{"kind": "file_sha256", "path": "spec.md", "sha256": "0" * 64}]
+        code, out = self.req("POST", "/api/lock", {"qid": "LANE.1/Q2", "answer": b["record"]["id"],
+                                                   "anchors": forged, "nonce": "lockspec0002"}, tok=token())
+        self.assertEqual(code, 400)
+        self.assertIn("anchors is the server's to set", out["error"])
+        self.assertEqual(self.cfg.store.read_bytes(), before)
+
+    def test_relocking_a_stale_answer_reanchors_it(self):
+        spec, a, _ = self.locked_on_spec()
+        spec.write_text(self.SPEC + "An unrelated change.\n")
+        self.assertEqual(self.state_of("LANE.1/Q2")["state"], "stale")
+        code, out = self.req("POST", "/api/relock", {"qid": "LANE.1/Q2", "nonce": "relockspec01"}, tok=token())
+        self.assertEqual(code, 200, out)
+        ans, lk = out["records"]
+        self.assertEqual((ans["picks"], ans["supersedes"]), (a["picks"], a["id"]))
+        self.assertIn("still holds", ans["reason"])
+        self.assertEqual(lk["anchors"][0]["sha256"],
+                         __import__("hashlib").sha256(spec.read_bytes()).hexdigest())
+        q = self.state_of("LANE.1/Q2")
+        self.assertEqual((q["state"], q["anchored_by"]), ("locked", "lock"))
+        # A retry with the same nonce writes nothing more.
+        n = len(self.console.store.records())
+        code, again = self.req("POST", "/api/relock", {"qid": "LANE.1/Q2", "nonce": "relockspec01"}, tok=token())
+        self.assertEqual((code, [r["id"] for r in again["records"]]), (200, [ans["id"], lk["id"]]))
+        self.assertEqual(len(self.console.store.records()), n)
+        # Both new records rang the doorbell, so the agent folds the new lock.
+        self.assertEqual([x["type"] for x in self.doorbell()][-2:], ["answer", "lock"])
+
+    def test_relock_needs_a_locked_answer(self):
+        code, out = self.req("POST", "/api/relock", {"qid": "LANE.1/Q1", "nonce": "relockspec02"}, tok=token())
+        self.assertEqual(code, 400)
+        self.assertIn("no locked answer", out["error"])
+        code, _ = self.req("POST", "/api/relock", {"qid": "LANE.1/Q1", "nonce": "relockspec03",
+                                                   "anchors": []}, tok=token())
+        self.assertEqual(code, 400)
+
+    def test_check_is_behind_the_gate_and_says_why(self):
+        spec, _, _ = self.locked_on_spec()
+        spec.unlink()
+        self.assertEqual(self.req("GET", "/api/check")[0], 403)
+        self.assertEqual(self.req("GET", "/api/check", tok=token(key=OTHER))[0], 403)
+        code, out = self.req("GET", "/api/check", tok=token())
+        self.assertEqual(code, 200)
+        [c] = out["stale"]["LANE.1/Q2"]["conditions"]
+        self.assertEqual((c["reason"], c["holds"]), ("file_missing", False))
+        code, via_agent = SV.agent_request(self.cfg.socket, "GET", "/check")
+        self.assertEqual((code, via_agent), (200, out))
+
+    def test_reanchor_dry_run_writes_nothing_and_a_real_run_only_appends(self):
+        spec, _, lk = self.locked_on_spec()
+        self.git("init", "-q")
+        self.git("add", "spec.md")
+        self.git("commit", "-qm", "v1")
+        spec.write_text("A new first line.\n" + self.SPEC)
+        self.git("commit", "-qam", "unrelated")
+        before = self.cfg.store.read_bytes()
+        rc, out, err = self.agent_cli("reanchor", "--dry-run")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("LANE.1/Q2: would re-anchor spec.md", out)
+        self.assertEqual(self.cfg.store.read_bytes(), before)
+        self.assertEqual(self.state_of("LANE.1/Q2")["state"], "stale")
+        rc, out, err = self.agent_cli("reanchor")
+        self.assertEqual(rc, 0, err)
+        after = self.cfg.store.read_bytes()
+        self.assertTrue(after.startswith(before))  # nothing already written changed
+        [new] = [json.loads(x) for x in after[len(before):].decode().splitlines()]
+        self.assertEqual((new["type"], new["by"], new["lock"]), ("anchor", "agent", lk["id"]))
+        self.assertEqual(new["anchors"], [{"kind": "excerpt", "path": "spec.md",
+                                           "text": "The cited claim, line one.\nThe cited claim, line two."}])
+        q = self.state_of("LANE.1/Q2")
+        self.assertEqual((q["state"], q["anchored_by"]), ("locked", "reanchor"))
+        self.assertEqual(self.agent_cli("reanchor")[0], 0)  # a second run finds nothing stale
+        self.assertEqual(self.cfg.store.read_bytes(), after)
+
+    def test_reanchor_takes_no_anchors_from_the_caller(self):
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/reanchor",
+                                     {"dry_run": False, "anchors": [{"kind": "excerpt"}]})
+        self.assertEqual(code, 400)
+        code, _ = SV.agent_request(self.cfg.socket, "POST", "/reanchor", {"dry_run": "no"})
+        self.assertEqual(code, 400)
+        code, _ = SV.agent_request(self.cfg.socket, "POST", "/anchor",
+                                   {"qid": "LANE.1/Q1", "lock": "0" * 24, "anchors": [], "basis": "x"})
+        self.assertEqual(code, 404)  # no route writes an anchor record from a caller's body
+
+
+    def test_reanchor_skips_a_lock_the_owner_changed_while_it_ran(self):
+        # Catches: a plan made outside the write lock being applied to a lock that is no longer current.
+        from unittest import mock
+        spec, _, _ = self.locked_on_spec()
+        self.git("init", "-q")
+        self.git("add", "spec.md")
+        self.git("commit", "-qm", "v1")
+        spec.write_text("A new first line.\n" + self.SPEC)
+        self.git("commit", "-qam", "unrelated")
+        real = SV.A.plan_reanchor
+
+        def plan_then_owner_relocks(*a, **kw):
+            plan = real(*a, **kw)
+            self.console.relock({"qid": "LANE.1/Q2", "nonce": "racerelock01"})
+            return plan
+        with mock.patch.object(SV.A, "plan_reanchor", plan_then_owner_relocks):
+            code, out = SV.agent_request(self.cfg.socket, "POST", "/reanchor", {"dry_run": False})
+        self.assertEqual(code, 200, out)
+        [p] = out["plan"]
+        self.assertIn("changed while this ran", p["skipped"])
+        self.assertNotIn("record", p)
+        self.assertEqual([r for r in self.console.store.records() if r["type"] == "anchor"], [])
+
+
+    def test_reanchor_skips_when_the_file_changes_between_plan_and_write(self):
+        # Review MEDIUM: the plan reads the tree outside the write lock. Catches: an anchor written
+        # for cited text that was edited away after the plan read it.
+        from unittest import mock
+        spec, _, _ = self.locked_on_spec()
+        self.git("init", "-q")
+        self.git("add", "spec.md")
+        self.git("commit", "-qm", "v1")
+        spec.write_text("A new first line.\n" + self.SPEC)
+        self.git("commit", "-qam", "unrelated")
+        real = SV.A.plan_reanchor
+
+        def plan_then_edit(*a, **kw):
+            plan = real(*a, **kw)
+            spec.write_text(self.SPEC.replace("line two", "line 2"))
+            return plan
+        with mock.patch.object(SV.A, "plan_reanchor", plan_then_edit):
+            code, out = SV.agent_request(self.cfg.socket, "POST", "/reanchor", {"dry_run": False})
+        self.assertEqual(code, 200, out)
+        [p] = out["plan"]
+        self.assertIn("changed while this ran", p["skipped"])
+        self.assertEqual([r for r in self.console.store.records() if r["type"] == "anchor"], [])
+        self.assertEqual(self.state_of("LANE.1/Q2")["state"], "stale")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

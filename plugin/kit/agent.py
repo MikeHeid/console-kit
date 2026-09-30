@@ -9,6 +9,10 @@
     agent.py --state DIR answers [--item ID] [--fork RECORD_ID] [--json]
                                                 every question in a scope with every answer it got (§7.6)
     agent.py --state DIR fork-context FORK_ID   the round's bundle for its committee (§6.3, D14)
+    agent.py --state DIR check [--json]         why each stale answer is stale, condition by condition (0.5.0)
+    agent.py --state DIR reanchor [--dry-run] [--json]
+                                                re-anchor stale locks that git history shows were cited
+                                                text still in the file; the server computes every anchor
     agent.py --state DIR reply ITEM TEXT [--reply-to RECORD_ID]
     agent.py --state DIR ask QUESTION.json [...]
                                                 append questions (each the record without type or by), in
@@ -92,6 +96,55 @@ def _fork_context(state: Path, fork: str) -> int:
     return 0
 
 
+def _check(state: Path, as_json: bool) -> int:
+    try:
+        code, out = agent_request(state / "agent.sock", "GET", "/check", None)
+    except OSError as e:
+        print(f"cannot reach the console server at {state / 'agent.sock'}: {e}", file=sys.stderr)
+        return 2
+    if code != 200 or as_json:
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return 0 if code == 200 else 1
+    stale = out["stale"]
+    if not stale:
+        print("No answer is stale.")
+    for qid, s in stale.items():
+        print(f"{qid} (anchored by {s['anchored_by']}):")
+        for c in s["conditions"]:
+            print(f"  {'holds' if c['holds'] else 'FAILS'}: {c['words']}")
+            if c.get("diff"):
+                print("\n".join("      " + ln for ln in c["diff"].splitlines()))
+    return 0
+
+
+def _reanchor(state: Path, dry_run: bool, as_json: bool) -> int:
+    """Ask the server to re-anchor; print what changed (or would), and what stays stale and why."""
+    try:
+        code, out = agent_request(state / "agent.sock", "POST", "/reanchor", {"dry_run": dry_run})
+    except OSError as e:
+        print(f"cannot reach the console server at {state / 'agent.sock'}: {e}", file=sys.stderr)
+        return 2
+    if code != 200 or as_json:
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        return 0 if code == 200 else 1
+    verb = "would re-anchor" if dry_run else "re-anchored"
+    not_done = {p["lock"] for p in out["plan"] if p.get("skipped") or p.get("error")}
+    done = [p for p in out["plan"] if p["changes"] and p["lock"] not in not_done]
+    for p in out["plan"]:
+        tail = "" if p["fresh"] else " (still stale)"
+        if p["lock"] in not_done:
+            print(f"{p['qid']}: not re-anchored: {p.get('skipped') or p.get('error')}")
+            continue
+        for c in p["changes"]:
+            print(f"{p['qid']}: {verb} {c['from']['path']}: {c['why']}{tail}")
+        for c in p["unresolved"]:
+            where = c["from"].get("path") or c["from"].get("item")
+            print(f"{p['qid']}: left stale, {where}: {c['why']}")
+    print(f"{len(done)} of {len(out['plan'])} stale answer(s) {verb}"
+          + ("; nothing was written (dry run)" if dry_run else ""), file=sys.stderr)
+    return 0
+
+
 def _call(state: Path, method: str, path: str, body=None) -> int:
     try:
         code, out = agent_request(state / "agent.sock", method, path, body)
@@ -130,6 +183,11 @@ def main(argv=None) -> int:
     s.add_argument("--json", action="store_true")
     s = sub.add_parser("fork-context")
     s.add_argument("fork")
+    s = sub.add_parser("check")
+    s.add_argument("--json", action="store_true")
+    s = sub.add_parser("reanchor")
+    s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--json", action="store_true")
     s = sub.add_parser("reply")
     s.add_argument("item")
     s.add_argument("text")
@@ -177,6 +235,10 @@ def _run(a, bell: Path) -> int:
         return _answers(a.state, a.item, a.fork, a.json)
     if a.cmd == "fork-context":
         return _fork_context(a.state, a.fork)
+    if a.cmd == "check":
+        return _check(a.state, a.json)
+    if a.cmd == "reanchor":
+        return _reanchor(a.state, a.dry_run, a.json)
     if a.cmd == "reply":
         body = {"item": a.item, "text": a.text, "nonce": secrets.token_urlsafe(12)}
         if a.reply_to:

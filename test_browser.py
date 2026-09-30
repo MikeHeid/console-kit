@@ -767,5 +767,84 @@ class AnswerFollowUpTests(unittest.TestCase):
                                             "text": "Does B hold on tour?"})
 
 
+
+def _stale_view() -> tuple[dict, dict]:
+    """/view and /check with LANE.1/Q1 locked on an excerpt whose text then changed, both built by the kit."""
+    import tempfile
+    from console_kit import anchors as A
+    from console_kit import view as V
+    from console_kit.store import Store
+    from test_kit import answer, lock, question
+    items = {"LANE.1": {"title": "first lane", "parent": None}}
+    with tempfile.TemporaryDirectory() as td:
+        spec = Path(td) / "spec.md"
+        spec.write_text("Intro.\nThe console refuses a write from any other origin.\nTail.\n")
+        st = Store(Path(td) / "store.jsonl", known_items=items)
+        st.append(question("LANE.1/Q1", valid_if=[{"kind": "excerpt", "path": "spec.md",
+                                                     "text": "The console refuses a write from any other origin."}]))
+        st.append(lock(st.append(answer("LANE.1/Q1", own_text="B, for the small rig"))))
+        spec.write_text("Intro.\nThe console refuses a write from a different origin.\nTail.\n")
+        view = {"view": V.build(st, items, V.make_evaluator(Path(td), {})), "items": items, "cursor": {}}
+        return view, {"stale": A.check(st, Path(td), {})}
+
+
+class WhyStaleTests(unittest.TestCase):
+    """0.5.0: a stale answer says why, and the owner can re-lock it as it stands."""
+
+    @classmethod
+    def setUpClass(cls):
+        DockTests.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        DockTests.tearDownClass.__func__(cls)
+
+    def test_why_stale_shows_the_change_and_relock_sends_only_qid_and_nonce(self):
+        view, check = _stale_view()
+        self.assertEqual(view["view"]["questions"]["LANE.1/Q1"]["state"], "stale")
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    browser = getattr(self.pw, kind).launch()
+                    self.addCleanup(browser.close)
+                    page = browser.new_page(viewport={"width": width, "height": 900})
+                    errors: list[str] = []
+                    page.on("pageerror", lambda e: errors.append(str(e)))
+                    posted: list[dict] = []
+                    page.route("**/api/view*", lambda r: r.fulfill(status=200, content_type="application/json",
+                                                                   body=json.dumps(view)))
+                    page.route("**/api/check", lambda r: r.fulfill(status=200, content_type="application/json",
+                                                                   body=json.dumps(check)))
+
+                    def on_relock(route):
+                        posted.append(route.request.post_data_json)
+                        route.fulfill(status=200, content_type="application/json", body=json.dumps({"records": []}))
+                    page.route("**/api/relock", on_relock)
+                    page.goto(self.url)
+                    page.click(".ck-item-btn")
+                    page.wait_for_selector(".ck-stale-banner")
+                    why = page.locator("button[aria-label^='Why is this stale']")
+                    why.focus()
+                    page.keyboard.press("Enter")
+                    page.wait_for_selector(".ck-why-diff")
+                    words = page.locator(".ck-why").text_content()
+                    self.assertIn("no longer in spec.md", words)
+                    diff = page.locator(".ck-why-diff").text_content()
+                    self.assertIn("-The console refuses a write from any other origin.", diff)
+                    self.assertIn("+The console refuses a write from a different origin.", diff)
+                    self.assertFalse(page.evaluate("document.documentElement.scrollWidth > innerWidth"))
+                    if os.environ.get("CONSOLE_KIT_SHOTS"):
+                        page.locator(".ck-question").first.screenshot(
+                            path=str(Path(os.environ["CONSOLE_KIT_SHOTS"]) / f"why-stale-{kind}-{width}.png"))
+                    page.locator("button[aria-label^='Re-lock this answer as it stands']").click()
+                    page.get_by_role("button", name="Re-lock as it stands").click()
+                    page.wait_for_function("document.querySelectorAll('.ck-confirm').length === 0")
+                    self.assertEqual(len(posted), 1)
+                    body = dict(posted[0])
+                    self.assertTrue(body.pop("nonce"))
+                    self.assertEqual(body, {"qid": "LANE.1/Q1"})  # never anchors: the server computes them
+                    self.assertEqual(errors, [], f"{kind}: page errors")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -110,10 +110,11 @@
     return { item: itemId, fork: forkId, rows, counts, answers };
   }
 
+  // Mirrors view.condition_words.
   function conditionWords(c) {
-    return c.kind === 'item_status'
-      ? 'item ' + c.item + ' has status ' + c.status
-      : c.path + ' is unchanged since the question was asked';
+    if (c.kind === 'item_status') return 'item ' + c.item + ' has status ' + c.status;
+    if (c.kind === 'excerpt') return c.path + ' still contains the text the question cites';
+    return c.path + ' is unchanged (a whole-file check)';
   }
 
   function optionLabels(qData) {
@@ -216,6 +217,7 @@
       const data = await resp.json();
       view = data.view;
       items = data.items;
+      checkPromise = null; // a new view: "why stale" is checked afresh
       cursor = data.cursor;
       updateInboxButton();
       updateItemButtons();
@@ -764,10 +766,23 @@
       for (const c of q.failing) {
         let msg = '';
         if (c.kind === 'file_sha256') msg = 'File ' + c.path + ' changed';
+        else if (c.kind === 'excerpt') msg = 'The text cited from ' + c.path + ' changed or is gone';
         else if (c.kind === 'item_status') msg = c.item + ' is no longer ' + c.status;
         list.appendChild(el('li', {}, [msg]));
       }
       banner.appendChild(list);
+      // 0.5.0: say which condition failed and why, and let the owner re-lock
+      // the answer as it stands once they have checked the change.
+      const tools = el('div', { className: 'ck-actions' });
+      const [whyBtn, whySlot] = disclosure('Why stale?', 'why-' + qData.qid, () => renderWhyStale(qData.qid));
+      whyBtn.setAttribute('aria-label', 'Why is this stale: ' + truncateText(qData.text, 40));
+      const [reBtn, reSlot] = disclosure('Still holds: re-lock…', 'relock-' + qData.qid, () => renderRelock(q));
+      reBtn.setAttribute('aria-label', 'Re-lock this answer as it stands: ' + truncateText(qData.text, 40));
+      tools.appendChild(whyBtn);
+      tools.appendChild(reBtn);
+      banner.appendChild(tools);
+      banner.appendChild(whySlot);
+      banner.appendChild(reSlot);
       bodyEl.appendChild(banner);
     }
 
@@ -1032,6 +1047,82 @@
       receipt.appendChild(own);
     }
     return receipt;
+  }
+
+  // "Why stale?" (0.5.0): the server's own check, fetched when the owner asks.
+  // Every string is put in as text, never as markup.
+  let checkPromise = null;
+  function fetchCheck() {
+    if (!checkPromise) {
+      checkPromise = fetch(config.api + '/check', { credentials: 'same-origin' })
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .catch(e => { checkPromise = null; return { error: e.message || 'Network error' }; });
+    }
+    return checkPromise;
+  }
+
+  function renderWhyStale(qid) {
+    const box = el('div', { className: 'ck-why', role: 'region', 'aria-label': 'Why ' + qid + ' is stale' },
+      [el('p', { className: 'ck-muted' }, ['Checking…'])]);
+    fetchCheck().then(data => {
+      box.textContent = '';
+      if (data.error) {
+        box.appendChild(el('p', {}, ['Could not check just now: ' + data.error]));
+        return;
+      }
+      const s = data.stale && data.stale[qid];
+      if (!s) {
+        box.appendChild(el('p', {}, ['Nothing fails any more: this answer is no longer stale. Reload to see it.']));
+        return;
+      }
+      const list = el('ul', { className: 'ck-why-list' });
+      for (const c of s.conditions) {
+        if (c.holds) continue;
+        const li = el('li', {}, [c.words]);
+        if (c.diff) {
+          li.appendChild(el('div', { className: 'ck-muted' }, ['What the question cited (−) against the file now (+):']));
+          const pre = el('pre', { className: 'ck-why-diff', tabindex: '0' });
+          pre.textContent = c.diff;
+          li.appendChild(pre);
+        }
+        list.appendChild(li);
+      }
+      box.appendChild(list);
+    });
+    return box;
+  }
+
+  // Re-lock as it stands (0.5.0): one answer superseding the locked one word for
+  // word, and its lock, written by the server, which re-anchors the new lock.
+  function renderRelock(q) {
+    const qid = q.question.qid;
+    const wrap = el('div', { className: 'ck-confirm' }, [
+      el('div', { className: 'ck-confirm-heading' }, ['Re-lock this answer as it stands?']),
+      el('p', {}, ['Your answer stays word for word. The new lock is checked against the files as they are now, ' +
+        'so it reads locked again until the text it cites changes.'])
+    ]);
+    const id = 'relock-reason-' + qid.replace('/', '-');
+    wrap.appendChild(el('label', { for: id, style: 'font-size: 13px; display: block; margin: 8px 0 4px;' },
+      ['Why it still holds (optional):']));
+    const reason = el('textarea', { id: id, rows: '2', className: 'ck-textarea', maxlength: '2000' });
+    wrap.appendChild(reason);
+    const actions = el('div', { className: 'ck-actions', style: 'margin-top: 8px;' });
+    const go = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' }, ['Re-lock as it stands']);
+    go.addEventListener('click', async () => {
+      go.disabled = true;
+      const body = { qid: qid };
+      if (reason.value.trim()) body.reason = reason.value.trim();
+      const result = await apiPost('/relock', body, 'relock-' + qid);
+      go.disabled = false;
+      if (result.error) announce('Error: ' + result.error);
+      else { openForms.delete('relock-' + qid); openForms.delete('why-' + qid); renderPanel(); }
+    });
+    const cancel = el('button', { className: 'ck-btn', type: 'button' }, ['Cancel']);
+    cancel.addEventListener('click', () => { openForms.delete('relock-' + qid); renderPanel(); });
+    actions.appendChild(go);
+    actions.appendChild(cancel);
+    wrap.appendChild(actions);
+    return wrap;
   }
 
   // Render lock confirmation step (fix #4: two-step with Cancel)
