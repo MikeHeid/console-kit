@@ -235,6 +235,20 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   carry a time zone. A problem is shown as a short sentence, never as the
   file's contents.
 
+### Claude Code's own status line input as the usage file (0.8.7)
+
+- **No plugin needed.** Claude Code hands its status line command a JSON
+  object on stdin; a status line that saves it to a file (for example
+  `printf '%s' "$input" > ~/.claude/usage/statusline-latest.json`, written
+  through a temporary file and `mv`) makes a usage file `--usage-file` can
+  read. The windows sit under `rate_limits`, reset times are whole epoch
+  seconds, and there is no `updated_at`: the file's own write time stands in,
+  so a file no session has rewritten still reads as stale.
+- **Nothing else in it is forwarded.** That input also carries the session id,
+  paths and cost; only the two windows and the write time reach the page.
+- **claude-hud's snapshot still works.** A file with `five_hour` / `seven_day`
+  at the top level is read exactly as in 0.8.6, and only from there.
+
 ## How it fits together
 
 ```

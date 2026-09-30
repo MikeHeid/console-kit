@@ -220,12 +220,14 @@ class UsageProblem(Exception):
     pass
 
 
-def _read_capped(path: Path, cap: int, what: str) -> bytes:
+def _read_capped(path: Path, cap: int, what: str) -> tuple[bytes, float]:
+    """The file's bytes and its modification time, read from the one open file."""
     try:
         # O_NONBLOCK: a FIFO put where the file should be must not hold a handler thread open.
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
         with open(fd, "rb") as f:
-            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode):
                 raise UsageProblem(f"the {what} is not a regular file")
             data = f.read(cap + 1)
     except FileNotFoundError:
@@ -234,11 +236,27 @@ def _read_capped(path: Path, cap: int, what: str) -> bytes:
         raise UsageProblem(f"the {what} cannot be read") from None
     if len(data) > cap:
         raise UsageProblem(f"the {what} is larger than {cap // 1024} KB")
-    return data
+    return data, st.st_mtime
+
+
+_EPOCH_MAX = 253402300799  # 9999-12-31T23:59:59Z, the last second a datetime can hold
+
+
+def _utc(seconds: float, what: str) -> str:
+    if not 0 <= seconds <= _EPOCH_MAX:
+        raise UsageProblem(f"the usage file's {what} is out of range")
+    try:  # the platform's own ceiling can sit below datetime's (Windows: year 3000)
+        t = datetime.fromtimestamp(int(seconds), timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        raise UsageProblem(f"the usage file's {what} is out of range") from None
+    return t.isoformat().replace("+00:00", "Z")
 
 
 def _iso(value, what: str) -> str:
-    """A timestamp re-emitted in one form, so the page never parses a string it did not check."""
+    """A timestamp re-emitted in one form, so the page never parses a string it did not check.
+    Whole epoch seconds are accepted too: Claude Code's own status line input carries them."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return _utc(value, what)
     if not isinstance(value, str) or len(value) > 64:
         raise UsageProblem(f"the usage file's {what} is not a timestamp")
     try:
@@ -266,22 +284,32 @@ def _window(raw, name: str) -> dict:
 
 
 def usage_snapshot(path: Path) -> dict:
+    """Two shapes are read. claude-hud's snapshot: the windows at the top level, with updated_at.
+    Claude Code's own status line input, saved as it arrives: the windows under rate_limits and
+    no updated_at, so the file's write time stands in (a file nobody rewrites then reads as
+    stale, as it should). A file with windows at the top level is read from there only."""
+    raw, mtime = _read_capped(path, USAGE_MAX_BYTES, "usage file")
     try:
-        doc = json.loads(_read_capped(path, USAGE_MAX_BYTES, "usage file"))
+        doc = json.loads(raw)
     except (ValueError, RecursionError):  # bad JSON, bad UTF-8, a huge integer, deep nesting
         raise UsageProblem("the usage file is not JSON") from None
     if not isinstance(doc, dict):
         raise UsageProblem("the usage file is not a JSON object")
-    out = {"updated_at": _iso(doc.get("updated_at"), "updated_at")}
+    src = doc
+    if not any(w in doc for w in _WINDOWS) and isinstance(doc.get("rate_limits"), dict):
+        src = doc["rate_limits"]
+    updated = doc.get("updated_at")
+    out = {"updated_at": _utc(mtime, "write time") if updated is None and src is not doc
+           else _iso(updated, "updated_at")}
     for w in _WINDOWS:
-        out[w] = _window(doc.get(w), w)
+        out[w] = _window(src.get(w), w)
     return out
 
 
 def account_email(path: Path) -> str | None:
     """The signed-in account's email, or None. Nothing else is taken from the file."""
     try:
-        doc = json.loads(_read_capped(path, ACCOUNT_MAX_BYTES, "account file"))
+        doc = json.loads(_read_capped(path, ACCOUNT_MAX_BYTES, "account file")[0])
     except (UsageProblem, ValueError, RecursionError):
         return None
     acct = doc.get("oauthAccount") if isinstance(doc, dict) else None
