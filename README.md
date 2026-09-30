@@ -166,6 +166,11 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   steward's name is the steward. It keeps your own cooperating sessions from
   racing for the cursor, and nothing more.
 - With no steward set, everything is exactly as in 0.8.2.
+- **Before going back to 0.8.2, run `agent.py --state <state> steward
+  --clear`.** Once a steward is set, a 0.8.2 SessionStart hook reads the
+  `steward` key as a malformed entry and reports "Owner console: not
+  checked" (the owner's requests are not listed) until the steward is
+  cleared (`kit/docs/DEPLOY.md`, "Rollback", step 7).
 
 ## How it fits together
 

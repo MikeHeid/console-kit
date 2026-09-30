@@ -112,6 +112,26 @@ def lookup(project: Path, path: Path | None = None) -> dict | None:
     return e
 
 
+def enclosing(target: Path, projects: dict | None = None, path: Path | None = None) -> tuple[str, dict] | None:
+    """The NEAREST registered project holding `target` (itself or an ancestor), as (root, entry); None if none.
+
+    `target` is resolved first (symlinks followed; it need not exist). The
+    question hook walks the same way (`hooks/ask_guard.py._registered`, which
+    may import nothing from the kit); the kit's tests hold the two to one
+    fixture. Raises RegistryError on a malformed entry it lands on.
+    """
+    found = load(path) if projects is None else projects
+    p = Path(os.path.realpath(target))
+    for d in (p, *p.parents):
+        e = found.get(str(d))
+        if e is not None:
+            problems = entry_problems(e)
+            if problems:
+                raise RegistryError(f"{d}: " + "; ".join(problems))
+            return str(d), e
+    return None
+
+
 def _write(p: Path, projects: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=".projects.", suffix=".tmp")  # 0600 from creation

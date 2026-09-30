@@ -308,6 +308,13 @@ cannot set or change the steward.
   The question hook, by contrast, fails open: while the registry is broken,
   every session may ask live.
 
+- **After going back to 0.8.2, every session says "Owner console: not
+  checked"**: a steward is still set. A 0.8.2 hook reads the `steward` key as
+  a malformed registry entry and stops there, so the owner's requests are not
+  listed. Run `agent.py --state <state> steward --clear` (with the 0.8.3 kit,
+  or delete the `"steward"` line from your registry by hand). Do it BEFORE
+  downgrading (`DEPLOY.md`, "Rollback", step 7).
+
 **What it is not:** a security boundary. Every session runs as you, on the
 same socket and files, and any session that sets `CONSOLE_KIT_AGENT=agent-5`
 is the steward. It keeps your own cooperating sessions from racing for the

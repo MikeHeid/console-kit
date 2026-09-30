@@ -478,26 +478,37 @@ def inside(root: Path, raw: str, what: str) -> Path:
 def _steward_refusal(a) -> str | None:
     """The steward lock (0.8.3), as `agent.py` applies it to `watch` and `synced`.
 
-    `export` is checked against the console whose store it reads (the store's
-    directory is the console's state); `fold` against the console registered for
-    `--root`. A root nobody registered carries no lock, as the console-fold
-    skill stops there anyway.
+    The lock is keyed to what the command TOUCHES, not to how it was called:
+    `export` to the console whose store it reads (the store's directory is the
+    console's state) and to the project its `--out` lands in; `fold` to the
+    project of `--root` and of each of `--locked`, `--ledger` and `--adapter`.
+    Each path is resolved and walked up to the NEAREST registered project
+    (`R.enclosing`), so neither an ancestor `--root` above a registered project
+    nor a path reaching into a project registered below `--root` escapes the
+    lock. If any of them lands on a console with a steward that is not this
+    session, it is refused. Paths in no registered project carry no lock.
     """
+    root = Path(a.root)
+    touched = [root, root / a.out] if a.cmd == "export" else \
+        [root, root / a.locked, root / a.ledger, root / a.adapter]
+    projects = R.load()
+    states: dict[Path, str] = {}
     if a.cmd == "export":
-        state = Path(a.store).resolve().parent
-    else:
-        e = R.lookup(a.root)
-        if e is None:
-            return None
-        state = Path(e["state"])
-    name = R.steward_for_state(state)
-    if name is None or a.agent == name:
-        return None
-    who = f"this session ({a.agent})" if a.agent else "this session (unnamed)"
-    return (f"refused: the fold belongs to this console's steward, {name}, and {who} is not it. Only the steward "
-            f"watches the doorbell, marks it synced and folds answers. Use `ask`, `reply` and `working` instead; "
-            f"the steward folds what the owner locks. (A session named {name} runs as it: --as {name}, or "
-            f"{N.ENV}={name}.)")
+        states[Path(a.store).resolve().parent] = f"the store {a.store}"
+    for t in touched:
+        hit = R.enclosing(t, projects)
+        if hit is not None:
+            states.setdefault(Path(hit[1]["state"]), f"{t} (in {hit[0]})")
+    for state, what in states.items():
+        name = R.steward_for_state(state)
+        if name is None or a.agent == name:
+            continue
+        who = f"this session ({a.agent})" if a.agent else "this session (unnamed)"
+        return (f"refused: the fold belongs to this console's steward, {name}, and {who} is not it ({what} is "
+                f"on its console). Only the steward watches the doorbell, marks it synced and folds answers. "
+                f"Use `ask`, `reply` and `working` instead; the steward folds what the owner locks. (A session "
+                f"named {name} runs as it: --as {name}, or {N.ENV}={name}.)")
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:

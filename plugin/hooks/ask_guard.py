@@ -50,7 +50,12 @@ MAX_INPUT = 1 << 20
 
 
 def _registered(start: Path, found: dict) -> dict | None:
-    """The registry entry of the registered project holding `start` (itself or an ancestor), or None."""
+    """The registry entry of the NEAREST registered project holding `start` (itself or an ancestor), or None.
+
+    The same walk as `console_kit/registry.enclosing`, which `fold.py`'s steward
+    lock uses. A copy, not an import, because a hook may import nothing from a
+    kit path; the kit's tests hold the two to one fixture.
+    """
     p = Path(os.path.realpath(start))
     for d in (p, *p.parents):
         e = found.get(str(d))

@@ -1791,6 +1791,84 @@ class StewardLockTests(_Steward):
         self.assertEqual(rc, 2, err)
 
 
+class FoldLockPathTests(_Steward):
+    """PR #13 review, HIGH + MEDIUM: the fold lock follows the paths the fold touches, not `--root` alone."""
+
+    ADAPTER = "def items():\n    return {}\ndef record(e, d):\n    return []\ndef seed_questions():\n    return []\n"
+
+    def fold(self, root, where, agent):
+        """fold --dry-run from `root`, with --locked, --ledger and --adapter under `where` (relative to root)."""
+        d = Path(root) / where
+        (d / "locked").mkdir(parents=True, exist_ok=True)
+        (d / "adapter.py").write_text(self.ADAPTER)
+        rel = lambda n: str(Path(where) / n)  # noqa: E731
+        return self.run_py(KIT / "fold.py", "--root", str(root), "fold", "--locked", rel("locked"),
+                           "--ledger", rel("folded.txt"), "--adapter", rel("adapter.py"), "--dry-run", agent=agent)
+
+    def test_an_ancestor_root_does_not_escape_the_lock(self):
+        # Catches: a lock looked up by exact --root, so `--root /p` folds into the registered /p/console-kit.
+        inner = self.project / "console-kit"
+        inner.mkdir()
+        self.register("--steward", "agent-5", project=inner)
+        rc, _, err = self.fold(self.project, "console-kit", agent="agent-6")
+        self.assertEqual(rc, 1, err)
+        self.assertIn("steward, agent-5", err)
+        self.assertFalse((inner / "folded.txt").exists())
+        rc, _, err = self.fold(self.project, "console-kit", agent=None)
+        self.assertEqual(rc, 1, err)
+        other = self.dir / "other-state"
+        other.mkdir()
+        (other / "store.jsonl").write_text("")
+        rc, _, err = self.run_py(KIT / "fold.py", "--root", str(self.project), "export", "--store",
+                                 str(other / "store.jsonl"), "--out", "console-kit/locked", agent="agent-6")
+        self.assertEqual(rc, 1, err)                     # --out lands in the steward's project
+        self.assertIn("steward, agent-5", err)
+
+    def test_the_steward_is_allowed_through_an_ancestor_root(self):
+        inner = self.project / "console-kit"
+        inner.mkdir()
+        self.register("--steward", "agent-5", project=inner)
+        rc, out, err = self.fold(self.project, "console-kit", agent="agent-5")
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_path_reaching_into_another_registered_project_is_locked_by_that_project(self):
+        # --root is registered on a console with NO steward; a project registered below it, on the
+        # steward's console, is reached by --ledger alone. Catches: a lock keyed to --root only.
+        free = self.dir / "free-state"
+        free.mkdir()
+        rc, out, err = self.run_py(KIT / "agent.py", "--state", str(free), "register", "--project", str(self.project))
+        self.assertEqual(rc, 0, out + err)
+        inner = self.project / "inner"
+        inner.mkdir()
+        self.register("--steward", "agent-5", project=inner)
+        rc, out, err = self.fold(self.project, "work", agent="agent-6")        # nothing under inner: allowed
+        self.assertEqual(rc, 0, out + err)
+        (self.project / "work" / "locked").mkdir(parents=True, exist_ok=True)
+        rc, _, err = self.run_py(KIT / "fold.py", "--root", str(self.project), "fold", "--locked", "work/locked",
+                                 "--ledger", "inner/folded.txt", "--adapter", "work/adapter.py", "--dry-run",
+                                 agent="agent-6")
+        self.assertEqual(rc, 1, err)
+        self.assertIn("steward, agent-5", err)
+        self.assertIn("inner", err)
+
+    def test_the_hook_and_the_kit_walk_to_the_same_project(self):
+        # The hook may import nothing from the kit, so it carries its own walk. Catches: the two drifting.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ask_guard", QuestionHookTests.HOOK)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        inner = self.project / "a" / "inner"
+        inner.mkdir(parents=True)
+        link = self.dir / "link"
+        link.symlink_to(inner)
+        found = {os.path.realpath(self.project): {"state": str(self.state), "kit": str(KIT)},
+                 os.path.realpath(inner): {"state": str(self.dir / "s2"), "kit": str(KIT), "steward": "agent-5"}}
+        for t in (self.project, self.project / "a", inner, inner / "x" / "y", link / "z", self.dir, Path("/")):
+            with self.subTest(target=str(t)):
+                kit = R.enclosing(t, found)
+                self.assertEqual(guard._registered(t, found), kit[1] if kit else None)
+
+
 class QuestionHookTests(_Steward):
     """The PreToolUse hook: AskUserQuestion is the steward's; every other session posts with `agent.py ask`."""
 
