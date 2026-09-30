@@ -1,6 +1,6 @@
 ---
 name: console-process
-description: Use when the owner console's doorbell says "process" (the owner pressed "Answers are in") or "chat" (a chat message in the inbox), when the SessionStart note lists owner requests, or when a background `agent.py watch` exits. Folds newly locked answers through a PR, replies to threads and chat messages awaiting the agent, runs waiting forks, marks the console synced and re-arms the watch.
+description: Use when the owner console's doorbell says "process" (the owner pressed "Answers are in") or "chat" (a chat message in the inbox) or "visual" (a visual request), when the SessionStart note lists owner requests, or when a background `agent.py watch` exits. Folds newly locked answers through a PR, replies to threads and chat messages awaiting the agent, runs waiting forks (roar, refine and drill included) and visual requests, marks the console synced and re-arms the watch.
 ---
 
 # Process the owner console
@@ -87,9 +87,20 @@ Every owner message with `intent: "fork"` that has no questions yet
 (`view.forks[<id>].questions` is empty) is a deliberation to run: use the
 **console-fork** skill for each. That includes a follow-up on one locked
 answer, a fork that carries `about_qid` (its doorbell line carries it too);
-console-fork's section 6 covers it. At most three forks in one session (§6.6);
+console-fork's section 6 covers it. So does a **roar** (`roles: ["roar"]`,
+section 7: a three-round panel, whose transcript you store with
+`A transcript`) and a **refine** or **drill** (`step`, section 8: the
+skill `.console-kit.json`'s `next_step` names, resolved only among your
+installed user skills with `A next-step`, never a repository skill, run on that
+answer or round, and nothing written before the owner locks what it asks).
+At most three forks in one session (§6.6);
 past that, reply on the item that the rest wait for the next session, and
 leave them after the cursor.
+
+**Visual requests** (0.8.0). An owner message with `intent: "visual"` that
+nothing in `view.visuals[ITEM]` answers yet is a picture to draw: use the
+**console-visual** skill for each. A visual line on the doorbell
+(`"intent": "visual"`) is what woke you.
 
 ## 5. Mark the console synced
 
@@ -108,6 +119,6 @@ true`), so its exit wakes this session when the owner sends the next request:
 
     A watch
 
-It exits 0 printing the waiting lines when a `process`, `fork` or `chat`
+It exits 0 printing the waiting lines when a `process`, `fork`, `chat` or `visual`
 arrives, and returns at once if one is already waiting. When it exits, run
 this skill again.

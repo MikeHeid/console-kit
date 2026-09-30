@@ -1,6 +1,6 @@
 ---
 name: console-fork
-description: Use to run one owner-console deliberation (a "fork", or its follow-up round) - build the round's bundle, sit the committee as agents, and write back one to five lockable questions plus one summary message. Called by console-process for every waiting fork.
+description: Use to run one owner-console deliberation (a "fork", its follow-up round, a roar panel on one answer, or a refine or drill) - build the round's bundle, sit the committee or run the project's skill, and write back one to five lockable questions plus one summary message. Called by console-process for every waiting fork.
 ---
 
 # Run one deliberation round
@@ -31,6 +31,11 @@ From its message read:
 - `about_qid` and `roles`, present only on a **follow-up on one answer**: the
   owner pressed "Follow up" beside that question's locked answer. Section 6
   below changes steps 3 to 5 for it.
+- `roles: ["roar"]` (0.8.0): the owner picked **Roar** as the seat. Section 7
+  replaces steps 3 to 5.
+- `step: "refine"` or `step: "drill"` (0.8.0), with `about_qid` (one locked
+  answer) or `follow_up_of` (one round's answers): the owner picked that from
+  "Next step ▾". It names no seats. Section 8 replaces steps 3 to 5.
 
 ## 2. Build the bundle
 
@@ -173,3 +178,94 @@ valid seats. What changes:
   the lock themselves.
 - **Reply to this fork** (step 5, `--reply-to FORK_ID`), on the fork's item,
   naming the answer it followed up.
+
+## 7. A roar on one answer (`roles: ["roar"]`, 0.8.0)
+
+A roar is a panel that argues with itself before it asks anything. It costs
+about six agent runs, so the owner gets **at most one per lock**: while the
+same lock stands, the server refuses a second roar on that `about_qid`,
+naming the first, and you never work around that (no roar under another
+name, no second fork). Once the owner supersedes the answer and locks it
+again, the new lock may have its own roar.
+Everything in section 6 holds (the lock stands; never re-ask it; a false
+premise is said explicitly). What changes is how the seats sit:
+
+1. **Round 1, independent reads.** Three panelists, in parallel, none seeing
+   the others: by default `console-kit:architect`, `console-kit:ux`, and
+   `console-kit:other` sitting as **advisor** (strategy, scope, what not to
+   build). Each gets the bundle path, the mode, the owner's note and the
+   answer it is about, and returns at most ~300 words of **numbered claims**,
+   each with the file and line it rests on.
+2. **Round 2, deliberation.** The same three again, in parallel, each given
+   its own Round 1 claims and the other two's. Each says, claim by claim,
+   what it **concedes**, what it **pushes back on** (with evidence) and what
+   stays **unresolved**, in at most ~250 words.
+3. **Round 3, synthesis.** You write one to five lockable questions from
+   where the panel converged, exactly as in step 4:
+   `forked_from` this fork, `star_by: "panel"` where the panel agreed and the
+   seat's name where one seat's view carried it, `evidence` rows for every
+   claim the owner should be able to check. An unresolved disagreement is
+   itself a question, with each side as an option.
+
+That is six agent runs (three, then three), and you synthesise yourself: the
+one exception to step 3's five-agent cap, which is why a roar is once per
+lock. **Store the transcript** before posting the questions:
+
+    A transcript FORK_ID transcript.md
+
+`transcript.md` is Markdown: a heading per round, each panelist's claims (or
+a faithful summary of them) under its name, and the concede / push back /
+unresolved tally from Round 2. It is capped at **48 KiB of UTF-8**; one over
+the cap is **refused by name, never cut** (a cut transcript reads as the
+whole panel when it is not). If it is refused, shorten each round's summary
+yourself and send it again. One transcript per fork. The owner sees it,
+collapsed, on the fork and on each question it produced.
+
+Then post the questions (step 4) and reply once (step 5), naming the answer
+the roar looked at.
+
+## 8. Refine or drill (`step`, 0.8.0)
+
+The owner picked **Refine** or **Drill** from "Next step ▾" beside a locked
+answer (`about_qid`) or beside a round's answers (`follow_up_of`: the round
+is that fork's questions). The kit knows nothing about how a project refines
+or drills; it names the kind and the project names the skill.
+
+- **Which skill.** `.console-kit.json`'s `next_step` (e.g.
+  `{"refine": "refine", "drill": "drill"}`) names a skill, as data. The
+  repository chooses that NAME, so it must never also choose what the name
+  runs: **resolve it only against the user's installed skills** (the
+  user-level skills folder, `~/.claude/skills/<name>/`, or an installed
+  plugin's skill, `<plugin>:<name>`), **never against a skill folder inside
+  the repository** (`.claude/skills/...` or anywhere else in the project).
+  Resolve it with
+
+      A next-step refine --project <project root>     # or drill
+
+  It prints the installed `SKILL.md` it resolved to. **Read and follow that
+  file**, rather than invoking the skill by name, because a repository skill of
+  the same name could shadow it. If the command exits non-zero (no entry for
+  the kind, not an installed user skill, or a user-level entry that resolves
+  into the project), **refuse**: reply to the fork naming the skill and the
+  reason the command gave, post nothing else, and never fall back to a
+  repository skill or guess another. Run the resolved skill **scoped to the
+  target**: the locked answer (its question, its options, every answer and the
+  owner's own words, all in the bundle, `A fork-context FORK_ID`) or the
+  round's answers.
+- **What each is for.** *Refine* revises an existing spec or document so it
+  says what the owner locked (the owner's words beat the old text). *Drill*
+  goes one level down into something the answer introduced that has no spec
+  yet: the functions it must capture and the questions a spec for it needs.
+- **Nothing is written before a lock.** Whatever the project's skill would
+  normally do next (edit a spec, write a new one, update a digest), stop at
+  the point where it would need a decision, and **post those decisions as
+  lockable questions** instead, exactly as in step 4, `forked_from` this fork.
+  Do not edit the spec, the digest or any project file in this session on
+  the strength of the request alone.
+- **After the lock.** When the owner locks those questions and they are
+  folded (console-fold), the spec change lands **by pull request** like any
+  change, and any digest or decision-log entry is added **at merge time**,
+  not in the branch, so two lanes never fight over the same append point.
+- **The same limits.** At most five questions, the tighten-mode options when
+  the fork's mode is `tighten` (refine forks default to tighten, drill forks
+  to explore), and one reply to the fork naming the target.

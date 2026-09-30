@@ -128,6 +128,61 @@ request is sent.
 4. **429 "at most 6 chat messages a minute"** (or 60 an hour): wait and send
    again. What you typed stays in the box.
 
+## The server will not start: `.console-kit.json` (0.8.0)
+
+The journal says `console: .console-kit.json: specs_dir ...` (or
+`visuals_dir`, `next_step`). The server refuses a folder that is not a plain
+relative path at least one folder deep, one that climbs out or resolves
+outside the project through a symlink, a `visuals_dir` inside `specs_dir`, and
+a `next_step` that is not `{"refine"|"drill": "<skill name>"}`. Fix the key,
+then `systemctl --user restart <name>-console.service`.
+
+## A visual does not show (0.8.0)
+
+- **"Not shown: ... changed since the agent stored it"** or a blank frame with
+  a 409 in the network log: someone edited the file under `visuals_dir` after
+  it was stored, or swapped it for a symlink. The console shows a visual only
+  while its sha256 matches the store. Restore the file from the pull request
+  that landed it, or ask for the visual again.
+- **"the file is not there any more"**: the server's checkout lost it (a
+  checkout, a clean). Restore it from its pull request.
+- **An HTML mock shows unstyled or with gaps**: it loads something from
+  outside itself. The mock's policy allows only inline styles and `data:`
+  images; the agent should inline them (console-visual skill, step 2).
+- **A script or form in a mock does nothing**: by design. A mock runs in
+  `<iframe sandbox="">` and is served with a `sandbox` Content-Security-Policy,
+  so no script runs, even if its URL is opened in its own tab.
+- **`agent.py visual` says "this project sets no visuals_dir"**: add
+  `visuals_dir` to `.console-kit.json` and restart the server.
+- **"INDEX.md was not written by the kit"**: a hand-written `INDEX.md` sits in
+  `visuals_dir`. The visual was still stored; move that file aside and the next
+  visual regenerates the index.
+
+## Roar is refused (0.8.0)
+
+**"LANE/Q3's lock <id> already had its roar: fork <id>"**: by design, a roar
+runs at most once per lock (each costs about six agent runs). Follow up with
+chosen seats instead, or supersede the answer and lock it again: the new lock
+may have its own roar. A transcript
+is refused **"transcript is N bytes; the limit is 49152. It is refused, not
+truncated"**: the agent shortens its round summaries and sends it again.
+
+## The suggested-next-step chips look wrong (0.8.0)
+
+The chips are rules, not judgement, and each says its reason (hover, or a
+screen reader reads it). `console_kit/tags.py` holds the exact rules.
+
+- **No refine chip ever**: no `specs_dir` in `.console-kit.json`, or the locked
+  question cites no file under it, or the spec's last commit (or, uncommitted,
+  its mtime) is after the lock. In a checkout where specs are only ever edited
+  and never committed, every edit counts by mtime.
+- **A drill chip for something a spec covers**: the term is spelled
+  differently in the spec (a plural, a hyphen) or is a proper name. It is a
+  suggestion; ignore it.
+- **No chips at all, and the server log says `console tags: ...`**: the tags
+  failed for that page view (a spec caught mid-write, git slow); the page
+  still works and the next view tries again.
+
 ## An answer shows stale
 
     python3 <vendored>/agent.py --state <state> check

@@ -2234,5 +2234,607 @@ class TreeReadLimitTests(Tmp):
         self.assertIn("MiB", errs[0])
 
 
+# -- 0.8.0: roar as a seat, refine/drill, suggested next steps, visuals -------------------
+
+def roar(qid="LANE.1/Q1", item="LANE.1", roles=("roar",), **kw):
+    return fork(item=item, about_qid=qid, roles=list(roles), **kw)
+
+
+def step(kind="refine", qid="LANE.1/Q1", item="LANE.1", **kw):
+    return fork(item=item, about_qid=qid, step=kind, **kw)
+
+
+def transcript(fork_id, text="# Round 1\nreads\n# Round 2\nchallenges\n# Round 3\nquestions\n", **kw):
+    r = {"type": "transcript", "schemaVersion": 1, "fork": fork_id, "text": text, "by": "agent", "nonce": nonce()}
+    r.update(kw)
+    return r
+
+
+def visual(request_id, item="LANE.1", fmt="html", **kw):
+    ext = S.VISUAL_FORMATS.get(fmt, ".html")
+    r = {"type": "visual", "schemaVersion": 1, "item": item, "request": request_id, "format": fmt,
+         "title": "The grid at phone width", "text": "One column per zone.",
+         "path": f"visuals/{item}/abcd1234-0123456789ab{ext}", "doc_path": f"visuals/{item}/abcd1234-0123456789ab.md",
+         "sha256": "0" * 64, "bytes": 10, "by": "agent", "nonce": nonce()}
+    r.update(kw)
+    return r
+
+
+def refused_with(test, rec, pattern):
+    errs = S.validate(rec)
+    test.assertTrue(any(re.search(pattern, e) for e in errs), errs)
+
+
+class Phase4SchemaTests(unittest.TestCase):
+    def test_roar_is_one_seat_alone_on_one_answer(self):
+        # Catches: roar smuggled in beside other seats (a panel AND seats: more agents than the cap
+        # allows) and a roar on a whole item or round (the owner ruled it is per question).
+        self.assertEqual(S.validate(roar()), [])
+        refused_with(self, roar(roles=["roar", "ux"]), "alone")
+        refused_with(self, follow_up("f" * 24, roles=["roar"]), "needs about_qid")
+        refused_with(self, fork(roles=["roar"]), "roles belong to a follow-up")
+
+    def test_refine_and_drill_are_forks_that_call_no_seats(self):
+        # Catches: a step that also calls seats (two mechanisms in one request), a step with no
+        # target (it would run on nothing the owner locked), and a step on a non-fork message.
+        for kind in S.STEPS:
+            self.assertEqual(S.validate(step(kind)), [])
+            self.assertEqual(S.validate(fork(step=kind, follow_up_of="f" * 24)), [])
+        refused_with(self, step("refine", roles=["ux"]), "leave roles out")
+        refused_with(self, fork(step="drill"), "names what it works on")
+        refused_with(self, step("rewrite"), "not one of refine, drill")
+        refused_with(self, message(step="refine"), "belong\\(s\\) to a fork")
+
+    def test_a_visual_request_is_the_owners_alone(self):
+        self.assertEqual(S.validate(message(intent="visual", text="draw the grid")), [])
+        refused_with(self, message(by="agent", intent="visual"), "only the owner")
+
+    def test_a_transcript_over_the_cap_is_refused_by_name_never_cut(self):
+        # Catches: a cap counted in characters (multi-byte text slips past a byte budget) and a
+        # "fix" that truncates to fit (a cut transcript reads as the whole panel).
+        ok = "é" * (S.MAX_TRANSCRIPT // 2)          # exactly the limit, in bytes
+        self.assertEqual(len(ok.encode()), S.MAX_TRANSCRIPT)
+        self.assertEqual(S.validate(transcript("f" * 24, text=ok)), [])
+        over = ok + "é"                            # one character, two bytes, over
+        self.assertLess(len(over), S.MAX_TRANSCRIPT)  # fewer characters than the limit...
+        errs = S.validate(transcript("f" * 24, text=over))
+        self.assertTrue(any(f"{S.MAX_TRANSCRIPT + 2} bytes" in e and "not truncated" in e for e in errs), errs)
+        refused_with(self, transcript("f" * 24, by="owner"), "only")
+        refused_with(self, transcript("nope"), "roar fork")
+
+    def test_a_visuals_path_is_jailed_like_evidence(self):
+        # Catches: a stored path that climbs out, names a secret, or claims one format with another's file.
+        self.assertEqual(S.validate(visual("f" * 24)), [])
+        refused_with(self, visual("f" * 24, path="visuals/../etc/x.html"), "plain characters")  # no part starts with "."
+        refused_with(self, visual("f" * 24, path="/abs/x.html"), "relative path")
+        refused_with(self, visual("f" * 24, path="x.html"), "at least one folder")
+        refused_with(self, visual("f" * 24, path="visuals/.ssh/x.html"), "plain characters")
+        refused_with(self, visual("f" * 24, path="visuals/LANE.1/id_rsa.html"), "an SSH key")
+        refused_with(self, visual("f" * 24, fmt="mermaid", path="visuals/LANE.1/a.html"), "ends in .mmd")
+        refused_with(self, visual("f" * 24, fmt="svg"), "not one of mermaid, html")
+        refused_with(self, visual("f" * 24, bytes=True), "whole number")
+        refused_with(self, visual("f" * 24, bytes=S.MAX_VISUAL + 1), "whole number")
+        refused_with(self, visual("f" * 24, doc_path="visuals/LANE.1/a.txt"), "ends in .md")
+
+
+class Phase4StoreTests(Tmp):
+    def locked(self, st, qid="LANE.1/Q1"):
+        st.append(question(qid))
+        st.append(lock(st.append(answer(qid))))
+
+    def test_roar_is_once_per_lock_and_a_new_lock_may_roar_again(self):
+        # Owner ruling "Once per lock ★". Catches: no limit (six agent runs, again, on one lock),
+        # a limit keyed on the question (a superseded and re-locked answer could never roar
+        # again), one keyed on the fork's item (another question could never roar), a roar
+        # before a lock, and a roar allowed while the new answer is not yet locked.
+        st = self.store()
+        st.append(question("LANE.1/Q1"))
+        with self.assertRaisesRegex(StoreError, "no locked answer"):
+            st.append(roar())
+        a1 = st.append(answer())
+        lk1 = st.append(lock(a1))
+        first = st.append(roar())
+        with self.assertRaises(StoreError) as cm:
+            st.append(roar(text="again"))
+        self.assertIn(first["id"], str(cm.exception))
+        self.assertIn(lk1["id"], str(cm.exception))
+        self.assertIn("at most once per lock", str(cm.exception))
+        a2 = st.append(answer(picks=["a"], supersedes=a1["id"], reason="changed my mind"))
+        with self.assertRaisesRegex(StoreError, "no locked answer"):
+            st.append(roar(text="before the new lock"))
+        lk2 = st.append(lock(a2))
+        second = st.append(roar(text="the new lock's roar"))    # allowed: a fresh lock
+        self.assertEqual(st.roar_of("LANE.1/Q1", lk1["id"])["id"], first["id"])
+        self.assertEqual(st.roar_of("LANE.1/Q1", lk2["id"])["id"], second["id"])
+        with self.assertRaises(StoreError) as cm:
+            st.append(roar(text="third"))
+        self.assertIn(second["id"], str(cm.exception))
+        self.assertIn(lk2["id"], str(cm.exception))
+        self.locked(st, "LANE.1/Q2")
+        st.append(roar("LANE.1/Q2"))                     # another question keeps its own roar
+        st.append(about("LANE.1/Q1", roles=["ux"]))      # other seats still follow up on Q1
+        # Reloaded from disk, the same rule holds: the lock a fork saw is derived, not stored.
+        with self.assertRaisesRegex(StoreError, second["id"]):
+            self.store().append(roar(text="after reload"))
+
+    def test_a_transcript_belongs_to_one_roar_fork(self):
+        # Catches: a transcript attached to any fork (it would read as a panel that never ran)
+        # and a second transcript replacing the first.
+        st = self.store()
+        self.locked(st)
+        plain = st.append(about(roles=["ux"]))
+        with self.assertRaisesRegex(StoreError, "not a roar fork"):
+            st.append(transcript(plain["id"]))
+        r = st.append(roar())
+        t = st.append(transcript(r["id"]))
+        with self.assertRaisesRegex(StoreError, t["id"]):
+            st.append(transcript(r["id"], text="another"))
+        v = V.build(st, ITEMS, lambda c: True)
+        self.assertEqual(v["forks"][r["id"]]["transcript"], t["id"])
+        self.assertEqual(v["transcripts"][r["id"]]["text"], t["text"])
+
+    def test_a_step_is_checked_like_a_follow_up(self):
+        # Catches: a refine or drill accepted on an unlocked answer ("neither writes before a lock")
+        # or on a question outside the fork's item.
+        st = self.store()
+        st.append(question("LANE.1/Q1"))
+        with self.assertRaisesRegex(StoreError, "no locked answer"):
+            st.append(step("drill"))
+        st.append(lock(st.append(answer())))
+        st.append(step("drill"))
+        with self.assertRaisesRegex(StoreError, "outside this fork's scope"):
+            st.append(step("refine", item="LANE.1.a"))
+
+    def test_a_visual_answers_a_visual_request_on_its_item(self):
+        # Catches: a visual pinned to any message, to another item's request, or without limit.
+        st = self.store()
+        note = st.append(message(text="plain note"))
+        with self.assertRaisesRegex(StoreError, "not an owner visual request"):
+            st.append(visual(note["id"]))
+        req = st.append(message(intent="visual", text="draw it"))
+        with self.assertRaisesRegex(StoreError, "same item"):
+            st.append(visual(req["id"], item="LANE", path="visuals/LANE/abcd1234-0123456789ab.html",
+                             doc_path="visuals/LANE/abcd1234-0123456789ab.md"))
+        for n in range(S.MAX_VISUALS_PER_REQUEST):
+            st.append(visual(req["id"], sha256=f"{n:064x}"))
+        with self.assertRaisesRegex(StoreError, "the limit is"):
+            st.append(visual(req["id"], sha256="f" * 64))
+
+    def test_a_visual_is_the_agent_answering_its_thread(self):
+        # Catches: a thread left "awaiting agent" after the agent drew what was asked.
+        st = self.store()
+        req = st.append(message(intent="visual", text="draw it"))
+        self.assertEqual(V.build(st, ITEMS, lambda c: True)["awaiting_agent"], ["LANE.1"])
+        st.append(visual(req["id"]))
+        v = V.build(st, ITEMS, lambda c: True)
+        self.assertEqual(v["awaiting_agent"], [])
+        self.assertEqual([x["request"] for x in v["visuals"]["LANE.1"]], [req["id"]])
+        kinds = [e["kind"] for e in V.feed(st, ITEMS)["events"]]
+        self.assertEqual(kinds, ["visual", "visual"])
+
+
+class OlderKit070RefusesTests(Tmp):
+    """0.8.0 adds two kinds and three message shapes, and a 0.7.0 kit refuses each BY NAME."""
+
+    def old_kit(self) -> Path:
+        dest = self.dir / "kit070"
+        dest.mkdir()
+        try:
+            tar = subprocess.run(["git", "archive", "v0.7.0", "plugin/kit/console_kit"], cwd=HERE,
+                                 capture_output=True, timeout=30, check=True).stdout
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("the v0.7.0 tag is not in this checkout")
+        subprocess.run(["tar", "-x", "-C", str(dest)], input=tar, check=True, capture_output=True)
+        return dest / "plugin/kit"
+
+    def test_a_070_kit_refuses_a_080_store_naming_what_it_cannot_read(self):
+        # Catches: a new record kind or field a rollback would read as something else, or drop.
+        # The store is written by THIS kit, then opened by the real v0.7.0 package in its own
+        # process, so nothing of 0.8.0 is on its path.
+        kit = self.old_kit()
+        cases = {}
+        st = self.store()
+        st.append(question("LANE.1/Q1"))
+        st.append(lock(st.append(answer())))
+        cases["intent 'visual'"] = [message(intent="visual", text="draw it")]
+        cases["'roar'"] = [roar()]
+        cases["unknown field(s) step"] = [step("refine")]
+        base = self.path.read_text()
+        for name, recs in cases.items():
+            with self.subTest(shape=name):
+                self.path.write_text(base)
+                s2 = Store(self.path, known_items=ITEMS, clock=self.clock)
+                for r in recs:
+                    s2.append(r)
+                self.assertIn(name, self.open_with(kit))
+        # The two new kinds, each after the fork or request it needs.
+        self.path.write_text(base)
+        s3 = Store(self.path, known_items=ITEMS, clock=self.clock)
+        req = s3.append(message(intent="visual", text="draw it"))
+        s3.append(visual(req["id"]))
+        out = self.open_with(kit)
+        self.assertIn("intent 'visual'", out)             # the first line it cannot read is named
+        lines = self.path.read_text().splitlines()
+        self.path.write_text(base + lines[-1] + "\n")      # the visual alone, seq renumbered below
+        recs = [json.loads(x) for x in self.path.read_text().splitlines()]
+        recs[-1]["seq"] = len(recs)
+        self.path.write_text("".join(json.dumps(r, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n"
+                                     for r in recs))
+        self.assertIn("unknown record type 'visual'", self.open_with(kit))
+        self.path.write_text(base)
+        s4 = Store(self.path, known_items=ITEMS, clock=self.clock)
+        r = s4.append(roar())
+        s4.append(transcript(r["id"]))
+        self.assertIn("'roar'", self.open_with(kit))
+
+    def test_the_070_schema_names_each_new_kind(self):
+        # The transcript's own refusal, which the store test reaches only after the roar.
+        try:
+            src = subprocess.run(["git", "show", "v0.7.0:plugin/kit/console_kit/schema.py"], cwd=HERE,
+                                 capture_output=True, text=True, timeout=20, check=True).stdout
+        except (OSError, subprocess.SubprocessError):
+            self.skipTest("the v0.7.0 tag is not in this checkout")
+        import types
+        old = types.ModuleType("schema_070")
+        exec(compile(src, "schema_070", "exec"), old.__dict__)  # noqa: S102 - our own tagged release
+        self.assertTrue(any("unknown record type 'transcript'" in e for e in old.validate(transcript("f" * 24))))
+        self.assertTrue(any("unknown record type 'visual'" in e for e in old.validate(visual("f" * 24))))
+        self.assertTrue(any("'roar'" in e for e in old.validate(roar())))
+        self.assertTrue(any("unknown field(s) step" in e for e in old.validate(step())))
+        self.assertTrue(any("intent 'visual'" in e for e in old.validate(message(intent="visual"))))
+
+    def open_with(self, kit: Path) -> str:
+        code = ("import sys; sys.path.insert(0, sys.argv[1]);\n"
+                "from console_kit.store import Store, StoreError\n"
+                "try:\n    Store(__import__('pathlib').Path(sys.argv[2]))\n    print('OPENED')\n"
+                "except StoreError as e:\n    print(e)\n")
+        r = subprocess.run([sys.executable, "-c", code, str(kit), str(self.path)], capture_output=True, text=True,
+                           timeout=30)
+        self.assertNotIn("OPENED", r.stdout, "a 0.7.0 kit opened a store it cannot read")
+        return r.stdout + r.stderr
+
+
+class TermHeuristicTests(unittest.TestCase):
+    """The drill rule's term finder, exactly as documented in tags.py."""
+
+    def test_any_backtick_or_capital_minus_the_stoplist(self):
+        # Owner ruling "Any backtick or Capital ★". Catches: single Capitalised words ignored
+        # (the old two-word rule), a sentence-start "The"/"Use" read as a term, and a backticked
+        # span counted twice (once whole, once for a capital inside it).
+        from console_kit import tags as T
+        got = T.terms("Use the `ZoneMaster` and a Session Block. The Grid stays. We Keep Going Places. "
+                      "lower case idea, API Key, `ab`, Option B, `the Goal`")
+        # "Use", "The", "We", "Keep", "Option" are in STOPLIST; `ab` is too short; "API" and "B"
+        # are not Capitalised words; a lower-case idea is never seen.
+        self.assertEqual(got, ["ZoneMaster", "the Goal", "Session Block", "Grid", "Going Places", "Key"])
+        self.assertEqual(T.terms("The Refine and Drill tags need work"), ["Refine", "Drill"])
+        self.assertEqual(T.terms("make it a Goal"), ["Goal"])
+        self.assertEqual(T.terms("The. We. If. Yes, Please."), [])
+        self.assertLessEqual(len(T.terms(" ".join(f"`term{n:02d}`" for n in range(30)))), T.MAX_TERMS)
+
+
+class TagTests(Tmp):
+    """0.8.0 rule-based tags: refine, drill and deliberate, each with its reason."""
+
+    SPECS = "specs"
+
+    def setUp(self):
+        super().setUp()
+        from console_kit import tags as T
+        self.T = T
+        T._INDEXES.clear()
+        T._GITS.clear()
+        (self.dir / self.SPECS).mkdir()
+        (self.dir / self.SPECS / "grid.md").write_text("# Grid\n\nA session block holds the cells.\nLANE.1.a\n")
+        (self.dir / self.SPECS / "column-chain.md").write_text("# Columns\n")
+
+    def clock(self):
+        self.tick += 1
+        return f"2026-09-28T00:00:{self.tick:02d}Z"
+
+    def tags(self, st, specs_dir=SPECS, items=ITEMS):
+        v = V.build(st, items, V.make_evaluator(self.dir, {k: d.get("status") for k, d in items.items()}))
+        return self.T.compute(st, v, items, self.dir, specs_dir)
+
+    def steps(self, out, qid):
+        return {t["step"]: t["reason"] for t in out["questions"].get(qid, [])}
+
+    def test_refine_when_a_cited_spec_was_not_edited_since_the_lock_outside_git(self):
+        # Catches: a rule that ignores the edit time (every spec-citing lock tagged forever) and
+        # one that fires on an unlocked answer or on a file outside specs_dir.
+        spec = self.dir / self.SPECS / "grid.md"
+        os.utime(spec, (1_700_000_000, 1_700_000_000))            # 2023: before the lock
+        st = self.store()
+        st.append(question("LANE.1/Q1", source="specs/grid.md:3"))
+        st.append(question("LANE.1/Q2", source="docs/other.md:1",
+                           valid_if=[{"kind": "excerpt", "path": "specs/grid.md", "text": "A session block holds"}]))
+        st.append(question("LANE.1/Q3", source="docs/other.md:1"))
+        a = st.append(answer("LANE.1/Q1"))
+        st.append(answer("LANE.1/Q3"))
+        self.assertNotIn("refine", self.steps(self.tags(st), "LANE.1/Q1"))   # answered, not locked
+        st.append(lock(a))
+        st.append(lock(st.append(answer("LANE.1/Q2"))))
+        out = self.tags(st)
+        self.assertIn("cites specs/grid.md, not edited since you locked this", self.steps(out, "LANE.1/Q1")["refine"])
+        self.assertIn("refine", self.steps(out, "LANE.1/Q2"))                # a valid_if path counts too
+        self.assertNotIn("refine", self.steps(out, "LANE.1/Q3"))
+        self.assertEqual(out["basis"], ["mtime"])
+        os.utime(spec, (1_900_000_000, 1_900_000_000))            # 2030: edited after the lock
+        self.assertNotIn("refine", self.steps(self.tags(st), "LANE.1/Q1"))
+        self.assertNotIn("refine", self.steps(self.tags(st, specs_dir=None), "LANE.1/Q2"))
+
+    def test_refine_reads_the_last_commit_in_git_and_a_dirty_file_by_mtime(self):
+        # Catches: an mtime-only rule in git (a checkout rewrites every mtime to "now", so no spec
+        # would ever read as unedited) and a commit-only rule (an uncommitted edit is an edit).
+        git(self.dir, "init", "-q")
+        env = {**os.environ, "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z"}
+        subprocess.run(["git", "-c", "user.email=t@e", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+                        "add", "-A"], cwd=self.dir, check=True, env=env)
+        subprocess.run(["git", "-c", "user.email=t@e", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+                        "commit", "-qm", "specs"], cwd=self.dir, check=True, env=env)
+        os.utime(self.dir / self.SPECS / "grid.md", (1_900_000_000, 1_900_000_000))  # a "fresh checkout"
+        st = self.store()
+        st.append(question("LANE.1/Q1", source="specs/grid.md:3"))
+        st.append(lock(st.append(answer())))
+        out = self.tags(st)
+        self.assertIn("last commit 2026-01-01", self.steps(out, "LANE.1/Q1")["refine"])
+        self.assertEqual(out["basis"], ["git"])
+        (self.dir / self.SPECS / "grid.md").write_text("# Grid\n\nrevised\n")   # uncommitted, mtime now
+        self.assertNotIn("refine", self.steps(self.tags(st), "LANE.1/Q1"))
+        env2 = {**env, "GIT_AUTHOR_DATE": "2026-09-29T00:00:00Z", "GIT_COMMITTER_DATE": "2026-09-29T00:00:00Z"}
+        for args in (["add", "-A"], ["commit", "-qm", "revise"]):
+            subprocess.run(["git", "-c", "user.email=t@e", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+                            *args], cwd=self.dir, check=True, env=env2)
+        os.utime(self.dir / self.SPECS / "grid.md", (1_000_000_000, 1_000_000_000))  # mtime lies old
+        self.assertNotIn("refine", self.steps(self.tags(st), "LANE.1/Q1"))       # the commit is after the lock
+
+    def drill_reason(self, own_text, items=ITEMS):
+        st = Store(self.dir / f"d{self.tick}.jsonl", known_items=items, clock=self.clock)
+        st.append(question("LANE.1/Q1"))
+        st.append(answer(own_text=own_text))
+        return self.steps(self.tags(st, items=items), "LANE.1/Q1").get("drill")
+
+    def test_single_capitalised_words_flag_unless_a_spec_or_title_names_them(self):
+        # Owner ruling "Any backtick or Capital ★", on realistic owner text. Catches: "The"
+        # flagged, a single new word missed, a word a spec carries flagged (case-insensitively),
+        # and a word the register's own item titles carry flagged.
+        reason = self.drill_reason("The Refine and Drill tags need work")
+        self.assertIn("`Refine`", reason)
+        self.assertIn("`Drill`", reason)
+        self.assertNotIn("`The`", reason)
+        self.assertIn("`Goal`", self.drill_reason("make it a Goal"))
+        self.assertIsNone(self.drill_reason("keep the Session and the Cells"))   # grid.md: "session", "cells"
+        titled = {**ITEMS, "LANE.1": {**ITEMS["LANE.1"], "title": "Goal tracking"}}
+        self.assertIsNone(self.drill_reason("make it a Goal", items=titled))
+
+    def test_drill_names_the_owners_new_terms_and_a_proposed_item_without_a_spec(self):
+        # Catches: a case-sensitive or name-blind search (terms the specs do carry read as new),
+        # a rule that runs with no specs to compare against, and a proposed item a spec names.
+        st = self.store()
+        st.append(question("LANE.1/Q1"))
+        st.append(answer(own_text="Use the `ZoneMaster` beside the Session Block and a Column Chain."))
+        out = self.tags(st)
+        reason = self.steps(out, "LANE.1/Q1")["drill"]
+        self.assertIn("`ZoneMaster`", reason)
+        self.assertNotIn("Session Block", reason)    # in grid.md's text, lower-cased
+        self.assertNotIn("Column Chain", reason)     # in a spec's file name
+        self.assertNotIn("drill", self.steps(self.tags(st, specs_dir=None), "LANE.1/Q1"))
+        items = {**ITEMS, "LANE.2": {"title": "new", "parent": None, "status": "proposed"}}
+        st2 = Store(self.dir / "s2.jsonl", known_items=items, clock=self.clock)
+        st2.append(question("LANE.2/Q1"))
+        st2.append(question("LANE.1.a/Q1"))              # proposed, but grid.md names LANE.1.a
+        out2 = self.tags(st2, items=items)
+        self.assertIn("item LANE.2 is proposed", self.steps(out2, "LANE.2/Q1")["drill"])
+        self.assertNotIn("drill", self.steps(out2, "LANE.1.a/Q1"))
+        (self.dir / self.SPECS / "grid.md").unlink()
+        (self.dir / self.SPECS / "column-chain.md").unlink()
+        self.assertEqual(self.tags(st2, items=items)["questions"], {})   # no specs: no drill at all
+
+    def test_deliberate_when_stale_or_against_the_star_and_rounds_roll_up(self):
+        # Catches: a pick of the ★ tagged as against it, a stale answer with no tag, and a round
+        # chip that forgets which questions it speaks for.
+        (self.dir / "spec.md").write_text(SPEC)
+        st = self.store()
+        f = st.append(fork())
+        st.append(question("LANE.1/Q1", forked_from=f["id"], star_by="panel"))
+        st.append(question("LANE.1/Q2", forked_from=f["id"], star_by="panel", valid_if=[excerpt()]))
+        st.append(question("LANE.1/Q3", forked_from=f["id"], star_by="panel"))
+        st.append(answer("LANE.1/Q1", picks=["a"]))
+        st.append(lock(st.append(answer("LANE.1/Q2", picks=["b"]))))
+        st.append(answer("LANE.1/Q3", picks=["b"]))
+        (self.dir / "spec.md").write_text("changed\n")
+        out = self.tags(st)
+        self.assertIn("went against the ★ (Option B ★)", self.steps(out, "LANE.1/Q1")["deliberate"])
+        self.assertIn("stale: this no longer holds: `spec.md` still contains the text",
+                      self.steps(out, "LANE.1/Q2")["deliberate"])
+        self.assertNotIn("LANE.1/Q3", out["questions"])
+        [t] = out["forks"][f["id"]]
+        self.assertEqual((t["step"], t["qids"]), ("deliberate", ["LANE.1/Q1", "LANE.1/Q2"]))
+        self.assertTrue(t["reason"].startswith("LANE.1/Q1, LANE.1/Q2: "))
+
+
+class ProjectConfigTests(Tmp):
+    def load(self, doc):
+        from console_kit import projectcfg as PC
+        (self.dir / ".console-kit.json").write_text(json.dumps(doc))
+        return PC.load(self.dir)
+
+    def test_dirs_are_jailed_and_refused_by_name(self):
+        # Catches: a visuals_dir that writes outside the project, into .git, over the root's own
+        # files ("." would regenerate an INDEX.md at the top), or through a symlink.
+        from console_kit import projectcfg as PC
+        self.assertEqual(self.load({}).specs_dir, None)
+        good = self.load({"specs_dir": "architect/40-specs/", "visuals_dir": "architect/visuals",
+                          "next_step": {"refine": "refine", "drill": "drill"}})
+        self.assertEqual((good.specs_dir, good.visuals_dir), ("architect/40-specs", "architect/visuals"))
+        outside = self.dir.parent / (self.dir.name + "-out")
+        outside.mkdir()
+        self.addCleanup(lambda: __import__("shutil").rmtree(outside, ignore_errors=True))
+        (self.dir / "link").symlink_to(outside)
+        for bad, why in ((".", "plain characters"), ("../x", "plain characters"), ("/abs", "plain characters"),
+                         ("a/../b", "plain characters"), (".git/visuals", "plain characters"),
+                         ("link/v", "outside the project"), ("", "plain characters")):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(PC.ConfigError, re.escape(why)):
+                    self.load({"visuals_dir": bad})
+        with self.assertRaisesRegex(PC.ConfigError, "inside specs_dir"):
+            self.load({"specs_dir": "specs", "visuals_dir": "specs/visuals"})
+        with self.assertRaisesRegex(PC.ConfigError, "next_step"):
+            self.load({"next_step": {"refine": "rm -rf /"}})
+        with self.assertRaisesRegex(PC.ConfigError, "next_step"):
+            self.load({"next_step": {"deploy": "x"}})
+
+    def test_a_next_step_skill_resolves_only_among_installed_user_skills(self):
+        # Review MEDIUM: the repository names the skill, so it must not also supply it. Catches: a
+        # lookup that finds the repository's own .claude/skills/<name>, one that follows a user-level
+        # symlink back into the repository, and a CLI that says "ok" for a skill nobody installed.
+        from console_kit import projectcfg as PC
+        user = self.dir / "userconfig"
+        proj = self.dir / "proj"
+        (proj / ".claude/skills/refine").mkdir(parents=True)
+        (proj / ".claude/skills/refine/SKILL.md").write_text("repo-supplied: do something else\n")
+        (proj / ".console-kit.json").write_text(json.dumps({"next_step": {"refine": "refine", "drill": "tool:dig"}}))
+        with self.assertRaisesRegex(PC.ConfigError, "not an installed user skill"):
+            PC.resolve_skill("refine", proj, user)
+        (user / "skills/refine").mkdir(parents=True)
+        (user / "skills/refine/SKILL.md").write_text("the user's refine\n")
+        self.assertEqual(PC.resolve_skill("refine", proj, user), (user / "skills/refine/SKILL.md").resolve())
+        plug = user / "plugins/cache/market/tool/1.0.0/skills/dig"
+        plug.mkdir(parents=True)
+        (plug / "SKILL.md").write_text("the plugin's dig\n")
+        self.assertEqual(PC.resolve_skill("tool:dig", proj, user), (plug / "SKILL.md").resolve())
+        (user / "skills/sneaky").symlink_to(proj / ".claude/skills/refine")
+        with self.assertRaisesRegex(PC.ConfigError, "resolves into the project"):
+            PC.resolve_skill("sneaky", proj, user)
+        agent_py = str(KIT / "agent.py")
+        env = {**os.environ, "CLAUDE_CONFIG_DIR": str(user)}
+        ok = subprocess.run([sys.executable, agent_py, "--state", str(self.dir / "st"), "next-step", "refine",
+                             "--project", str(proj)], capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertEqual(json.loads(ok.stdout)["skill_md"], str((user / "skills/refine/SKILL.md").resolve()))
+        (user / "skills/refine/SKILL.md").unlink()
+        bad = subprocess.run([sys.executable, agent_py, "--state", str(self.dir / "st"), "next-step", "refine",
+                              "--project", str(proj)], capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("refused: next_step skill 'refine' is not an installed user skill", bad.stderr)
+        self.assertNotIn("repo-supplied", bad.stdout + bad.stderr)
+
+
+class RoarTraceTests(Tmp):
+    """Review LOW: a ruling from a roar traces back to its transcript; fold never exports the transcript itself."""
+
+    def test_a_roar_derived_ruling_names_its_fork_and_the_transcript_is_not_exported(self):
+        # Catches: an export that drops forked_from (the ruling could not be traced to its panel),
+        # a starter adapter that never shows it, and an export that folds a transcript or a
+        # visual as if it were a ruling.
+        import importlib.util
+        st = self.store()
+        st.append(question())
+        st.append(lock(st.append(answer())))
+        r = st.append(roar())
+        t = st.append(transcript(r["id"]))
+        st.append(question("LANE.1/Q2", forked_from=r["id"], star_by="panel"))
+        st.append(lock(st.append(answer("LANE.1/Q2"))))
+        req = st.append(message(intent="visual", text="draw it"))
+        st.append(visual(req["id"]))
+        files = F.export(st)
+        self.assertEqual(sorted(files), ["LANE.1__Q1.json", "LANE.1__Q2.json"])   # rulings only
+        e = files["LANE.1__Q2.json"]
+        self.assertEqual((e["forked_from"], e["fork"]["roles"]), (r["id"], ["roar"]))
+        self.assertEqual(st.transcript_of(e["forked_from"])["id"], t["id"])    # enough to find the transcript
+        self.assertEqual(F.check_entry("LANE.1__Q2.json", e, ITEMS), [])
+        spec = importlib.util.spec_from_file_location("adapter_tpl", KIT / "adapter_template.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        text = mod._render(e)
+        self.assertIn(f"fork `{r['id']}`", text)
+        self.assertIn("a roar panel; its transcript is the `transcript` record on this fork", text)
+        self.assertNotIn("Asked by", mod._render(files["LANE.1__Q1.json"]))
+
+
+class VisualMarkdownTests(Tmp):
+    """Review LOW: an agent's title never becomes a link, image, heading or tag in the generated Markdown."""
+
+    EVIL = "[x](javascript:alert(1)) # h ![i](x) <b>`c`</b> *e* _u_ | cell \\"
+
+    def tokens(self, text):
+        try:
+            from markdown_it import MarkdownIt
+        except ImportError:
+            return None
+        out = []
+        for t in MarkdownIt("commonmark").enable("table").parse(text):
+            out.append(t)
+            out += t.children or []
+        return out
+
+    def test_a_hostile_title_is_inert_in_the_index_and_the_doc(self):
+        # Catches: escaping only "|" (the old code): the title became a javascript: link and, in the
+        # doc, a heading carrying a second "# h" and an inline <b>.
+        from console_kit import visuals as VIS
+        rec = {"item": "LANE.1", "seq": 1, "ts": "2026-09-30T00:00:00Z", "title": self.EVIL, "format": "html",
+               "path": "visuals/LANE.1/aaaaaaaa-bbbbbbbbbbbb.html", "doc_path": "visuals/LANE.1/aaaaaaaa-bbbbbbbbbbbb.md"}
+        index = VIS.index_markdown("visuals", [rec])
+        doc = VIS.doc_markdown(self.EVIL, "LANE.1", "html", "aaaaaaaa-bbbbbbbbbbbb.html", "body", "draw it")
+        self.assertIn(VIS.md_escape(self.EVIL), index)
+        self.assertNotIn("](javascript", index)
+        self.assertNotIn("](javascript", doc)
+        for text in (index, doc):
+            toks = self.tokens(text)
+            if toks is None:
+                continue  # markdown-it is not installed: the string checks above stand alone
+            hrefs = [t.attrGet("href") for t in toks if t.type == "link_open"]
+            self.assertFalse([h for h in hrefs if "javascript" in (h or "")], hrefs)
+            self.assertEqual([t for t in toks if t.type in ("image", "html_inline", "html_block")
+                              and t.content.strip() != VIS.MARK], [])   # the kit's own marker only
+            self.assertEqual([t.type for t in toks if t.type in ("em_open", "strong_open")], [])
+            # Only the kit's own code spans (the item id, the folder), none from the title's `c`.
+            self.assertLessEqual({t.content for t in toks if t.type == "code_inline"}, {"LANE.1", "visuals/"})
+        idx = self.tokens(index)
+        if idx is not None:
+            # The index's only headings are its own: "# Visuals" and the item's "##".
+            self.assertEqual([t.tag for t in idx if t.type == "heading_open"], ["h1", "h2"])
+            # The row keeps its four cells: the title's "|" did not split it.
+            row = [t for t in idx if t.type == "tr_open"][-1]
+            self.assertEqual(sum(1 for t in idx[idx.index(row):] if t.type == "td_open"), 4)
+            dtoks = self.tokens(doc)
+            [h] = [i for i, t in enumerate(dtoks) if t.type == "heading_open"]
+            self.assertEqual(dtoks[h + 1].content.replace("\\", ""), self.EVIL.replace("\\", ""))
+
+
+class VisualFileTests(Tmp):
+    def test_writes_are_jailed_idempotent_and_reads_check_the_hash(self):
+        # Catches: an overwrite of a different file, a write or read through a symlink, a file
+        # shown after someone edited it, and an INDEX.md someone wrote by hand clobbered.
+        from console_kit import visuals as VIS
+        rel, doc = VIS.paths("visuals", "LANE.1", "a" * 24, "html", "b" * 64)
+        self.assertEqual(rel, "visuals/LANE.1/aaaaaaaa-bbbbbbbbbbbb.html")
+        VIS.write(self.dir, "visuals", rel, doc, b"<p>hi</p>", "# doc\n")
+        VIS.write(self.dir, "visuals", rel, doc, b"<p>hi</p>", "# doc\n")      # a retry: same bytes, fine
+        with self.assertRaisesRegex(VIS.VisualError, "other content"):
+            VIS.write(self.dir, "visuals", rel, doc, b"<p>other</p>", "# doc\n")
+        rec = {"path": rel, "sha256": hashlib.sha256(b"<p>hi</p>").hexdigest()}
+        self.assertEqual(VIS.read(self.dir, "visuals", rec), b"<p>hi</p>")
+        (self.dir / rel).write_bytes(b"<p>edited</p>")
+        with self.assertRaisesRegex(VIS.VisualError, "changed since"):
+            VIS.read(self.dir, "visuals", rec)
+        (self.dir / rel).unlink()
+        outside = self.dir / "outside.html"
+        outside.write_bytes(b"<p>hi</p>")
+        (self.dir / rel).symlink_to(outside)
+        with self.assertRaisesRegex(VIS.VisualError, "symlink"):
+            VIS.read(self.dir, "visuals", rec)
+        with self.assertRaisesRegex(VIS.VisualError, "not under visuals_dir"):
+            VIS.read(self.dir, "visuals", {"path": "other/x.html", "sha256": rec["sha256"]})
+        with self.assertRaisesRegex(VIS.VisualError, "no visuals_dir"):
+            VIS.read(self.dir, None, rec)
+        VIS.write_index(self.dir, "visuals", [])
+        self.assertTrue((self.dir / "visuals/INDEX.md").read_text().startswith(VIS.MARK))
+        (self.dir / "visuals/INDEX.md").write_text("# my own notes\n")
+        with self.assertRaisesRegex(VIS.VisualError, "not written by the kit"):
+            VIS.write_index(self.dir, "visuals", [])
+        self.assertEqual((self.dir / "visuals/INDEX.md").read_text(), "# my own notes\n")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

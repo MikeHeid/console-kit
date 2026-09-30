@@ -8,7 +8,9 @@ edited or removed. `append` enforces the rules that need the other records:
 - a lock locks the question's CURRENT answer, and locks it only once;
 - once an answer is locked, the next answer must name it in `supersedes` and
   give a `reason`, because a lock is superseded, never undone (D3);
-- an `anchor` re-anchors only the question's CURRENT lock (0.5.0).
+- an `anchor` re-anchors only the question's CURRENT lock (0.5.0);
+- a roar runs at most once per lock (a new lock after a supersede may roar again), and its fork carries one transcript (0.8.0);
+- a `visual` answers an owner's visual request on that request's item (0.8.0).
 
 A retried write (same content, same nonce) returns the stored record and
 writes nothing, so a flaky network cannot duplicate a message.
@@ -205,12 +207,89 @@ class Store:
                 self._check_follow_up(rec)
             if "about_qid" in rec:
                 self._check_about(rec)
+            if S.ROAR in (rec.get("roles") or ()):
+                self._check_roar_once(rec)
         elif kind == "answer":
             self._check_answer(rec)
         elif kind == "lock":
             self._check_lock(rec)
         elif kind == "anchor":
             self._check_anchor(rec)
+        elif kind == "transcript":
+            self._check_transcript(rec)
+        elif kind == "visual":
+            self._check_visual(rec)
+
+    def lock_at(self, qid: str, seq: int) -> dict | None:
+        """The lock on `qid` that was current just before store seq `seq`: the latest lock written before it.
+
+        A lock is only ever superseded by a later answer AND its own later lock
+        (D3), so the latest lock before a record is the one that record saw.
+        """
+        return next((r for r in reversed(self._records[:max(0, seq - 1)])
+                     if r["type"] == "lock" and r["qid"] == qid), None)
+
+    def roar_of(self, qid: str, lock_id: str | None = None) -> dict | None:
+        """The roar fork already run on `qid` while `lock_id` was its lock (default: its current lock), or None.
+
+        The fork record needs no lock field: the lock it was about is derived
+        from the store, as the lock current when the fork was appended.
+        """
+        if lock_id is None:
+            lk = self.locks(qid)
+            lock_id = lk[-1]["id"] if lk else None
+        if lock_id is None:
+            return None
+        for r in self._records:
+            if (r["type"] == "message" and r.get("intent") == "fork" and S.ROAR in (r.get("roles") or ())
+                    and r.get("about_qid") == qid):
+                seen = self.lock_at(qid, r["seq"])
+                if seen is not None and seen["id"] == lock_id:
+                    return r
+        return None
+
+    def _check_roar_once(self, rec: dict) -> None:
+        """A roar runs at most once per LOCK (owner ruling "Once per lock ★", 0.8.0).
+
+        A second roar while the same lock stands is refused, naming the first.
+        Once the answer is superseded and locked again, the new lock may have
+        its own roar. (`_check_about` has already required a locked answer.)
+        """
+        qid = rec["about_qid"]
+        locks = self.locks(qid)
+        if not locks:
+            return
+        current = locks[-1]
+        first = self.roar_of(qid, current["id"])
+        if first is not None:
+            raise StoreError(f"{qid}'s lock {current['id']} already had its roar: fork {first['id']}, requested "
+                             f"{first['ts']}. A roar runs at most once per lock; supersede and re-lock the answer "
+                             f"to roar again, or follow up with other seats")
+
+    def transcript_of(self, fork_id: str) -> dict | None:
+        return next((r for r in self._records if r["type"] == "transcript" and r["fork"] == fork_id), None)
+
+    def _check_transcript(self, rec: dict) -> None:
+        """A transcript belongs to a roar fork, one per fork (0.8.0)."""
+        fork = self._by_id.get(rec["fork"])
+        if (fork is None or fork["type"] != "message" or fork.get("intent") != "fork"
+                or S.ROAR not in (fork.get("roles") or ())):
+            raise StoreError(f"fork {rec['fork']!r} is not a roar fork; a transcript is a roar panel's")
+        first = self.transcript_of(fork["id"])
+        if first is not None:
+            raise StoreError(f"fork {fork['id']} already has its transcript ({first['id']}); a fork keeps one")
+
+    def _check_visual(self, rec: dict) -> None:
+        """A visual answers an owner visual request on the same item, at most MAX_VISUALS_PER_REQUEST each (0.8.0)."""
+        req = self._by_id.get(rec["request"])
+        if req is None or req["type"] != "message" or req.get("intent") != "visual":
+            raise StoreError(f"request {rec['request']!r} is not an owner visual request")
+        if req["item"] != rec["item"]:
+            raise StoreError(f"request {req['id']} is on item {req['item']!r}; its visual goes on the same item")
+        n = sum(1 for r in self._records if r["type"] == "visual" and r["request"] == req["id"])
+        if n >= S.MAX_VISUALS_PER_REQUEST:
+            raise StoreError(f"request {req['id']} already has {n} visuals; the limit is "
+                             f"{S.MAX_VISUALS_PER_REQUEST}. Ask the owner for a new request")
 
     def _check_answer(self, rec: dict) -> None:
         q = self.question(rec["qid"])

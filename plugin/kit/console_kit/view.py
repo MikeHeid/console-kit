@@ -74,11 +74,24 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
 
     threads: dict[str, list[dict]] = {}
     forks: dict[str, dict] = {}
+    transcripts: dict[str, dict] = {}
+    visuals: dict[str, list[dict]] = {}
     for r in recs:
         if r["type"] == "message":
             threads.setdefault(r["item"], []).append(r)
             if r.get("intent") == "fork":
-                forks[r["id"]] = {"message": r, "questions": []}
+                forks[r["id"]] = {"message": r, "questions": [], "transcript": None}
+        elif r["type"] == "transcript":
+            # A roar's transcript (0.8.0), shown collapsed on its fork and that fork's questions.
+            transcripts[r["fork"]] = {"id": r["id"], "fork": r["fork"], "ts": r["ts"], "text": r["text"],
+                                      "bytes": len(r["text"].encode("utf-8"))}
+        elif r["type"] == "visual":
+            visuals.setdefault(r["item"], []).append(
+                {k: r[k] for k in ("id", "seq", "ts", "item", "request", "format", "title", "text",
+                                   "path", "doc_path", "bytes")})
+    for fid, t in transcripts.items():
+        if fid in forks:
+            forks[fid]["transcript"] = t["id"]
     # Forked questions are grouped under their fork (§6.5 F1). `append` refuses a
     # `forked_from` that is not an owner fork message, but loading a file does not
     # re-run that rule, so one that names no fork is simply left ungrouped.
@@ -95,7 +108,9 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
     waiting_agent = []
     for item, msgs in threads.items():
         last_owner = max((m["seq"] for m in msgs if m["by"] == "owner"), default=0)
-        last_agent = max((m["seq"] for m in msgs if m["by"] == "agent"), default=0)
+        # A visual (0.8.0) is the agent answering on that item, as a reply is.
+        last_agent = max([m["seq"] for m in msgs if m["by"] == "agent"]
+                         + [v["seq"] for v in visuals.get(item, [])], default=0)
         if last_owner > last_agent and item in own:
             own[item]["awaiting_agent"] += 1
             waiting_agent.append(item)
@@ -123,6 +138,9 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
         "awaiting_agent": sorted(waiting_agent),
         "orphaned": orphaned,
         "chat": {"item": S.CHAT_ITEM, "awaiting_agent": chat_owner > chat_agent, "messages": len(chat)},
+        # 0.8.0: roar transcripts by fork id, and visuals by item (the file is served by /api/visual).
+        "transcripts": transcripts,
+        "visuals": visuals,
         # The store's sequence number this view was built at (0.7.0): the page's
         # live loop and unread count compare against it.
         "seq": recs[-1]["seq"] if recs else 0,
@@ -135,7 +153,8 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
 # not store records (a fold lands through a PR the store never sees), so they
 # are not in the feed; the page says so and links out.
 
-FEED_KINDS = ("question", "answer", "lock", "reanchor", "fork", "process", "chat", "reply", "note")
+FEED_KINDS = ("question", "answer", "lock", "reanchor", "fork", "process", "chat", "reply", "note",
+              "transcript", "visual")
 FEED_MAX = 200
 FEED_DEFAULT = 50
 FEED_SNIPPET = 240
@@ -163,13 +182,18 @@ def feed_event(rec: dict, qitems: Mapping[str, str], relocks: set[str]) -> dict:
         ev.update(kind="lock", item=qitems.get(rec["qid"]), qid=rec["qid"], relock=rec["id"] in relocks)
     elif t == "anchor":
         ev.update(kind="reanchor", item=qitems.get(rec["qid"]), qid=rec["qid"], text=_snip(rec["basis"]))
+    elif t == "transcript":  # 0.8.0: the fork's item is filled in by `feed`, which knows the fork
+        ev.update(kind="transcript", fork=rec["fork"], text=_snip(rec["text"]))
+    elif t == "visual":      # 0.8.0: an agent's answer to a visual request
+        ev.update(kind="visual", item=rec["item"], request=rec["request"], format=rec["format"],
+                  text=_snip(rec["title"]))
     else:  # message
         intent = rec.get("intent")
-        kind = (intent if intent in ("fork", "process", "chat")
+        kind = (intent if intent in ("fork", "process", "chat", "visual")
                 else "chat" if rec["item"] == S.CHAT_ITEM
                 else "reply" if rec["by"] == "agent" else "note")
         ev.update(kind=kind, item=rec["item"], text=_snip(rec["text"]))
-        for k in ("mode", "focus", "roles", "about_qid", "follow_up_of", "reply_to"):
+        for k in ("mode", "focus", "roles", "about_qid", "follow_up_of", "reply_to", "step"):
             if k in rec:
                 ev[k] = rec[k]
     return ev
@@ -195,6 +219,9 @@ def feed(store: Store, items: Mapping[str, dict], *, kinds: set[str] | None = No
         if before is not None and r["seq"] >= before:
             continue
         ev = feed_event(r, qitems, relocks)
+        if ev["kind"] == "transcript":
+            fork = store.get(ev["fork"])
+            ev["item"] = fork["item"] if fork is not None else None
         if kinds is not None and ev["kind"] not in kinds:
             continue
         if scope is not None and ev.get("item") not in scope:

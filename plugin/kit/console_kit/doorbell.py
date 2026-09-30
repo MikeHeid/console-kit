@@ -3,7 +3,8 @@
 The server appends one JSON line to `inbox.jsonl` for every owner write. An
 open session runs `agent.py watch`, which blocks until a line that should wake
 it arrives, then exits; the exit is what wakes the session. Only the owner's
-three requests wake it: `process` (answers are in), `fork` (deliberate) and `chat` (0.7.0).
+requests wake it: `process` (answers are in), `fork` (deliberate), `chat` (0.7.0) and
+`visual` (0.8.0, draw a visual of an item).
 
 The agent's own cursor, the highest doorbell seq it has processed, is kept in
 `agent-cursor.json` beside the doorbell. It only moves forward.
@@ -23,7 +24,7 @@ from typing import Callable
 
 from .registry import read_regular
 
-WAKE_INTENTS = ("process", "fork", "chat")
+WAKE_INTENTS = ("process", "fork", "chat", "visual")
 CURSOR_FILE = "agent-cursor.json"
 MAX_DOORBELL = 64 << 20  # one short line per owner write; far past any real console
 MAX_CURSOR = 4096

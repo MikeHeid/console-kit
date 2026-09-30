@@ -50,6 +50,14 @@ def _render(e: dict) -> str:
         out += ["", "**In the owner's own words:**", "", _quote(lk["own_text"])]
     if lk.get("rejected_labels"):
         out += ["", "**Rejected:** " + "; ".join(f'"{r}"' for r in lk["rejected_labels"]) + "."]
+    if e.get("forked_from"):
+        # The deliberation this question came from (0.8.0). A roar's transcript is the
+        # store's `transcript` record on that same fork id: the ruling cites it, never copies it.
+        fork = e.get("fork") or {}
+        how = ("a roar panel; its transcript is the `transcript` record on this fork"
+               if "roar" in (fork.get("roles") or []) else
+               f"a {fork['step']}" if fork.get("step") else "a deliberation round")
+        out += ["", f"**Asked by:** {how} (fork `{e['forked_from']}`)."]
     return "\n".join(out) + "\n"
 
 

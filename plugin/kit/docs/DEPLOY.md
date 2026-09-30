@@ -72,6 +72,14 @@ Read the live unit before changing anything:
    that a watch started before 0.7.0 does not wake on a chat message. Restart
    it (the console-process skill re-arms it) so chat reaches a session.
 
+From 0.8.0 the server reads `specs_dir`, `visuals_dir` and `next_step` from
+the project's `.console-kit.json` when it starts (`kit/docs/ADAPTER.md`). A
+bad value stops it with `console: .console-kit.json: <key> ...` in the
+journal; fix the key and restart. The server writes visuals into
+`<project>/<visuals_dir>/`, so the unit's user must be able to write there;
+nothing else in the project is ever written. Its `/api/visual` route is behind
+the same Access gate as every other owner route.
+
 From 0.7.0 an open tab keeps one long poll (`/api/wait`, 25 s) open to the
 server. The tunnel needs nothing for it: it is a plain GET behind Access, well
 inside Cloudflare's 100 s response limit. The server holds at most 16 such
@@ -109,7 +117,18 @@ A kit installed by `deploy/install.sh` instead (copied to
 
    Anything but `0` means the store needs 0.7.0 or later.
 
-4. Never "roll back" by editing `store.jsonl`. Every line's `seq` and `id` are
+4. Before rolling 0.8.0 back to **0.7.0 or older**, check the store once more.
+   0.8.0 adds two record kinds and three message shapes, and a 0.7.0 kit
+   refuses each, by name (`unknown record type 'transcript'` or `'visual'`,
+   `intent 'visual'`, `role(s) ['roar']`, `unknown field(s) step`), and will
+   not start:
+
+       grep -cE '"type":"(transcript|visual)"|"intent":"visual"|"roar"|"step":' <state>/store.jsonl
+
+   Anything but `0` means the store needs 0.8.0 or later. Files the server
+   wrote under `visuals_dir` stay where they are; a 0.7.0 server ignores them.
+
+5. Never "roll back" by editing `store.jsonl`. Every line's `seq` and `id` are
    checked on load, and an edited line stops the server.
 
 ## Health

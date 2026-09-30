@@ -18,6 +18,21 @@ There are five kinds of record, and each has fixed writers (spec R4):
 0.7.0 adds no kind. It adds two optional shapes, each of which a 0.6.0 kit
 refuses by name: a chat message (a `message` on the reserved thread CHAT_ITEM
 with intent 'chat') and a question's `evidence` rows.
+
+0.8.0 adds two kinds, both written by the agent, and three shapes on a
+`message`. A 0.7.0 kit refuses every one of them BY NAME (an unknown record
+type, an unknown intent, an unknown seat, an unknown field), so a rollback
+never reads them as something else. SCHEMA_VERSION stays 1: nothing already
+written changes meaning.
+
+    transcript  agent   a roar panel's transcript, attached to the roar fork it ran (one per fork)
+    visual      agent   a Mermaid block or an HTML mock answering an owner's visual request;
+                        the file lives under the project's `visuals_dir`, the record holds its hash
+
+    - intent 'visual': the owner asks for a visual on an item;
+    - seat 'roar': a follow-up on ONE answer run as a three-round panel, at most once per lock;
+    - `step`: 'refine' or 'drill', a fork that runs the project's refine or drill skill on one
+      locked answer (`about_qid`) or one round's answer set (`follow_up_of`).
 """
 
 from __future__ import annotations
@@ -28,20 +43,23 @@ import re
 
 SCHEMA_VERSION = 1
 
-KINDS = ("question", "message", "answer", "lock", "anchor")
+KINDS = ("question", "message", "answer", "lock", "anchor", "transcript", "visual")
 WRITERS = {
     "question": frozenset({"agent"}),
     "message": frozenset({"agent", "owner"}),
     "answer": frozenset({"owner"}),
     "lock": frozenset({"owner"}),
     "anchor": frozenset({"agent"}),
+    "transcript": frozenset({"agent"}),   # 0.8.0
+    "visual": frozenset({"agent"}),       # 0.8.0
 }
 QUESTION_KINDS = ("single", "multi", "free")
 # The owner's requests to the agent: "fork" asks it to deliberate (§6),
 # "process" says the answers are in and it should process them (§7.3), and
 # "chat" (0.7.0) is a general message in the inbox's chat, which whichever
 # session is watching answers (owner, 2026-09-29).
-INTENTS = ("fork", "process", "chat")
+# "visual" (0.8.0) asks for a picture of an item: a Mermaid block or an HTML mock.
+INTENTS = ("fork", "process", "chat", "visual")
 OWNER_INTENTS = frozenset(INTENTS)
 # The chat's thread (0.7.0). It is not a register item: it can never be one,
 # because ITEM_ID refuses a leading "@", so no project item can share its
@@ -57,6 +75,24 @@ MODES = ("explore", "tighten")
 ROSTER = ("devops", "ux", "adversarial", "security", "architect", "analyst")
 OTHER_ROLE = re.compile(r"^other:[A-Za-z0-9][A-Za-z0-9 \-]{0,39}$")
 MAX_ROLES = 3
+# "roar" (0.8.0) is a seat of its own: a three-round panel (independent reads,
+# deliberation, synthesis) on ONE locked answer. It is called alone, only with
+# `about_qid`, and at most once per LOCK (owner ruling "Once per lock ★"); the store refuses
+# a second one, naming the first.
+ROAR = "roar"
+# The other kinds of fork (0.8.0), beside a follow-up: `step` names the
+# project's refine or drill skill, run on one locked answer or one round.
+STEPS = ("refine", "drill")
+# A roar's transcript is bounded in BYTES of UTF-8, and one over it is refused
+# by name, never cut: a cut transcript reads as the whole panel when it is not.
+MAX_TRANSCRIPT = 48 * 1024
+# A visual (0.8.0): its formats and file extensions, its size, and its short doc.
+VISUAL_FORMATS = {"mermaid": ".mmd", "html": ".html"}
+MAX_VISUAL = 256 * 1024          # bytes of the file
+MAX_VISUAL_DOC = 4000            # characters of the doc the record carries
+MAX_VISUALS_PER_REQUEST = 3
+VISUAL_PATH = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*(/[A-Za-z0-9_][A-Za-z0-9_.\-]*)+$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 # Whose recommendation a forked question's ★ is: the whole panel, one of the
 # default committee's seats (§6.6), a roster seat (D13), or a typed `other:` seat.
 STAR_BY = ("panel", "architect", "ux", "security", "determinism", "devops", "adversarial", "analyst")
@@ -111,6 +147,8 @@ REQUIRED = {
     "answer": ("qid", "picks", "own_text", "by", "nonce"),
     "lock": ("qid", "answer", "by", "nonce"),
     "anchor": ("qid", "lock", "anchors", "basis", "by", "nonce"),
+    "transcript": ("fork", "text", "by", "nonce"),
+    "visual": ("item", "request", "format", "title", "text", "path", "doc_path", "sha256", "bytes", "by", "nonce"),
 }
 # Fork deliberations (spec §6.4) add optional fields, so SCHEMA_VERSION stays 1:
 # every existing record stays valid, and a kit from before them refuses a
@@ -118,13 +156,16 @@ REQUIRED = {
 OPTIONAL = {
     # 0.7.0: `evidence`. A kit before it refuses a question carrying it, by name.
     "question": frozenset({"forked_from", "star_by", "evidence"}),
-    "message": frozenset({"reply_to", "intent", "focus", "mode", "roles", "follow_up_of", "about_qid"}),
+    # 0.8.0: `step`. A kit before it refuses a message carrying it, by name.
+    "message": frozenset({"reply_to", "intent", "focus", "mode", "roles", "follow_up_of", "about_qid", "step"}),
     "answer": frozenset({"supersedes", "reason"}),
     # 0.5.0: the conditions a RE-lock was taken against, computed by the server.
     # Written only when they differ from the question's `valid_if`, so a store
     # stays readable by a 0.4.0 kit until the first re-lock that changes one.
     "lock": frozenset({"anchors"}),
     "anchor": frozenset(),
+    "transcript": frozenset(),
+    "visual": frozenset(),
 }
 STORE_FIELDS = frozenset({"id", "seq", "ts", "schemaVersion", "type"})
 
@@ -388,7 +429,7 @@ def _check_message(rec: dict) -> list[str]:
         if "mode" not in rec:
             errs.append("a fork says its mode: explore or tighten")
     else:
-        present = [f for f in ("focus", "mode", "roles", "follow_up_of", "about_qid") if f in rec]
+        present = [f for f in ("focus", "mode", "roles", "follow_up_of", "about_qid", "step") if f in rec]
         if present:
             errs.append(f"{', '.join(present)} belong(s) to a fork: set intent 'fork' or leave them out")
     if "focus" in rec and rec["focus"] not in FOCUSES:
@@ -408,8 +449,26 @@ def _check_follow_up(rec: dict) -> list[str]:
     default committee and names no seats, so `roles` comes only with one of the
     two. That the named fork or question exists, is in the fork's scope and is
     locked is the STORE's check.
+
+    A refine or drill (`step`, 0.8.0) works on the same two targets but calls
+    no seats: it runs the project's own skill. A roar (0.8.0) is one seat,
+    alone, on one answer.
     """
     errs = []
+    if "step" in rec:
+        if rec["step"] not in STEPS:
+            errs.append(f"step {rec['step']!r} is not one of {', '.join(STEPS)}")
+        if "roles" in rec:
+            errs.append("a refine or drill runs the project's skill, not seats: leave roles out")
+        if "about_qid" not in rec and "follow_up_of" not in rec:
+            errs.append("a refine or drill names what it works on: about_qid (one locked answer) "
+                        "or follow_up_of (one round's answers)")
+        if "about_qid" in rec and (not isinstance(rec["about_qid"], str) or not QID.match(rec["about_qid"])):
+            errs.append(f"about_qid {rec['about_qid']!r} is not <itemId>/Q<n>")
+        if "follow_up_of" in rec and (not isinstance(rec["follow_up_of"], str)
+                                      or not RECORD_ID.match(rec["follow_up_of"])):
+            errs.append("follow_up_of must be the id of the earlier fork message (24 lowercase hex)")
+        return errs
     if "about_qid" in rec and (not isinstance(rec["about_qid"], str) or not QID.match(rec["about_qid"])):
         errs.append(f"about_qid {rec['about_qid']!r} is not <itemId>/Q<n>")
     if "follow_up_of" in rec and (not isinstance(rec["follow_up_of"], str)
@@ -428,16 +487,21 @@ def _check_follow_up(rec: dict) -> list[str]:
         else:
             bad = [r for r in roles if not is_role(r)]
             if bad:
-                errs.append(f"role(s) {bad!r} are not one of {', '.join(ROSTER)}, "
+                errs.append(f"role(s) {bad!r} are not one of {', '.join(ROSTER + (ROAR,))}, "
                             f"or other:<role> (1-40 letters, digits, spaces, hyphens)")
             elif len(roles) != len(set(roles)):
                 errs.append("roles repeat")
+            elif ROAR in roles:
+                if roles != [ROAR]:
+                    errs.append("roar is a panel of its own: call it alone, not beside other seats")
+                if "about_qid" not in rec:
+                    errs.append("roar runs on one locked answer: it needs about_qid")
     return errs
 
 
 def is_role(v: object) -> bool:
-    """A seat a follow-up may call: a roster seat, or a typed `other:<role>`."""
-    return isinstance(v, str) and (v in ROSTER or bool(OTHER_ROLE.match(v)))
+    """A seat a follow-up may call: a roster seat, `roar` (0.8.0), or a typed `other:<role>`."""
+    return isinstance(v, str) and (v in ROSTER or v == ROAR or bool(OTHER_ROLE.match(v)))
 
 
 def is_star_by(v: object) -> bool:
@@ -479,8 +543,79 @@ def _check_anchor(rec: dict) -> list[str]:
     return errs
 
 
+def transcript_problem(text: object) -> str | None:
+    """Why a roar transcript is refused (0.8.0), or None. It is never cut to fit."""
+    if not isinstance(text, str) or not text.strip():
+        return "transcript text must be a non-empty string"
+    n = len(text.encode("utf-8"))
+    if n > MAX_TRANSCRIPT:
+        return (f"transcript is {n} bytes; the limit is {MAX_TRANSCRIPT}. It is refused, not truncated: "
+                f"shorten each round's summaries and send it again")
+    return None
+
+
+def _check_transcript(rec: dict) -> list[str]:
+    errs = []
+    if not isinstance(rec["fork"], str) or not RECORD_ID.match(rec["fork"]):
+        errs.append("fork must be the id of the roar fork message (24 lowercase hex)")
+    why = transcript_problem(rec["text"])
+    if why:
+        errs.append(why)
+    return errs
+
+
+def visual_path_problem(path: object, field: str) -> str | None:
+    """Why a visual's stored path is not a plain relative path inside the project, or None (0.8.0).
+
+    The same jail as evidence: relative, plain characters, no `..`, no empty
+    part, and never a secrets file. Where it resolves (no symlink out) is the
+    server's check, made on every read.
+    """
+    if not isinstance(path, str) or len(path) > MAX_LINE or not VISUAL_PATH.match(path):
+        return f"{field} {path!r} must be a relative path of plain characters, at least one folder deep"
+    parts = path.split("/")
+    if ".." in parts or "." in parts:
+        return f"{field} {path!r} must stay inside the project: no '..'"
+    if secret_path(path):
+        return f"{field} {path!r} names {secret_path(path)}; a visual is never a secrets file"
+    return None
+
+
+def _check_visual(rec: dict) -> list[str]:
+    errs = []
+    if not isinstance(rec["item"], str) or not ITEM_ID.match(rec["item"]):
+        errs.append(f"item {rec['item']!r} is not an item id")
+    if not isinstance(rec["request"], str) or not RECORD_ID.match(rec["request"]):
+        errs.append("request must be the id of the owner's visual request (24 lowercase hex)")
+    fmt = rec["format"]
+    known = isinstance(fmt, str) and fmt in VISUAL_FORMATS
+    if not known:
+        errs.append(f"format {fmt!r} is not one of {', '.join(VISUAL_FORMATS)}")
+    errs += one_line(rec["title"], "title")
+    t = rec["text"]
+    if not isinstance(t, str) or not t.strip():
+        errs.append("text (the visual's short doc) must be a non-empty string")
+    elif len(t) > MAX_VISUAL_DOC:
+        errs.append(f"text is {len(t)} characters; a visual's doc is at most {MAX_VISUAL_DOC}")
+    for field in ("path", "doc_path"):
+        why = visual_path_problem(rec[field], field)
+        if why:
+            errs.append(why)
+    if known and isinstance(rec["path"], str) and not rec["path"].endswith(VISUAL_FORMATS[fmt]):
+        errs.append(f"a {fmt} visual's path ends in {VISUAL_FORMATS[fmt]}")
+    if isinstance(rec["doc_path"], str) and not rec["doc_path"].endswith(".md"):
+        errs.append("doc_path ends in .md")
+    if not isinstance(rec["sha256"], str) or not SHA256.match(rec["sha256"]):
+        errs.append("sha256 must be 64 lowercase hex")
+    b = rec["bytes"]
+    if isinstance(b, bool) or not isinstance(b, int) or not 1 <= b <= MAX_VISUAL:
+        errs.append(f"bytes must be a whole number from 1 to {MAX_VISUAL}")
+    return errs
+
+
 _TYPE_CHECKS = {"question": _check_question, "message": _check_message,
-                "answer": _check_answer, "lock": _check_lock, "anchor": _check_anchor}
+                "answer": _check_answer, "lock": _check_lock, "anchor": _check_anchor,
+                "transcript": _check_transcript, "visual": _check_visual}
 
 
 def record_id(rec: dict) -> str:

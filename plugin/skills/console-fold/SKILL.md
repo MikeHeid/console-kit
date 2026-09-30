@@ -11,6 +11,11 @@ folded** (spec `owner-console.md` R1). The fold runs in two steps on purpose:
 records those files through the project's adapter. `fold` never reads the live
 store, only files a reviewer has seen.
 
+Roar transcripts and visuals (0.8.0) are **never exported or folded, on
+purpose**: they are records a ruling can cite, not rulings. A ruling that came
+from a roar carries `forked_from` (its fork's id), which is also the key of
+that fork's transcript in the store; the adapter prints it.
+
 `KIT` and `STATE` come from **the user's registry only**, set up as in the
 console-process skill; if this project is not registered there, stop.
 `fold.locked`, `fold.ledger` and `fold.adapter` come from the repository's

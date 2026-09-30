@@ -75,6 +75,37 @@ heartbeat `agent.py watch` writes while it waits (0.6.0).
 - Progress rings on items and rounds, and gentle transitions; all motion is off
   under reduced motion.
 
+### Next steps, roar and visuals (0.8.0)
+
+- **"Next step ▾"** beside every locked answer and every round's answers
+  offers three kinds of fork: **Follow up** (seats you pick, as before),
+  **Refine** and **Drill**. Refine and drill run the project's own skill,
+  named in `.console-kit.json`'s `next_step`, on that answer or round. Neither
+  writes into the project before you lock: what they find comes back as
+  questions, specs land by pull request, and log entries at merge time.
+- **Roar** is a seat in the follow-up picker: a three-round panel
+  (independent reads, deliberation, synthesis) on one locked answer, **at most
+  once per lock**; the server refuses a second on the same lock, naming the
+  first, and a superseded-and-re-locked answer may roar again. Its
+  transcript (at most 48 KiB, refused whole if larger, never cut) shows
+  collapsed on the round and on each question it produced.
+- **Suggested next steps**: small chips beside each question and round say
+  which step fits and why (the reason is the chip's accessible text):
+  *refine* when a locked answer cites a spec under `specs_dir` that has not
+  been edited since the lock, *drill* when your own words name something (any
+  `backticked` term or Capitalised word, less common words like "The") that
+  no spec and no item title mentions (or a proposed item has no spec),
+  *deliberate* when an answer
+  is stale or went against the ★. The server works them out by rule
+  (`console_kit/tags.py`); they start nothing.
+- **Request a visual** on an item: an agent answers with a Mermaid diagram
+  (shown as its source text) or a static HTML mock (shown **only** inside
+  `<iframe sandbox="">`, served under a `sandbox` Content-Security-Policy, so
+  no script in it runs, even opened on its own), plus a short doc. The server
+  writes both under `visuals_dir` and regenerates its `INDEX.md`.
+
+`docs/ADAPTER.md` documents `specs_dir`, `visuals_dir` and `next_step`.
+
 ## How it fits together
 
 ```
@@ -84,14 +115,15 @@ heartbeat `agent.py watch` writes while it waits (0.6.0).
                                               state dir: store + doorbell
                                                      ▲
  Claude session ── SessionStart hook reads the doorbell (registered projects only)
-                └─ skills: console-process / console-fork / console-fold / console-ask ── agent.py
+                └─ skills: console-process / console-fork / console-fold / console-ask / console-visual ── agent.py
 ```
 
 In a registered project the hook also tells every session to post the
 questions you must decide to the console (the **console-ask** skill), so a
 question an agent writes in a document still reaches your inbox.
 
-Each locked answer has a **Follow up** button beside it. Pick one to three
+Each locked answer has a **Next step ▾** menu beside it, whose **Follow up**
+(0.4.0; under the menu since 0.8.0) works like this. Pick one to three
 seats (DevOps, UX, adversarial, security, architect, analyst, or a seat you
 name), a mode and an optional note, and those seats look at that one answer
 and bring any follow-up questions back to the same item. The locked answer
@@ -136,6 +168,7 @@ new record in the store, and nothing already written changes.
 - **`agent.py`** is the agent's side: `view`, `ask` (one question or a batch), `reply`, `inbox`,
   `working` (shows you "agent active" on the items it has picked up),
   `synced`, `fork-context`, `check` (why each stale answer is stale), `reanchor`,
+  `transcript` (a roar's transcript), `visual` (an answer to a visual request),
   and `register`, which **only you** run.
 - **`fold.py`** writes locked answers into your project through the adapter.
 - **`plugin/`** holds the Claude Code plugin: the hook, the skills and the

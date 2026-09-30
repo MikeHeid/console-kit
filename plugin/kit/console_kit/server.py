@@ -23,6 +23,14 @@ The live console (0.7.0) adds four owner routes, each behind the same gate
 the store's seq), `GET /api/feed`, `GET /api/evidence` and
 `POST /api/lock-all`. No route was added to the agent's door or the health door.
 
+0.8.0 adds one owner route, `GET /api/visual?id=RECORD_ID`, behind the same
+gate. It serves an agent's visual with its own headers: an HTML mock goes out
+under a Content-Security-Policy whose `sandbox` directive (no allow-scripts,
+no allow-same-origin) and `default-src 'none'` hold even if the URL is opened
+in its own tab, and the page only ever shows it in an `<iframe sandbox="">`.
+The agent's door gains `POST /transcript` and `POST /visual`. `/api/view`
+also carries each question's and round's suggested next steps (`tags.py`).
+
 `/health` (0.6.0) is answered on the agent's door, and on a third door only
 when `--health-port` asks for one. It is NEVER answered on the owner's door
 without the Access token: that door keeps its rule that no path skips the
@@ -34,6 +42,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import collections
+import hashlib
 import ipaddress
 import json
 import os
@@ -54,9 +63,12 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from . import anchors as A
 from . import doorbell as D
+from . import projectcfg as PC
 from . import publish as P
 from . import schema as S
+from . import tags as T
 from . import view as V
+from . import visuals as VIS
 from .fold import load_adapter
 from .store import Store, StoreError
 
@@ -76,7 +88,18 @@ CHAT_PER_MINUTE = 6
 CHAT_PER_HOUR = 60
 MAX_LOCK_ALL = 12           # entries in one "Lock all & process" (a round holds at most 5)
 LOCK_ALL_NONCE = 48         # characters: room for the per-record suffixes within the nonce limit
-AGENT_ROUTES = {"/question": "question", "/message": "message"}
+AGENT_ROUTES = {"/question": "question", "/message": "message", "/transcript": "transcript"}
+# The agent's door takes larger bodies (0.8.0): a roar transcript is up to 48 KiB
+# and a visual up to 256 KiB, and JSON escaping can grow either several times.
+# The door is a user-only Unix socket; the owner's door keeps MAX_BODY.
+AGENT_MAX_BODY = 2 << 20
+# An HTML mock is shown ONLY in <iframe sandbox="">. This policy holds even if the
+# URL is opened in its own tab: `sandbox` (no tokens) gives it an opaque origin
+# and no script, `default-src 'none'` lets it load nothing from anywhere, and
+# inline styles and data: images are what a self-contained mock needs.
+VISUAL_HTML_CSP = ("sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; "
+                   "base-uri 'none'; form-action 'none'; frame-ancestors 'self'")
+VISUAL_TEXT_CSP = "sandbox; default-src 'none'; frame-ancestors 'none'"
 WRITER_FIELDS = ("by", "type", "schemaVersion")
 # Fields only the server computes on a lock (0.5.0): a page that sends one is refused.
 SERVER_LOCK_FIELDS = ("anchors",)
@@ -174,6 +197,9 @@ class Console:
         self.adapter = adapter
         cfg.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(cfg.state, 0o700)  # mkdir's mode is ignored for a directory that already exists
+        # 0.8.0: specs_dir and visuals_dir from the project's .console-kit.json (data only;
+        # a bad key raises ConfigError here, by name, so the server never starts half-configured).
+        self.project = PC.load(cfg.root)
         self.store = Store(cfg.store)
         self._lock = threading.Lock()
         # The live console (0.7.0): every change a page could show bumps `_epoch`
@@ -278,7 +304,84 @@ class Console:
     def payload(self) -> dict:
         items = self.items()
         holds = A.evaluator(self.cfg.root, self._status(items), snapshot=True)  # one reading per request
-        return {"view": V.build(self.store, items, holds), "items": items, "cursor": self.read_cursor()}
+        view = V.build(self.store, items, holds)
+        view["tags"] = self.tags(view, items)
+        view["config"] = {"specs_dir": self.project.specs_dir, "visuals_dir": self.project.visuals_dir}
+        return {"view": view, "items": items, "cursor": self.read_cursor()}
+
+    def tags(self, view: dict, items: dict[str, dict]) -> dict:
+        """Suggested next steps (0.8.0). A failure here costs the chips, never the page."""
+        try:
+            return T.compute(self.store, view, items, self.cfg.root, self.project.specs_dir)
+        except Exception as e:  # a spec caught mid-write, git gone odd: named in the log
+            sys.stderr.write(f"console tags: {type(e).__name__}: {e}\n")
+            return {"questions": {}, "forks": {}, "specs_dir": self.project.specs_dir, "basis": [],
+                    "notes": ["the suggested next steps could not be worked out just now"]}
+
+    # -- visuals (0.8.0) -----------------------------------------------------------
+
+    def add_visual(self, body: object) -> dict:
+        """Store an agent's visual: jail and write the file and its doc, append the record, regenerate the index.
+
+        The request is checked against the store's rules on a trial copy
+        FIRST, so a visual the store would refuse writes no file.
+        """
+        keys = {"request", "format", "title", "content", "text", "nonce"}
+        if not isinstance(body, dict) or set(body) != keys:
+            raise RequestError(400, f"visual takes exactly {', '.join(sorted(keys))}")
+        vdir = self.project.visuals_dir
+        if not vdir:
+            raise RequestError(400, "this project sets no visuals_dir in .console-kit.json, so a visual has "
+                                    "nowhere to be stored")
+        fmt, content = body["format"], body["content"]
+        if fmt not in S.VISUAL_FORMATS:
+            raise RequestError(400, f"format {fmt!r} is not one of {', '.join(S.VISUAL_FORMATS)}")
+        if not isinstance(content, str) or not content.strip():
+            raise RequestError(400, "content must be the visual's text: a Mermaid block or an HTML document")
+        data = content.encode("utf-8")
+        if len(data) > S.MAX_VISUAL:
+            raise RequestError(413, f"the visual is {len(data)} bytes; the limit is {S.MAX_VISUAL}. It is "
+                                    f"refused, not cut: split it into smaller views")
+        req_id = body["request"]
+        with self._lock:
+            items = self.items()
+            req = self.store.get(req_id) if isinstance(req_id, str) else None
+            if req is None or req["type"] != "message" or req.get("intent") != "visual":
+                raise RequestError(400, f"request {req_id!r} is not an owner visual request")
+            sha = hashlib.sha256(data).hexdigest()
+            path, doc_path = VIS.paths(vdir, req["item"], req["id"], fmt, sha)
+            rec = {"item": req["item"], "request": req["id"], "format": fmt, "title": body["title"],
+                   "text": body["text"], "path": path, "doc_path": doc_path, "sha256": sha, "bytes": len(data),
+                   "nonce": body["nonce"]}
+            full = {**rec, "type": "visual", "schemaVersion": S.SCHEMA_VERSION, "by": "agent"}
+            done = self.store.existing(full)
+            if done is None:
+                try:
+                    self.store.trial().append(full)  # every rule, nothing written
+                except StoreError as e:
+                    raise RequestError(400, str(e)) from None
+            try:
+                name = path.rsplit("/", 1)[1]
+                VIS.write(self.cfg.root, vdir, path, doc_path, data,
+                          VIS.doc_markdown(body["title"], req["item"], fmt, name, body["text"], req["text"]))
+            except (VIS.VisualError, OSError) as e:
+                raise RequestError(409, f"the visual was not stored: {e}") from None
+            stored = done or self._append("visual", rec, "agent", items)
+            try:
+                VIS.write_index(self.cfg.root, vdir, [r for r in self.store.records() if r["type"] == "visual"])
+            except (VIS.VisualError, OSError) as e:  # the visual stands; the index is named as not regenerated
+                return {"record": stored, "index": f"not regenerated: {e}"}
+        return {"record": stored, "index": f"{vdir}/{VIS.INDEX}"}
+
+    def visual(self, rid: str) -> tuple[bytes, str]:
+        """A stored visual's bytes and format, read and checked now; refused by name when it moved or changed."""
+        rec = self.store.get(rid)
+        if rec is None or rec["type"] != "visual":
+            raise RequestError(404, f"no visual {rid}")
+        try:
+            return VIS.read(self.cfg.root, self.project.visuals_dir, rec), rec["format"]
+        except VIS.VisualError as e:
+            raise RequestError(409, str(e)) from None
 
     @staticmethod
     def _status(items: dict[str, dict]) -> dict[str, str | None]:
@@ -666,6 +769,20 @@ class _Handler(BaseHTTPRequestHandler):
     server_version = "console-kit"
     sys_version = ""
     timeout = 30  # seconds per socket read, so a stalled client cannot hold a thread for ever
+    max_body = MAX_BODY
+
+    def _send_raw(self, code: int, data: bytes, ctype: str, csp: str) -> None:
+        """A body that is not JSON, under its own Content-Security-Policy (0.8.0, a stored visual)."""
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        for k, v in SECURITY_HEADERS:
+            if k != "Content-Security-Policy":
+                self.send_header(k, v)
+        self.send_header("Content-Security-Policy", csp)
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _send(self, code: int, body: object, ctype: str = "application/json") -> None:
         data = (body if isinstance(body, str) else json.dumps(body)).encode("utf-8")
@@ -688,8 +805,8 @@ class _Handler(BaseHTTPRequestHandler):
         if not re.fullmatch(r"[0-9]{1,12}", raw.strip()):
             raise RequestError(400, "bad Content-Length")
         n = int(raw)
-        if n > MAX_BODY:
-            raise RequestError(413, f"the body is over {MAX_BODY} bytes")
+        if n > self.max_body:
+            raise RequestError(413, f"the body is over {self.max_body} bytes")
         try:
             return json.loads(self.rfile.read(n) or b"null")
         except ValueError:
@@ -730,7 +847,8 @@ class OwnerHandler(_Handler):
         if self.path == "/api/check":
             return self._check()
         route, query = self._query()
-        live = {"/api/wait": self._wait, "/api/feed": self._feed, "/api/evidence": self._evidence}.get(route)
+        live = {"/api/wait": self._wait, "/api/feed": self._feed, "/api/evidence": self._evidence,
+                "/api/visual": self._visual}.get(route)
         if live is not None and query is not None:
             try:
                 return live(query)
@@ -809,6 +927,17 @@ class OwnerHandler(_Handler):
             raise RequestError(503, "the cited lines could not be read just now") from None
         self._send(200, out)
 
+    def _visual(self, query: dict[str, str]) -> None:
+        """A stored visual (0.8.0). HTML goes out sandboxed by its own CSP; Mermaid as plain text."""
+        self._only(query, {"id"}, "/api/visual")
+        rid = query.get("id")
+        if not isinstance(rid, str) or not S.RECORD_ID.match(rid):
+            raise RequestError(400, "id must be a visual's record id (24 lowercase hex)")
+        data, fmt = self.console.visual(rid)
+        if fmt == "html":
+            return self._send_raw(200, data, "text/html; charset=utf-8", VISUAL_HTML_CSP)
+        self._send_raw(200, data, "text/plain; charset=utf-8", VISUAL_TEXT_CSP)
+
     def _check(self) -> None:
         try:
             out = self.console.check()
@@ -856,6 +985,8 @@ class OwnerHandler(_Handler):
 
 
 class AgentHandler(_Handler):
+    max_body = AGENT_MAX_BODY
+
     def address_string(self) -> str:
         return "agent"
 
@@ -877,6 +1008,8 @@ class AgentHandler(_Handler):
                 return self._send(200, {"working": self.console.set_working(self._body())})
             if self.path == "/reanchor":
                 return self._send(200, self.console.reanchor(self._body()))
+            if self.path == "/visual":  # 0.8.0: the server writes the file, jailed under visuals_dir
+                return self._send(200, self.console.add_visual(self._body()))
             kind = AGENT_ROUTES.get(self.path)
             if kind is None:
                 return self._send(404, {"error": "not found"})
@@ -995,7 +1128,10 @@ def agent_server(console: Console) -> UnixHTTPServer:
 
 
 def serve(cfg: Config, verify: Callable[[str | None], dict] | None = None) -> None:
-    console = Console(cfg, load_adapter(cfg.adapter))
+    try:
+        console = Console(cfg, load_adapter(cfg.adapter))
+    except PC.ConfigError as e:
+        raise SystemExit(f"console: {e}") from None
     added = console.seed()
     sys.stderr.write(f"console: {len(added)} seed question(s) added; store {cfg.store}\n")
     agent = agent_server(console)
