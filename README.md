@@ -30,8 +30,14 @@ Then, in your project:
 It asks for the project name and your Cloudflare values, and tells you what
 to run next. `INSTALL.md` (also in the zip) has the whole guide.
 
+- **[docs/USER-GUIDE.md](docs/USER-GUIDE.md)**: start here if you are new:
+  what the console is, the pinned install, and the owner's and the agents'
+  day, with tips for spending fewer tokens.
 - **[INSTALL.md](INSTALL.md)**: install the plugin in Claude Desktop or the
   CLI, and onboard a project.
+- **[docs/MIGRATION.md](docs/MIGRATION.md)**: move a project that vendors the
+  kit (e.g. `tools/console-kit`) onto one user-level pinned install, in an
+  order that keeps its console up.
 - **[docs/CLOUDFLARE.md](plugin/kit/docs/CLOUDFLARE.md)**: the Access application, the
   tunnel, DNS.
 - **[docs/ADAPTER.md](plugin/kit/docs/ADAPTER.md)**: connect the console to your
