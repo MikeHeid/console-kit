@@ -77,6 +77,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from . import anchors as A
 from . import doorbell as D
+from . import gitseam as G
 from . import names as N
 from . import projectcfg as PC
 from . import publish as P
@@ -481,7 +482,8 @@ class Console:
         except Exception as e:  # a spec caught mid-write, git gone odd: named in the log
             sys.stderr.write(f"console tags: {type(e).__name__}: {e}\n")
             return {"questions": {}, "forks": {}, "specs_dir": self.project.specs_dir, "basis": [],
-                    "notes": ["the suggested next steps could not be worked out just now"]}
+                    "notes": ["the suggested next steps could not be worked out just now"],
+                    **self._no_git("git")}
 
     # -- visuals (0.8.0) -----------------------------------------------------------
 
@@ -590,18 +592,27 @@ class Console:
     def check(self) -> dict:
         """Why each stale answer is stale, condition by condition (0.5.0).
 
-        A read, like `payload`, so it does not hold the write lock: its git
-        calls can take seconds, and the owner's writes must not wait on them.
+        A read, like `payload`, so it does not hold the write lock. The server
+        starts no git (CONSOLE-kit/Q23, `gitseam.close` in `serve`): a condition
+        that would have needed the version it was locked against says git
+        history is unavailable, and so does `history` here.
         """
         items = self.items()
-        return {"stale": A.check(self.store, self.cfg.root, self._status(items))}
+        return {"stale": A.check(self.store, self.cfg.root, self._status(items)), **self._no_git("history")}
+
+    @staticmethod
+    def _no_git(key: str) -> dict:
+        """`{key: "unavailable (no git in the server)"}` once the seam is closed (as `serve` closes it), else {}."""
+        return {} if G.is_open() else {key: G.UNAVAILABLE}
 
     def reanchor(self, body: object) -> dict:
         """Re-anchor every stale lock that git history can justify; with dry_run, only say what would change.
 
         The anchors are computed here from the tree and its history, never taken
         from the request, and each goes in as a new `anchor` record: the store is
-        append-only, so nothing already written changes.
+        append-only, so nothing already written changes. The server reads no git
+        history (CONSOLE-kit/Q23), so today every file-hash condition is left
+        stale with that reason, and `history` says so.
         """
         if not isinstance(body, dict) or set(body) - {"dry_run"} or not isinstance(body.get("dry_run", True), bool):
             raise RequestError(400, 'reanchor takes {"dry_run": true|false}')
@@ -610,7 +621,7 @@ class Console:
         # longer current by the time it is written is skipped, never re-anchored.
         plan = A.plan_reanchor(self.store, self.cfg.root, self._status(self.items()))
         if dry:
-            return {"dry_run": True, "plan": plan}
+            return {"dry_run": True, "plan": plan, **self._no_git("history")}
         with self._lock:
             for p in plan:
                 if not p["changes"]:
@@ -638,7 +649,7 @@ class Console:
                 p["record"] = rec["id"]
         if any("record" in p for p in plan):
             self._bump()
-        return {"dry_run": dry, "plan": plan}
+        return {"dry_run": dry, "plan": plan, **self._no_git("history")}
 
     def _lock_anchors(self, body: dict, items: dict[str, dict]) -> None:
         """Give a RE-lock fresh anchors from the tree as it is now (0.5.0); a first lock takes none.
@@ -1413,6 +1424,9 @@ def agent_server(console: Console) -> UnixHTTPServer:
 
 
 def serve(cfg: Config, verify: Callable[[str | None], dict] | None = None) -> None:
+    # CONSOLE-kit/Q23: this process starts no git, whatever any later code asks for. First, before
+    # anything reads the project: a git here would obey a .git/config an agent can write.
+    G.close()
     try:
         console = Console(cfg, load_adapter(cfg.adapter))
     except (PC.ConfigError, N.NamesError) as e:

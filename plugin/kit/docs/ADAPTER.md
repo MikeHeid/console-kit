@@ -87,9 +87,11 @@ starts, and nothing ever runs a path taken from them.
   suggested-next-step tags beside each question and each round's answers:
   - *refine* when a locked answer cites a file under it (its `source`, an
     evidence `cite`, or a `valid_if` path) and that file has not been edited
-    since the lock. "Edited" is the last commit touching the file
-    (`git log -1 --format=%ct`) in a git work tree, or the file's mtime when
-    it has uncommitted changes, is untracked, or the project is not in git;
+    since the lock. "Edited" is the file's mtime in the console server,
+    which starts no git (CONSOLE-kit/Q23), and the chip says the last-commit
+    time is unavailable; called outside the server, `tags.compute` uses the
+    last commit touching the file (`git log -1 --format=%ct`) in a git work
+    tree, or the mtime when it has uncommitted changes or is untracked;
   - *drill* when the owner's own words on an answer name a term that nothing
     in the project names: any `` `backticked` `` span, or any Capitalised word
     or run of them (owner ruling "Any backtick or Capital ★"), less a fixed

@@ -79,9 +79,11 @@ journal; fix the key and restart. Its `/api/visual` route is behind the same
 Access gate as every other owner route.
 
 **The server never writes into the project's working tree (0.8.1).** It
-stores visuals in `<state>/visuals/`, beside `store.jsonl`, and runs every git
-command in the project with `--no-optional-locks`, so even reading it never
-rewrites `.git/index`. That is what lets the service checkout keep following
+stores visuals in `<state>/visuals/`, beside `store.jsonl`, and since
+CONSOLE-kit/Q23 it starts no git at all (`console_kit/gitseam.py` is closed
+at startup), so it never even reads `.git`; a git a repository's own config
+could make run a program is never started outside the agents' jails. The
+agent-side git calls run with `--no-optional-locks`. That is what lets the service checkout keep following
 main with `git merge --ff-only`: a visual lands through an agent's own
 worktree and a pull request (`agent.py visual-export`), never by a file
 appearing in the checkout first. Keep `<state>` outside the project (the

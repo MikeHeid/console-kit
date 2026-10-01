@@ -1020,6 +1020,18 @@ def _stale_view() -> tuple[dict, dict]:
         return view, {"stale": A.check(st, Path(td), {})}
 
 
+NOGIT = "unavailable (no git in the server)"
+
+
+def _seam_closed(test) -> None:
+    """Close the git seam for one test, as `server.serve` does for the console's process (CONSOLE-kit/Q23)."""
+    from unittest import mock
+    from console_kit import gitseam as G
+    p = mock.patch.object(G, "_OPEN", False)
+    p.start()
+    test.addCleanup(p.stop)
+
+
 class WhyStaleTests(unittest.TestCase):
     """0.5.0: a stale answer says why, and the owner can re-lock it as it stands."""
 
@@ -1076,6 +1088,48 @@ class WhyStaleTests(unittest.TestCase):
                     self.assertTrue(body.pop("nonce"))
                     self.assertEqual(body, {"qid": "LANE.1/Q1"})  # never anchors: the server computes them
                     self.assertEqual(errors, [], f"{kind}: page errors")
+
+    def test_why_stale_says_git_history_is_unavailable_in_the_server(self):
+        # CONSOLE-kit/Q23. Catches: a "why stale" that goes blank, or reads as "not in the recent
+        # history", when the server simply never asked git.
+        import hashlib
+        import tempfile
+        from console_kit import anchors as A
+        from console_kit import view as V
+        from console_kit.store import Store
+        from test_kit import answer, lock, question
+        _seam_closed(self)
+        items = {"LANE.1": {"title": "first lane", "parent": None}}
+        with tempfile.TemporaryDirectory() as td:
+            spec = Path(td) / "spec.md"
+            spec.write_text("Intro.\nThe cited claim.\nTail.\n")
+            st = Store(Path(td) / "store.jsonl", known_items=items)
+            st.append(question("LANE.1/Q1", valid_if=[{"kind": "file_sha256", "path": "spec.md",
+                                                         "sha256": hashlib.sha256(spec.read_bytes()).hexdigest()}]))
+            st.append(lock(st.append(answer("LANE.1/Q1"))))
+            spec.write_text("A new first line.\nIntro.\nThe cited claim.\nTail.\n")
+            view = {"view": V.build(st, items, V.make_evaluator(Path(td), {})), "items": items, "cursor": {}}
+            check = {"stale": A.check(st, Path(td), {}), "history": NOGIT}
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                browser = getattr(self.pw, kind).launch()
+                self.addCleanup(browser.close)
+                page = browser.new_page(viewport={"width": 375, "height": 900})
+                errors: list[str] = []
+                page.on("pageerror", lambda e: errors.append(str(e)))
+                page.route("**/api/view*", lambda r: r.fulfill(status=200, content_type="application/json",
+                                                               body=json.dumps(view)))
+                page.route("**/api/check", lambda r: r.fulfill(status=200, content_type="application/json",
+                                                               body=json.dumps(check)))
+                page.goto(self.url)
+                page.click(".ck-item-btn")
+                page.wait_for_selector(".ck-stale-banner")
+                page.locator("button[aria-label^='Why is this stale']").click()
+                page.wait_for_selector(".ck-why-list li")
+                words = page.locator(".ck-why").text_content()
+                self.assertIn(f"spec.md changed since this answer was locked. Git history is {NOGIT}", words)
+                self.assertFalse(page.evaluate("document.documentElement.scrollWidth > innerWidth"))
+                self.assertEqual(errors, [], f"{kind}: page errors")
 
 
 # -- 0.7.0: a live console, against the REAL server --------------------------------------
@@ -1774,6 +1828,23 @@ class NextStepAndVisualTests(unittest.TestCase):
                                       "roles": None, "text": "The spec still says the block floats."})
                     page.wait_for_selector(".ck-fork-head:has-text('Refine')")
                     self.assert_not_reloaded(page)
+
+    def test_a_refine_chip_in_the_server_says_which_time_it_shows(self):
+        # CONSOLE-kit/Q23: the served console reads no git, so a refine chip shows the file's time
+        # and says why it is not the last commit's. Catches: an unlabelled "file time" that reads
+        # as if git had been asked.
+        _seam_closed(self)
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                self.locked_question()
+                page = self.page(kind, 1280, url)
+                self.open_item(page)
+                page.wait_for_selector(".ck-question .ck-tag[data-step='refine']")
+                title = page.get_attribute(".ck-question .ck-tag[data-step='refine']", "title")
+                said = page.text_content(".ck-question .ck-tag[data-step='refine'] .ck-sr-only")
+                for text in (title, said):
+                    self.assertIn(f"(file time 2020-09-13T12:26:40Z; the last-commit time is {NOGIT}, lock ", text)
 
     def test_a_second_roar_is_refused_on_the_page_naming_the_first(self):
         # Catches: a roar allowed beside other seats, and a second roar the server lets through
