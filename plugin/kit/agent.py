@@ -59,6 +59,11 @@
                                                 and agentType only, deduplicated by message id) into
                                                 STATE/costs.jsonl, a sidecar the store never holds;
                                                 show: one fork's bill, unattributed subagents apart (K2)
+    agent.py --state DIR server add NAME --hostname HOST --aud AUD --port PORT --team-domain TEAM
+                       [--root DIR] [--page PATH] [--slug SLUG ...]
+                                                host this console on the one console server (K3): writes
+                                                server.json beside your registry, never the registry (you
+                                                run this, never a session)
     agent.py --state DIR register --project DIR [--steward NAME]
                                                 switch the plugin on for a project (you run this, never a session)
     agent.py --state DIR steward [NAME | --clear]
@@ -554,6 +559,19 @@ def main(argv=None) -> int:
                        "transcripts into STATE/costs.jsonl; `show --fork ID` prints that fork's bill.")
     s.add_argument("action", choices=("collect", "show"))
     s.add_argument("--fork", help="show: the fork record id whose tagged subagents to total")
+    s = sub.add_parser("server", description="Host this console on the one console server (K3): `add NAME` "
+                       "writes the project to server.json beside your registry. You run this, never a session.")
+    ss = s.add_subparsers(dest="server_cmd", required=True)
+    s = ss.add_parser("add")
+    s.add_argument("project_name", metavar="NAME", help="the project's name, e.g. myproject (the agent-name shape)")
+    s.add_argument("--hostname", required=True, help="the project console's public hostname, a bare DNS name")
+    s.add_argument("--aud", required=True, help="the project's Access application AUD tag")
+    s.add_argument("--port", type=int, required=True, help="the project's owner-door loopback port")
+    s.add_argument("--team-domain", required=True, help="e.g. yourteam.cloudflareaccess.com")
+    s.add_argument("--root", type=Path, help="the main root, when several are registered on --state")
+    s.add_argument("--page", default="index.html", help="the host page, a path under the root")
+    s.add_argument("--slug", action="append", dest="slugs", metavar="SLUG",
+                   help="an extra transcript slug for the cost collector; repeat for more")
     a = ap.parse_args(argv)
     # The agent name: --as, then this session's /console-kit:as (0.8.4), then CONSOLE_KIT_AGENT (0.8.2);
     # an empty variable counts as unset.
@@ -613,6 +631,17 @@ def _run(a, bell: Path) -> int:
         return 0
     if a.cmd == "costs":
         return _costs(a)
+    if a.cmd == "server":
+        from console_kit import serverfile as SF
+        try:   # the name is the user's word on this command line, never a key of the repository's config
+            e = SF.add(a.project_name, a.state, a.hostname, a.aud, a.port, a.team_domain, root=a.root,
+                       page=a.page, slugs=a.slugs)
+        except SF.ServerFileError as err:
+            print(f"refused, nothing written: {err}", file=sys.stderr)
+            return 1
+        print(f"server: project {a.project_name} on port {e['port']} ({e['hostname']}), state {e['state']}, "
+              f"root {e['root']} in {SF.location()}")
+        return 0
     if a.cmd in ("watch", "synced"):
         why = steward_refusal(a.state, a.agent, f"`{a.cmd}`")
         if why:
