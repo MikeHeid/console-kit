@@ -3680,6 +3680,55 @@ class StraceGateTests(unittest.TestCase):
             self.assertEqual(outcome(), ("run", ""))                 # present: the test runs
 
 
+WRITE_FAULT_CHILD = r'''
+import errno, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from console_kit import stewardgit as SG
+os.urandom = lambda n: b"\0" * n          # the temporary's name, fixed so the trace can be read for it
+def full(*a, **k):
+    raise OSError(errno.ENOSPC, "No space left on device")
+os.rename = full                           # the write's rename fails, as on a full disk
+f = SG._Folders.open(Path(sys.argv[2]), create=True)
+try:
+    f.write(f.blobs, "a" * 64, b"some bytes")
+    print("WROTE")
+except OSError as e:
+    print("REFUSED", e.errno)
+print(sorted(os.listdir(f.blobs)))
+'''
+
+
+class StewardGitWriteFaultTests(unittest.TestCase):
+    """`_Folders.write`'s error path (lane 4 review gap b): the temporary is removed, through the held folder."""
+
+    def test_a_failed_write_removes_its_temporary_relative_to_the_folder(self):
+        # Catches: a temporary left behind when the rename fails, and one removed BY PATH (a link swapped in
+        # for the folder would redirect that unlink). Run under strace with the rename made to fail: the
+        # temporary is created and unlinked as one component relative to a held dirfd, and nothing is left.
+        import errno
+        import subprocess
+        need_strace(self)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        (d / "state").mkdir()
+        (d / "child.py").write_text(WRITE_FAULT_CHILD)
+        trace = d / "write.strace"
+        r = subprocess.run(["strace", "-f", "-qq", "-e", "trace=%file", "-o", str(trace), sys.executable,
+                            str(d / "child.py"), str(HERE / "plugin" / "kit"), str(d / "state")],
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.split("\n")[:2], [f"REFUSED {errno.ENOSPC}", "[]"])   # failed, and nothing left
+        name = ".tmp." + "00" * 8
+        text = trace.read_text()
+        safe, unsafe = dirfd_ops(text, (name,))
+        self.assertEqual(unsafe, [])
+        calls = [ln.split("(", 1)[0].split()[-1] for ln in text.splitlines() if f'"{name}"' in ln]
+        self.assertEqual(calls, ["openat", "unlinkat"], text[-2000:])   # created, then removed, both dir-relative
+        self.assertEqual(safe, 2)
+
+
 AT_CALLS = {"openat": "open", "openat2": "open", "newfstatat": "stat", "statx": "stat", "fstatat64": "stat",
             "mkdirat": "", "unlinkat": "", "renameat": "", "renameat2": "", "readlinkat": ""}
 
