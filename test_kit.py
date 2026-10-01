@@ -1151,10 +1151,10 @@ class AnswerFollowUpStoreTests(Tmp):
         a = st.append(answer())
         st.append(lock(a))
         self.assertEqual(fk(f["id"])["kind"], "open")
-        # Any other fork: its questions AND the result reply, unless it was refused.
+        # Any other fork: a progress note does not close it; its questions or a Result: reply do.
         h = st.append(about(roles=("devops",)))
         self.assertEqual(fk(h["id"])["kind"], "follow_up")
-        st.append(message(by="agent", text="Result: 1 questions (LANE.1/Q3)", reply_to=h["id"]))
+        st.append(message(by="agent", text="Seats are reading.", reply_to=h["id"]))
         self.assertFalse(fk(h["id"])["done"])
         st.append(question(qid="LANE.1/Q3", forked_from=h["id"], star_by="devops"))
         self.assertTrue(fk(h["id"])["done"])
@@ -1166,6 +1166,37 @@ class AnswerFollowUpStoreTests(Tmp):
         j = st.append(fork())
         st.append(message(text="Result: ★ a", reply_to=j["id"]))
         self.assertFalse(fk(j["id"])["done"])
+
+    def test_forks_finished_before_the_result_line_stay_done(self):
+        # Review round 2, HIGH (measured on a real store: 7 done before, 0 after). The shape a
+        # pre-Result: store holds: item, round and follow-up forks with their questions and a plain
+        # summary reply. Catches: a done rule that needs Result: from them, so an upgrade would
+        # re-run every past deliberation; and the fallback leaking to open-question rounds.
+        st = self.store()
+        st.append(question())
+        st.append(lock(st.append(answer())))
+
+        def done():
+            return {fid: f["done"] for fid, f in V.build(st, ITEMS, V.make_evaluator(self.dir, {}))["forks"].items()}
+
+        old = []
+        item = st.append(fork())
+        rnd = st.append(follow_up(item["id"]))
+        fu = st.append(about(roles=("devops",)))
+        for n, f in enumerate((item, rnd, fu), 2):
+            st.append(question(qid=f"LANE.1/Q{n}", forked_from=f["id"], star_by="panel"))
+            st.append(message(by="agent", text="Summary: the committee found ...", reply_to=f["id"]))
+            old.append(f["id"])
+        self.assertEqual([done()[f] for f in old], [True, True, True])
+        # Open-question rounds (new) need the Result: line, whatever else exists.
+        st.append(question(qid="LANE.1/Q9"))
+        prog = st.append(about(qid="LANE.1/Q9", roles=("ux",)))
+        st.append(message(by="agent", text="Working: one seat running.", reply_to=prog["id"]))
+        repl = st.append(about(qid="LANE.1/Q9", roles=("analyst",)))
+        st.append(question(qid="LANE.1/Q10", forked_from=repl["id"], star_by="analyst"))
+        self.assertEqual((done()[prog["id"]], done()[repl["id"]]), (False, False))
+        st.append(message(by="agent", text="Result: replaced by LANE.1/Q10", reply_to=repl["id"]))
+        self.assertTrue(done()[repl["id"]])
 
     def test_a_roar_refine_or_drill_still_needs_a_locked_answer(self):
         # Counter-check on the relaxation: only seats deliberate before an answer.

@@ -33,11 +33,10 @@ from .names import named
 from .store import Store
 
 STATES = ("awaiting_you", "unlocked", "locked", "stale")
-# A fork is done only when its FINAL result exists (owner ruling build_reply, review round 1):
-# an agent message replying to the fork whose first line starts with RESULT. Progress notes
-# never reply to the fork, so an early reply cannot hide a deliberation still to run.
+# When a fork is done (owner ruling build_reply, review rounds 1-2): an agent message replying
+# to the fork whose first line starts with RESULT, or - for any fork but an open-question round -
+# its questions. Progress notes never reply to the fork, so they cannot hide a pending round.
 RESULT = "Result:"
-REFUSED = "Result: refused"
 COUNTED = ("awaiting_you", "awaiting_agent", "unlocked", "stale")
 
 
@@ -85,12 +84,13 @@ def fork_result(msgs: list[dict], fid: str) -> dict | None:
 
 
 def fork_done(f: dict) -> bool:
-    """Done = the result reply exists, and (for any fork but an open-question round) its questions too,
-    unless the result is a refusal. The agent posts questions first and the result reply last."""
-    r = f["result"]
-    if r is None:
-        return False
-    return f["kind"] == "open" or bool(f["questions"]) or r["text"].lstrip().startswith(REFUSED)
+    """Done = a RESULT reply exists, OR the fork is not an open-question round and its questions exist.
+
+    Open-question rounds are new, so they always need the RESULT line. Every older kind keeps the
+    rule forks were finished under before it (questions back), so an upgrade re-runs nothing."""
+    if f["result"] is not None:
+        return True
+    return f["kind"] != "open" and bool(f["questions"])
 
 
 def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool],
