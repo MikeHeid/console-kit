@@ -134,6 +134,79 @@ class EarlyRefusalDrainTests(unittest.TestCase):
         s.sendall(body)                                   # EPIPE here when it closed without reading
         s.close()
 
+    # -- the drain is bounded (K4 security review): by size, and by ONE total deadline ------------
+
+    def server(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        (d / "page.html").write_text(PAGE)
+        cfg = SV.Config(root=d, page=d / "page.html", state=d / "state", adapter=d / "unused.py",
+                        team_domain="t.example.com", aud=AUD, hostname=HOSTNAME, port=0)
+        cfg.state.mkdir()
+        (d / "unused.py").write_text("def items():\n    return {}\ndef seed_questions():\n    return []\n"
+                                     "def record(entries, dry_run):\n    return []\n")
+        console = SV.Console(cfg, SV.load_adapter(cfg.adapter))
+        srv = SV.UnixHTTPServer(str(d / "a.sock"), type("H", (SV.AgentHandler,), {"console": console}))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return d / "a.sock"
+
+    def refused_then_eof(self, sock, declared: int, feed=None) -> float:
+        """Send headers declaring `declared` body bytes to an unknown route, read the 404, then time to EOF."""
+        import socket as so
+        s = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+        s.settimeout(15)
+        s.connect(str(sock))
+        self.addCleanup(s.close)
+        s.sendall(b"POST /no-such-route HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                  b"Content-Length: " + str(declared).encode() + b"\r\n\r\n")
+        got = b""
+        while not got.endswith(b"}"):
+            chunk = s.recv(4096)
+            self.assertTrue(chunk, "the connection closed before the refusal arrived")
+            got += chunk
+        self.assertIn(b" 404 ", got.split(b"\r\n", 1)[0])
+        t0 = time.monotonic()
+        stop = threading.Event()
+        if feed is not None:
+            threading.Thread(target=feed, args=(s, stop), daemon=True).start()
+        try:
+            self.assertEqual(s.recv(1), b"")              # EOF: the server closed
+        except (ConnectionResetError, BrokenPipeError):
+            pass                                          # closed with bytes unread: an RST, also a close
+        finally:
+            stop.set()
+        return time.monotonic() - t0
+
+    def test_a_body_larger_than_max_body_is_not_read_or_waited_for(self):
+        # Catches: draining whatever length is declared (an 8 MiB claim must not be read, nor waited on).
+        took = self.refused_then_eof(self.server(), SV.AGENT_MAX_BODY * 4)
+        self.assertLess(took, 1.0)
+
+    def test_a_client_that_declares_a_body_and_stops_is_cut_off_at_the_deadline(self):
+        from unittest import mock
+        with mock.patch.object(SV, "DRAIN_SECONDS", 0.5):
+            took = self.refused_then_eof(self.server(), 1000)
+        self.assertLess(took, 2.0)                        # not the 30 s per-read timeout
+
+    def test_a_trickling_client_cannot_stretch_the_deadline(self):
+        # Catches: a per-read timeout standing in for a total one. A byte every 0.2 s restarts any per-read
+        # timer for ever; the total deadline still closes the connection on time.
+        from unittest import mock
+
+        def trickle(s, stop):
+            while not stop.is_set():
+                try:
+                    s.send(b" ")
+                except OSError:
+                    return
+                time.sleep(0.2)
+        with mock.patch.object(SV, "DRAIN_SECONDS", 0.5):
+            took = self.refused_then_eof(self.server(), 100_000, feed=trickle)
+        self.assertLess(took, 2.0)
+
 
 def steward_push(console, root) -> dict:
     """What `agent.py history-push` does, in-process: the server says what it wants, the steward reads git

@@ -90,6 +90,7 @@ from .fold import load_adapter
 from .store import Store, StoreError
 
 HOST = "127.0.0.1"          # never configurable: the tunnel is the only way in
+DRAIN_SECONDS = 2.0         # at most this long, in all, reading a body an early refusal left unread
 MAX_BODY = 64 * 1024        # far above any real answer (MAX_TEXT is 20 000 characters)
 OWNER_ROUTES = {"/api/message": "message", "/api/answer": "answer", "/api/lock": "lock"}
 # The live console (0.7.0). A long poll: the page asks "has anything changed
@@ -1104,11 +1105,30 @@ class _Handler(BaseHTTPRequestHandler):
             raw = self.headers.get("Content-Length") if getattr(self, "headers", None) is not None else None
             if not self._body_taken and raw and re.fullmatch(r"[0-9]{1,12}", raw.strip()) \
                     and 0 < int(raw) <= self.max_body:
-                self.rfile.read(int(raw))
+                self._drain(int(raw))
         except OSError:
-            pass   # the client went away: nothing to protect
+            pass   # the client went away, or the deadline passed: close, the answer is already sent
         finally:
             super().finish()
+
+    def _drain(self, left: int) -> None:
+        """Read and drop up to `left` bytes within DRAIN_SECONDS IN ALL, then stop.
+
+        The socket timeout alone is per read and restarts with every byte, so a
+        client trickling one byte at a time could hold this thread for hours,
+        and ThreadingMixIn caps nothing. Each read gets only the time that is
+        left of one total deadline.
+        """
+        deadline = time.monotonic() + DRAIN_SECONDS
+        while left > 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            self.connection.settimeout(remaining)
+            got = self.rfile.read1(min(left, 64 * 1024))
+            if not got:
+                return
+            left -= len(got)
 
     def _send_raw(self, code: int, data: bytes, ctype: str, csp: str) -> None:
         """A body that is not JSON, under its own Content-Security-Policy (0.8.0, a stored visual)."""
