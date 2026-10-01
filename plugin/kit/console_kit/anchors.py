@@ -233,8 +233,12 @@ class History:
         self._versions[rel] = out
         return out
 
-    def find(self, rel: str, sha256: str) -> tuple[str, str] | None:
-        """(commit, text) of the newest version of `rel` whose sha256 is `sha256`, or None."""
+    source = None   # git read here, in this process: no provenance to name (the steward's is `stewardgit`)
+
+    def find(self, rel: str, sha256: str):
+        """(commit, text) of the newest version of `rel` whose sha256 is `sha256`, None, or `G.NO_GIT` (no git here)."""
+        if not G.is_open():
+            return G.NO_GIT
         for commit, blob in self.versions(rel) or []:
             if hashlib.sha256(blob).hexdigest() == sha256:
                 return commit, blob.decode("utf-8", errors="replace")
@@ -346,21 +350,25 @@ def explain(c: dict, tree: Tree, history: History, source: str) -> dict:
 
 def _file_changed(c: dict, text: str, history: History, source: str) -> dict:
     words = f"{c['path']} changed since this answer was locked."
-    if not G.is_open():  # in the server (Q23): no history was read, and the answer says so
+    found = history.find(c["path"], c["sha256"])
+    if isinstance(found, G.Unavailable):  # in the server (Q23), with nothing the steward pushed for it
         return {"history": G.UNAVAILABLE,
                 "words": words + f" Git history is {G.UNAVAILABLE}, so the version it was locked against, "
                                  f"and what changed, cannot be shown."}
-    found = history.find(c["path"], c["sha256"])
     if found is None:
         return {"words": words + " The version it was locked against is not in the recent git history, "
                                  "so what changed cannot be shown."}
     commit, old = found
-    out = {"locked_version": commit[:12]}
+    out = {"locked_version": commit[:12] if commit else None}
+    named = _version_words(commit, history)
+    if history.source:   # the past version is the steward's (hash-verified); the commit id is its word alone
+        out["history"] = history.source
+        words += f" The version it was locked against came {history.source}, checked against the lock's hash."
     rng = cited_range(source, c["path"])
     cited = _lines(old, rng) if rng else None
     if cited is None or not normalise(cited):
         return {**out, "words": words + f" The question cites no line range in this file, so the whole file "
-                                        f"counts (it was locked against commit {commit[:12]})."}
+                                        f"counts (it was locked against {named})."}
     if normalise(cited) in normalise(text):
         return {**out, "cited_text": "unchanged",
                 "words": words + f" The lines the question cites ({rng[0]}-{rng[1]} when it was locked) are "
@@ -369,6 +377,12 @@ def _file_changed(c: dict, text: str, history: History, source: str) -> dict:
     near = nearest(cited, text) or {}
     return {**out, "cited_text": "changed", **near,
             "words": words + f" The lines the question cites ({rng[0]}-{rng[1]} when it was locked) changed."}
+
+
+def _version_words(commit: str | None, history) -> str:
+    """'commit abc123def456', with the steward named when the id is its word; an unnamed version said so."""
+    prov = f" ({history.source})" if history.source else ""
+    return f"commit {commit[:12]}{prov}" if commit else f"a version whose commit was not named{prov}"
 
 
 def check(store, root: Path, item_status: Mapping[str, str | None],
@@ -448,17 +462,18 @@ def _reanchor_one(c: dict, tree: Tree, history: History, source: str) -> tuple[d
     rng = cited_range(source, c["path"])
     if rng is None:
         return None, f"the question's source ({source}) names no line range in {c['path']}"
-    if not G.is_open():  # in the server (Q23)
+    found = history.find(c["path"], c["sha256"])
+    if isinstance(found, G.Unavailable):  # in the server (Q23), with nothing the steward pushed for it
         return None, (f"git history is {G.UNAVAILABLE}, so the version of {c['path']} it was locked "
                       f"against cannot be looked up")
-    found = history.find(c["path"], c["sha256"])
     if found is None:
         return None, (f"the version of {c['path']} it was locked against is not in the last "
                       f"{history.max_commits} commits that touched it")
     commit, old = found
+    named = _version_words(commit, history)
     cited = _lines(old, rng)
     if cited is None or not normalise(cited):
-        return None, f"lines {rng[0]}-{rng[1]} are not in {c['path']} at {commit[:12]}"
+        return None, f"lines {rng[0]}-{rng[1]} are not in {c['path']} at {named}"
     if len(normalise(cited)) < S.MIN_EXCERPT:
         return None, f"lines {rng[0]}-{rng[1]} are too short to anchor on ({len(normalise(cited))} characters)"
     if len(cited) > S.MAX_EXCERPT:
@@ -466,14 +481,14 @@ def _reanchor_one(c: dict, tree: Tree, history: History, source: str) -> tuple[d
                       f"{S.MAX_EXCERPT} an excerpt may hold")
     seen = tree.norm(c["path"]).count(normalise(cited))
     if seen == 0:
-        return None, f"lines {rng[0]}-{rng[1]} as locked (commit {commit[:12]}) changed; the answer is really stale"
+        return None, f"lines {rng[0]}-{rng[1]} as locked ({named}) changed; the answer is really stale"
     if seen > 1:
         # An excerpt found in several places would hold while the one the question
         # meant was changed or deleted: too weak to justify calling the answer fresh.
         return None, (f"lines {rng[0]}-{rng[1]} as locked appear {seen} times in {c['path']} now, "
                       f"so they cannot pin the one the question meant")
     return ({"kind": "excerpt", "path": c["path"], "text": cited},
-            f"lines {rng[0]}-{rng[1]} as locked (commit {commit[:12]}) are unchanged in the file now")
+            f"lines {rng[0]}-{rng[1]} as locked ({named}) are unchanged in the file now")
 
 
 # -- structured evidence (0.7.0) -------------------------------------------------------

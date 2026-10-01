@@ -135,6 +135,18 @@ class EarlyRefusalDrainTests(unittest.TestCase):
         s.close()
 
 
+def steward_push(console, root) -> dict:
+    """What `agent.py history-push` does, in-process: the server says what it wants, the steward reads git
+    (the seam open, as in the agent's process) for exactly that, and pushes it through the console's own door."""
+    from console_kit import stewardgit as SG
+    want = console.history_wants()
+    with seam_open():
+        blobs, specs = SG.collect(root, want)
+    for b in blobs:
+        console.push_history_blob(b)
+    return {"want": want, "blobs": blobs, "specs": console.push_history_specs({"specs": specs})}
+
+
 class ServerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -710,13 +722,9 @@ class ServerTests(unittest.TestCase):
         self.assertEqual((p["lock"], p["changes"], p["fresh"]), (lk["id"], [], False))
 
     def agent_side_plan(self):
-        """`plan_reanchor` as an agent-side caller runs it, with git history (what the follow-up lane restores)."""
-        real = SV.A.plan_reanchor
-
-        def plan(*a, **kw):
-            with seam_open():
-                return real(*a, **kw)
-        return plan
+        """`plan_reanchor` after the steward pushed git history (Q23 part 2): the server plans it ITSELF."""
+        steward_push(self.console, self.cfg.root)
+        return SV.A.plan_reanchor
 
     def test_reanchor_takes_no_anchors_from_the_caller(self):
         code, out = SV.agent_request(self.cfg.socket, "POST", "/reanchor",
@@ -2724,6 +2732,11 @@ a = call("owner POST /api/answer", owner, "POST", "/api/answer",
          {"qid": "LANE.1/Q2", "picks": ["a"], "own_text": "", "nonce": "nogitanswer1"})
 call("owner POST /api/lock", owner, "POST", "/api/lock",
      {"qid": "LANE.1/Q2", "answer": a["record"]["id"], "nonce": "nogitlock001"})
+if "push" in p:   # Q23 part 2: what the steward computed with git in ITS process, pushed as data
+    out["wants"] = call("agent GET /history-wants", agent, "GET", "/history-wants")
+    for b in p["push"]["blobs"]:
+        call("agent POST /history-blob", agent, "POST", "/history-blob", b)
+    out["specs"] = call("agent POST /history-specs", agent, "POST", "/history-specs", {"specs": p["push"]["specs"]})
 for path in ("/", "/index.html", "/api/board", "/api/usage", "/api/feed", "/api/wait?since=0&timeout=0",
              "/api/evidence?qid=LANE.1/Q2", "/api/visual?id=" + "0" * 24):
     call("owner GET " + path, owner, "GET", path)
@@ -3711,6 +3724,284 @@ class RootConfinementTests(_OneServer, unittest.TestCase):
         subprocess.run(["strace", "-f", "-qq", "-e", "trace=open,openat,openat2", "-o", str(ctl), sys.executable,
                         "-c", f"open({str(A['root'] / 'race' / 'page.html')!r}).read()"], check=True, timeout=60)
         self.assertEqual(len(page_opens(ctl.read_text(), ("race", "page.html"))[1]), 1)   # the control is caught
+
+
+class StewardGitTests(_Live, unittest.TestCase):
+    """CONSOLE-kit/Q23 part 2, "restore it agent-side": git runs in the steward, the server gets DATA.
+
+    Same project as NoServerGitTests (a git work tree whose spec was committed,
+    locked against, then committed again), the seam closed as `serve` closes it.
+    Each feature is shown both ways: the steward's data when its key matches,
+    the existing label when it does not.
+    """
+
+    setUp = NoServerGitTests.setUp
+
+    def push(self):
+        return steward_push(self.console, self.root)
+
+    def blob_dir(self):
+        return self.cfg.state / "steward-git" / "blobs"
+
+    def condition(self):
+        code, out = self.req("GET", "/api/check", tok=token())
+        self.assertEqual(code, 200, out)
+        [c] = out["stale"]["LANE.1/Q2"]["conditions"]
+        return out, c
+
+    def refine(self):
+        tags = self.req("GET", "/api/view", tok=token())[1]["view"]["tags"]
+        [r] = [t for t in tags["questions"]["LANE.1/Q2"] if t["step"] == "refine"]
+        return tags, r["reason"]
+
+    # -- what the server asks for -------------------------------------------------------------
+
+    def test_the_server_asks_only_for_what_its_own_store_and_tree_name(self):
+        code, want = SV.agent_request(self.cfg.socket, "GET", "/history-wants")
+        self.assertEqual(code, 200, want)
+        self.assertEqual(want["blobs"], [{"path": "specs/spec.md", "sha256": self.v1}])
+        st = (self.root / "specs/spec.md").stat()
+        self.assertEqual(want["specs"], [{"path": "specs/spec.md", "mtime_ns": st.st_mtime_ns, "size": st.st_size}])
+
+    # -- 1. check history ----------------------------------------------------------------------
+
+    def test_check_history_returns_from_the_steward_and_the_label_without_it(self):
+        # Before: the label. After a push: the server's OWN verdict on the cited lines, from a verified blob.
+        out, c = self.condition()
+        self.assertEqual((out["history"], c["history"]), (NOGIT, NOGIT))
+        self.push()
+        out, c = self.condition()
+        commit = subprocess_git(self.root, "rev-list", "--max-parents=0", "HEAD")
+        self.assertTrue(out["history"].startswith("from the steward, pushed "), out["history"])
+        self.assertEqual((c["reason"], c["history"], c["cited_text"], c["locked_version"]),
+                         ("file_changed", "from the steward", "unchanged", commit[:12]))
+        self.assertIn("came from the steward, checked against the lock's hash", c["words"])
+        self.assertNotIn(NOGIT, c["words"])
+
+    def test_a_blob_that_does_not_hash_to_its_key_is_refused_and_the_label_stays(self):
+        # Catches: storing what the steward says without re-hashing it.
+        good = self.push()["blobs"][0]
+        __import__("shutil").rmtree(self.blob_dir())
+        lie = {**good, "content_b64": __import__("base64").b64encode(b"# Spec\nsomething else\n").decode()}
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob", lie)
+        self.assertEqual(code, 400, out)
+        self.assertIn(f"does not hash to {self.v1}", out["error"])
+        self.assertFalse((self.blob_dir() / self.v1).exists())
+        self.assertEqual(self.condition()[1]["history"], NOGIT)
+
+    def test_a_blob_changed_on_disk_after_the_push_proves_nothing(self):
+        # Catches: trusting the stored file on read (the hash is checked again every time it is used).
+        self.push()
+        (self.blob_dir() / self.v1).write_text("# Spec\n\nThe cited claim, line one.\nThe cited claim, line two.\n")
+        self.assertEqual(self.condition()[1]["history"], NOGIT)
+
+    def test_a_blob_no_current_lock_names_is_neither_stored_nor_kept(self):
+        # Catches: a store that fills with whatever is pushed, and a prune that never runs.
+        import base64, hashlib
+        data = b"a version no lock was taken against\n"
+        sha = hashlib.sha256(data).hexdigest()
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob",
+                                     {"sha256": sha, "commit": "a" * 40, "content_b64": base64.b64encode(data).decode()})
+        self.assertEqual(code, 400, out)
+        self.assertIn(f"no current lock names {sha}", out["error"])
+        self.assertFalse((self.blob_dir() / sha).exists())
+        self.push()
+        planted = self.blob_dir() / sha             # one that got there some other way
+        planted.write_bytes(data)
+        self.console.push_history_specs({"specs": []})
+        self.assertFalse(planted.exists())
+        self.assertTrue((self.blob_dir() / self.v1).exists())
+
+    def test_a_client_sent_path_never_names_a_file(self):
+        # Catches: a blob stored under a name the client chose (the closed schema refuses the key outright).
+        good = self.push()["blobs"][0]
+        __import__("shutil").rmtree(self.blob_dir())
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob",
+                                     {**good, "path": "../../escaped"})
+        # First what reached the disk, then the status: a server that took the path writes `escaped` somewhere.
+        self.assertEqual(sorted(str(p) for p in self.cfg.state.parent.rglob("escaped*")), [])
+        self.assertEqual(code, 400, out)
+        self.assertEqual(self.condition()[1]["history"], NOGIT)
+
+    def test_the_stored_versions_have_a_total_cap(self):
+        # Catches: a per-blob cap with no total, so many locks fill the state disk.
+        from unittest import mock
+        from console_kit import stewardgit as SG
+        good = steward_push(self.console, self.root)["blobs"][0]
+        (self.blob_dir() / ("f" * 64)).write_bytes(b"x" * 100)   # what the folder already holds
+        size = (self.blob_dir() / self.v1).stat().st_size
+        with mock.patch.object(SG, "MAX_STORED", size + 99):
+            code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob", good)
+        self.assertEqual(code, 400, out)
+        self.assertIn(f"would pass {size + 99} bytes", out["error"])
+        with mock.patch.object(SG, "MAX_STORED", size + 100):   # the control: exactly at the cap is allowed
+            self.assertEqual(SV.agent_request(self.cfg.socket, "POST", "/history-blob", good)[0], 200)
+
+    def test_a_symlink_planted_where_a_blob_goes_is_not_followed(self):
+        # Catches: opening a blob by name with the link followed. The target holds the TRUE v1 bytes, so
+        # only O_NOFOLLOW (not the hash) stands between it and the panel.
+        self.push()
+        outside = self.root.parent / f"{self.root.name}-v1-outside"
+        outside.write_bytes((self.blob_dir() / self.v1).read_bytes())
+        self.addCleanup(lambda: outside.unlink(missing_ok=True))
+        (self.blob_dir() / self.v1).unlink()
+        (self.blob_dir() / self.v1).symlink_to(outside)
+        self.assertEqual(self.condition()[1]["history"], NOGIT)
+
+    def test_a_commit_id_in_any_other_shape_is_dropped(self):
+        good = self.push()["blobs"][0]
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob", {**good, "commit": "HEAD; rm -rf"})
+        self.assertEqual((code, out["commit"]), (200, None), out)
+        _, c = self.condition()
+        self.assertIsNone(c["locked_version"])
+        self.assertIn("from the steward", c["history"])
+        self.assertNotIn("rm -rf", json.dumps(c))
+
+    # -- 2. reanchor ------------------------------------------------------------------------
+
+    def test_reanchor_is_planned_by_the_server_from_the_blob_and_written(self):
+        # The agent sends only {"dry_run": false}; the replacement excerpt is computed here, from a verified blob,
+        # and re-checked against the tree before the write (still_supported). Without a push: the label.
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/reanchor", {"dry_run": False})
+        self.assertEqual((code, out["history"]), (200, NOGIT))
+        self.assertIn(NOGIT, out["plan"][0]["unresolved"][0]["why"])
+        self.push()
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/reanchor", {"dry_run": False})
+        self.assertEqual(code, 200, out)
+        [p] = out["plan"]
+        self.assertIn("record", p)
+        self.assertEqual(p["anchors"], [{"kind": "excerpt", "path": "specs/spec.md",
+                                         "text": "The cited claim, line one.\nThe cited claim, line two."}])
+        self.assertIn("(from the steward)", p["changes"][0]["why"])
+        self.assertEqual(self.req("GET", "/api/view", tok=token())[1]["view"]["questions"]["LANE.1/Q2"]["state"],
+                         "locked")
+
+    # -- 3. refine tags ---------------------------------------------------------------------
+
+    def test_refine_shows_the_last_commit_while_its_key_matches_and_the_label_after(self):
+        tags, why = self.refine()
+        self.assertEqual(tags["git"], NOGIT)
+        self.assertIn(f"file time 2020-09-13T12:26:40Z; the last-commit time is {NOGIT}", why)
+        self.push()
+        head = subprocess_git(self.root, "rev-parse", "HEAD")
+        ct = int(subprocess_git(self.root, "log", "-1", "--format=%ct", "--", "specs/spec.md"))
+        tags, why = self.refine()
+        self.assertEqual(tags["git"], "from the steward")
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ct))
+        self.assertIn(f"last commit {stamp} (from the steward, HEAD {head[:12]})", why)
+        # The key moves (the file is touched, same bytes): the pushed time is never shown for it again.
+        os.utime(self.root / "specs/spec.md", (1_600_000_100, 1_600_000_100))
+        tags, why = self.refine()
+        self.assertEqual(tags["git"], NOGIT)
+        self.assertIn(f"the last-commit time is {NOGIT}", why)
+        self.assertNotIn("from the steward", why)
+
+    def test_a_spec_time_the_server_did_not_ask_for_is_ignored(self):
+        # Catches: storing a record for a path the client chose, or for a stat the server does not see.
+        st = (self.root / "specs/spec.md").stat()
+        rec = {"path": "specs/spec.md", "mtime_ns": st.st_mtime_ns, "size": st.st_size, "head": "b" * 40,
+               "edited": 1}
+        out = self.console.push_history_specs({"specs": [{**rec, "path": "specs/other.md"},
+                                                         {**rec, "size": st.st_size + 1}]})
+        self.assertEqual((out["specs"], out["ignored"]), (0, ["specs/other.md", "specs/spec.md"]))
+        self.assertIn(f"the last-commit time is {NOGIT}", self.refine()[1])
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/history-specs", {"specs": [{**rec, "path": "../x"}]})
+        self.assertEqual(code, 400, out)
+
+    # -- the steward's own command, and the server starting nothing --------------------------
+
+    def test_history_push_from_the_cli_in_its_own_process(self):
+        # The real `agent.py history-push`, a separate process (git allowed there), against this server.
+        from console_kit import registry as R
+        reg = self.root.parent / f"{self.root.name}-cfg" / "console-kit" / "projects.json"
+        R.register(self.root, self.cfg.state, Path(SV.__file__).resolve().parent.parent, path=reg)
+        self.addCleanup(lambda: __import__("shutil").rmtree(reg.parent.parent, ignore_errors=True))
+        env = {**os.environ, "XDG_CONFIG_HOME": str(reg.parent.parent)}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        r = subprocess.run([sys.executable, str(Path(SV.__file__).resolve().parent.parent / "agent.py"),
+                            "--state", str(self.cfg.state), "history-push", "--project", str(self.root)],
+                           capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads(r.stdout)
+        self.assertEqual((got["blobs"], got["specs"]["specs"], got["refused"]),
+                         ({"asked": 1, "sent": 1, "not_in_history": 0}, 1, []))
+        self.assertEqual(self.condition()[1]["history"], "from the steward")
+
+    def test_the_served_server_starts_no_process_with_steward_data_in_hand(self):
+        # The real `serve`, an audit hook on every spawn event, every route that once reached git, AFTER a
+        # push. Catches a server that, given the steward's data, goes to git anyway (or instead).
+        root = Path(tempfile.mkdtemp(prefix="ck-audit-push-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        v1 = git_project(root)
+        (root / "page.html").write_text(PAGE)
+        (root / "adapter.py").write_text(
+            "def items():\n    return {'LANE': {'title': 'a lane', 'parent': None, 'status': 'open'},\n"
+            "            'LANE.1': {'title': 'a phase', 'parent': 'LANE', 'status': 'open'}}\n"
+            "def seed_questions():\n    return []\n"
+            "def record(entries, dry_run):\n    return []\n")
+        st = (root / "specs/spec.md").stat()
+        from console_kit import stewardgit as SG
+        with seam_open():
+            blobs, specs = SG.collect(root, {"blobs": [{"path": "specs/spec.md", "sha256": v1}],
+                                             "specs": [{"path": "specs/spec.md", "mtime_ns": st.st_mtime_ns,
+                                                        "size": st.st_size}]})
+        params = {"kit": str(Path(SV.__file__).resolve().parent.parent), "root": str(root), "host": HOSTNAME,
+                  "question": spec_question(v1), "push": {"blobs": blobs, "specs": specs}}
+        r = subprocess.run([sys.executable, "-c", AUDIT_CHILD, json.dumps(params), json.dumps(SPAWN_EVENTS)],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual(got["spawned"], [], "the server started a process")
+        for name, code in got["codes"].items():
+            self.assertLess(code, 500, name)
+        self.assertEqual(got["codes"]["agent POST /history-blob"], 200)
+        out = got["out"]
+        self.assertEqual(out["specs"]["specs"], 1)
+        [c] = out["check"]["stale"]["LANE.1/Q2"]["conditions"]
+        self.assertEqual((c["history"], c["cited_text"]), ("from the steward", "unchanged"))
+        self.assertEqual(out["view"]["view"]["tags"]["git"], "from the steward")
+        self.assertIn("record", out["reanchor"]["plan"][0])
+
+
+def subprocess_git(root: Path, *args) -> str:
+    import subprocess
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=True).stdout.strip()
+
+
+class OneServerStewardGitTests(_OneServer, unittest.TestCase):
+    """The same data reaches the one server (K3) through /p/<name>/, with the audit hook watching it."""
+
+    def test_history_push_reaches_the_one_server_and_it_starts_nothing(self):
+        import subprocess
+        alpha = self.p["alpha"]
+        v1 = git_project(alpha["root"])
+        self.spawn()
+        items = {"LANE": {"title": "a lane", "parent": None, "status": "open"},
+                 "LANE.1": {"title": "a phase", "parent": "LANE", "status": "open"}}
+        self.assertEqual(self.push("alpha", items)[0], 200)
+        code, out = self.agent("POST", "/p/alpha/question", spec_question(v1))
+        self.assertEqual(code, 200, out)
+        code, a = self.owner("alpha", "POST", "/api/answer", {"qid": "LANE.1/Q2", "picks": ["a"], "own_text": "",
+                                                             "nonce": "k3gitanswer1"})
+        self.assertEqual(code, 200, a)
+        code, lk = self.owner("alpha", "POST", "/api/lock", {"qid": "LANE.1/Q2", "answer": a["record"]["id"],
+                                                           "nonce": "k3gitlock001"})
+        self.assertEqual(code, 200, lk)
+        _, before = self.agent("GET", "/p/alpha/check")
+        self.assertEqual(before["history"], NOGIT)
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg)}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        r = subprocess.run([sys.executable, str(HERE / "plugin" / "kit" / "agent.py"), "--state", str(alpha["state"]),
+                            "history-push", "--project", str(alpha["root"])],
+                           capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        _, after = self.agent("GET", "/p/alpha/check")
+        [c] = after["stale"]["LANE.1/Q2"]["conditions"]
+        self.assertEqual((c["history"], c["cited_text"]), ("from the steward", "unchanged"))
+        self.assertEqual(self.owner("alpha", "GET", "/api/view")[1]["view"]["tags"]["git"], "from the steward")
+        self.assertEqual(self.agent("GET", "/p/beta/check")[1]["history"], NOGIT)   # beta's data is its own
+        self.stop()
+        self.assertEqual(self.violations(), [])                 # no spawn, import or compile from a root
 
 
 if __name__ == "__main__":

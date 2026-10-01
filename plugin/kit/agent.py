@@ -498,6 +498,57 @@ def _items_push(a) -> int:
     return 0
 
 
+def _history_push(a) -> int:
+    """`history-push` (Q23 part 2): git runs HERE; the server gets past versions and spec times as data."""
+    from console_kit import serverfile as SF
+    from console_kit import stewardgit as SG
+    from console_kit.multiserver import socket_path
+    state = os.path.realpath(a.state)
+    found = R.enclosing(a.project)
+    if found is None or found[1].get("state") != state:
+        print(f"refused, nothing sent: {Path(a.project).resolve()} is not a project registered on the console at "
+              f"{state}", file=sys.stderr)
+        return 1
+    root = Path(found[0])
+    # The server that holds this console: its own socket, else the one server (K3) that hosts it.
+    sock, prefix = Path(state) / "agent.sock", ""
+    if not sock.is_socket():
+        try:
+            names = [n for n, e in SF.load()["projects"].items() if isinstance(e, dict) and e.get("state") == state]
+        except SF.ServerFileError as e:
+            print(f"no console server answers for {state}: no {sock}, and {e}", file=sys.stderr)
+            return 2
+        if len(names) != 1:
+            print(f"no console server answers for {state}: no {sock}, and server.json hosts {len(names)} projects "
+                  f"there", file=sys.stderr)
+            return 2
+        sock, prefix = socket_path(SF.location()), f"/p/{names[0]}"
+    try:
+        code, want = agent_request(sock, "GET", f"{prefix}/history-wants", None, agent=a.agent)
+        if code != 200:
+            print(f"refused ({code}): {want.get('error')}", file=sys.stderr)
+            return 1
+        blobs, specs = SG.collect(root, want)
+        refused = []
+        for b in blobs:
+            code, out = agent_request(sock, "POST", f"{prefix}/history-blob", b, agent=a.agent)
+            if code != 200:
+                refused.append(f"{b['sha256'][:12]}: {out.get('error')}")
+        code, out = agent_request(sock, "POST", f"{prefix}/history-specs", {"specs": specs}, agent=a.agent)
+        if code != 200:
+            refused.append(f"spec times: {out.get('error')}")
+    except OSError as e:
+        print(f"the console server is not answering on {sock}: {e}", file=sys.stderr)
+        return 2
+    asked = len(want.get("blobs") or [])
+    sys.stdout.write(_json({"blobs": {"asked": asked, "sent": len(blobs) - len(refused), "not_in_history":
+                                      asked - len(blobs)},
+                            "specs": out if code == 200 else None, "refused": refused}))
+    for r in refused:
+        print(f"refused: {r}", file=sys.stderr)
+    return 1 if refused else 0
+
+
 def _refused_note(files: list, n: int, why: str | None, rc: int = 1) -> int:
     """A batch ask stopped at files[n]: say what was posted and what was not, so a re-run sends only the rest."""
     if why:
@@ -599,6 +650,10 @@ def main(argv=None) -> int:
                        "server never runs project code.")
     s.add_argument("--adapter", required=True, help="the adapter, a path inside the project")
     s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
+    s = sub.add_parser("history-push", description="Read git HERE, in your own process, for what the console "
+                       "server asks (the version each stale lock was taken against, the cited specs' last-commit "
+                       "times) and send it as data. The server starts no git (CONSOLE-kit/Q23).")
+    s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
     s = sub.add_parser("server", description="Host this console on the one console server (K3): `add NAME` "
                        "writes the project to server.json beside your registry. You run this, never a session.")
     ss = s.add_subparsers(dest="server_cmd", required=True)
@@ -673,6 +728,8 @@ def _run(a, bell: Path) -> int:
         return _costs(a)
     if a.cmd == "items-push":
         return _items_push(a)
+    if a.cmd == "history-push":
+        return _history_push(a)
     if a.cmd == "server":
         from console_kit import serverfile as SF
         try:   # the name is the user's word on this command line, never a key of the repository's config
