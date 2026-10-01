@@ -170,6 +170,13 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
     chat_owner = max((m["seq"] for m in chat if m["by"] == "owner"), default=0)
     chat_agent = max((m["seq"] for m in chat if m["by"] == "agent"), default=0)
 
+    # A visual request (0.8.0) waits while no stored visual names it as its `request`.
+    drawn = {v["request"] for vs in visuals.values() for v in vs}
+    waiting_visuals = sorted(({"id": m["id"], "item": m["item"], "seq": m["seq"]}
+                              for msgs in threads.values() for m in msgs
+                              if m["by"] == "owner" and m.get("intent") == "visual" and m["id"] not in drawn),
+                             key=lambda w: w["seq"])
+
     total = _roll_up(items, own)
     # A question whose item left the register (a rename with no alias yet, R7) is
     # named under `orphaned` rather than counted: the Inbox badge counts only
@@ -190,10 +197,117 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
         # 0.8.0: roar transcripts by fork id, and visuals by item (the file is served by /api/visual).
         "transcripts": transcripts,
         "visuals": visuals,
+        # Slim reads (K1): the visual requests nothing answers yet, oldest first; `todo` reads it from here.
+        "waiting_visuals": [{"id": w["id"], "item": w["item"]} for w in waiting_visuals],
         # The store's sequence number this view was built at (0.7.0): the page's
         # live loop and unread count compare against it.
         "seq": recs[-1]["seq"] if recs else 0,
     }
+
+
+# -- slim reads (K1) -----------------------------------------------------------------
+#
+# Each of these FILTERS a view `build` already made; none decides anything on its
+# own. "Waiting" is therefore worked out once, in `build`, and `todo` cannot drift
+# from what the page and `view` say.
+
+FORK_KEYS = ("mode", "focus", "roles", "about_qid", "follow_up_of", "step")
+
+
+def _fork_row(f: dict) -> dict:
+    m = f["message"]
+    return {"id": m["id"], "item": m["item"], "kind": f["kind"], **{k: m[k] for k in FORK_KEYS if k in m}}
+
+
+def todo(view: dict) -> dict:
+    """Exactly what a session processing the console needs to know is waiting, filtered from `view`.
+
+    forks           every fork that is not done, oldest first: its id, item, kind, mode and seats
+    awaiting_agent  the items whose thread waits on the agent
+    chat            whether the chat waits, and the owner message to reply to
+    visuals         the visual requests nothing answers yet (id, item)
+    inbox           the qids in the owner's inbox
+    seq             the store seq the view was built at
+    """
+    forks = sorted((f for f in view["forks"].values() if not f["done"]), key=lambda f: f["message"]["seq"])
+    chat = view["chat"]
+    owner_chat = [m for m in view["threads"].get(chat["item"], []) if m["by"] == "owner"]
+    return {
+        "forks": [_fork_row(f) for f in forks],
+        "awaiting_agent": list(view["awaiting_agent"]),
+        "chat": {"awaiting_agent": chat["awaiting_agent"],
+                 "reply_to": owner_chat[-1]["id"] if chat["awaiting_agent"] and owner_chat else None},
+        "visuals": [dict(w) for w in view["waiting_visuals"]],
+        "inbox": list(view["inbox"]),
+        "seq": view["seq"],
+    }
+
+
+def _filter_tags(view: dict, qids, fids) -> dict:
+    tags = view.get("tags")
+    if not isinstance(tags, dict):
+        return {}
+    return {"tags": {**tags, "questions": {q: t for q, t in tags.get("questions", {}).items() if q in qids},
+                     "forks": {f: t for f, t in tags.get("forks", {}).items() if f in fids}}}
+
+
+def item_view(payload: dict, item: str) -> dict:
+    """The agent door's payload narrowed to `item` and everything under it (D14's scope).
+
+    `@chat` narrows to the chat thread. Raises KeyError naming an item the
+    register does not hold. The shape is the payload's own, so a reader of
+    `view` reads this the same way; `view.scope` names the item.
+    """
+    view, items = payload["view"], payload["items"]
+    if item == S.CHAT_ITEM:
+        scope: set[str] = set()
+    elif item in items:
+        scope = subtree(items, item)
+    else:
+        raise KeyError(f"no item {item!r} in the project's item list")
+    keep = scope | ({S.CHAT_ITEM} if item == S.CHAT_ITEM else set())
+    questions = {q: v for q, v in view["questions"].items() if v["question"]["item"] in keep}
+    forks = {f: v for f, v in view["forks"].items() if v["message"]["item"] in keep}
+    out = {**view,
+           "scope": item,
+           "items": {i: c for i, c in view["items"].items() if i in scope},
+           "questions": questions,
+           "threads": {i: m for i, m in view["threads"].items() if i in keep},
+           "forks": forks,
+           "inbox": [q for q in view["inbox"] if q in questions],
+           "awaiting_agent": [i for i in view["awaiting_agent"] if i in keep],
+           "orphaned": [q for q in view["orphaned"] if q in questions],
+           "transcripts": {f: t for f, t in view["transcripts"].items() if f in forks},
+           "visuals": {i: v for i, v in view["visuals"].items() if i in keep},
+           "waiting_visuals": [w for w in view["waiting_visuals"] if w["item"] in keep],
+           **_filter_tags(view, questions, forks)}
+    return {**payload, "view": out, "items": {i: d for i, d in items.items() if i in scope}}
+
+
+def since(view: dict, seq: int) -> dict:
+    """`view` with only what changed after store seq `seq`: the records-bearing parts are filtered.
+
+    A question is kept when it or any of its answers is after `seq`; a thread
+    keeps its messages after `seq`; a fork is kept when its message or result
+    is after `seq` or one of its kept questions came from it; a transcript
+    with its fork; a visual by its own seq. The summaries (inbox,
+    awaiting_agent, chat, waiting_visuals, seq) stay whole: they are state,
+    not history. `items` keeps the counts of the items the kept records are on.
+    """
+    questions = {q: v for q, v in view["questions"].items()
+                 if v["question"]["seq"] > seq or any(a["seq"] > seq for a in v["answers"])}
+    threads = {i: kept for i, msgs in view["threads"].items() if (kept := [m for m in msgs if m["seq"] > seq])}
+    forks = {f: v for f, v in view["forks"].items()
+             if v["message"]["seq"] > seq or (v["result"] is not None and v["result"]["seq"] > seq)
+             or any(q in questions for q in v["questions"])}
+    visuals = {i: kept for i, vs in view["visuals"].items() if (kept := [v for v in vs if v["seq"] > seq])}
+    touched = ({v["question"]["item"] for v in questions.values()} | set(threads) | set(visuals)
+               | {v["message"]["item"] for v in forks.values()})
+    return {**view, "since": seq,
+            "items": {i: c for i, c in view["items"].items() if i in touched},
+            "questions": questions, "threads": threads, "forks": forks, "visuals": visuals,
+            "transcripts": {f: t for f, t in view["transcripts"].items() if f in forks},
+            **_filter_tags(view, questions, forks)}
 
 
 # -- the Feed (0.7.0) ----------------------------------------------------------------

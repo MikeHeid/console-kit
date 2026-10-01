@@ -4057,5 +4057,203 @@ class SessionNameTests(_Steward):
         self.assertEqual(exported, f"export CONSOLE_KIT_SESSION={SID5}\n")
 
 
+# -- K1: slim reads (todo, view --item, --since, the skills) -------------------------------
+
+SKILLS = HERE / "plugin" / "skills"
+SLIM_SKILLS = ("console-process", "console-fork", "console-ask", "console-visual")
+
+
+def _compact(obj) -> int:
+    return len(json.dumps(obj, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+
+
+class SlimReadTests(Tmp):
+    """K1 (AC1.1, AC1.2, E2, E5): `todo` and the narrowed views are FILTERS of `view.build`."""
+
+    def every_waiting_kind(self):
+        """One of every waiting kind, beside a done one of each so `todo` has something to leave out."""
+        st = self.store()
+        ids = {}
+        st.append(question(qid="LANE.1/Q1"))
+        a = st.append(answer(qid="LANE.1/Q1"))
+        st.append(lock(a))                                                   # locked: not in the inbox
+        st.append(question(qid="LANE.1/Q2"))                                 # awaiting_you: in the inbox
+        ids["fork"] = st.append(fork())["id"]
+        ids["follow_up"] = st.append(follow_up(ids["fork"]))["id"]
+        ids["about"] = st.append(about(roles=("analyst",)))["id"]
+        ids["roar"] = st.append(roar())["id"]
+        done = st.append(fork(item="LANE"))
+        st.append(message(item="LANE", by="agent", text="Result: refused: nothing to do", reply_to=done["id"]))
+        ids["done_fork"] = done["id"]
+        st.append(message(item="LANE", text="a note the agent has not answered"))  # a thread awaiting the agent
+        ids["chat"] = st.append(message(item=S.CHAT_ITEM, intent="chat", text="status?"))["id"]
+        ids["visual"] = st.append(message(item="LANE.1.a", intent="visual", text="draw it"))["id"]
+        drawn = st.append(message(item="LANE.1.a", intent="visual", text="and this"))
+        st.append(visual(drawn["id"], item="LANE.1.a", path="visuals/LANE.1.a/abcd1234-0123456789ab.html",
+                         doc_path="visuals/LANE.1.a/abcd1234-0123456789ab.md"))
+        ids["drawn_visual"] = drawn["id"]
+        return st, ids
+
+    @staticmethod
+    def waiting_in_view(v) -> set:
+        """Every id `view` itself reports as waiting, read the way the skills read the view."""
+        out = {f for f, x in v["forks"].items() if not x["done"]}
+        out |= set(v["awaiting_agent"]) | set(v["inbox"]) | {w["id"] for w in v["waiting_visuals"]}
+        if v["chat"]["awaiting_agent"]:
+            out.add([m for m in v["threads"][S.CHAT_ITEM] if m["by"] == "owner"][-1]["id"])
+        return out
+
+    @staticmethod
+    def ids_in_todo(t) -> set:
+        out = {f["id"] for f in t["forks"]} | set(t["awaiting_agent"]) | set(t["inbox"])
+        out |= {w["id"] for w in t["visuals"]}
+        if t["chat"]["reply_to"]:
+            out.add(t["chat"]["reply_to"])
+        return out
+
+    def test_todo_holds_every_waiting_id_and_nothing_else(self):
+        # AC1.2. Catches: a todo that drops a kind to stay small, and one that lists work already done.
+        st, ids = self.every_waiting_kind()
+        v = V.build(st, ITEMS, lambda c: True)
+        t = V.todo(v)
+        self.assertEqual(self.ids_in_todo(t), self.waiting_in_view(v))
+        self.assertEqual({f["id"] for f in t["forks"]},
+                         {ids["fork"], ids["follow_up"], ids["about"], ids["roar"]})
+        self.assertEqual({f["id"]: f["kind"] for f in t["forks"]},
+                         {ids["fork"]: "item", ids["follow_up"]: "round", ids["about"]: "follow_up",
+                          ids["roar"]: "roar"})
+        roar_row = next(f for f in t["forks"] if f["id"] == ids["roar"])
+        self.assertEqual((roar_row["item"], roar_row["mode"], roar_row["roles"], roar_row["about_qid"]),
+                         ("LANE.1", "tighten", ["roar"], "LANE.1/Q1"))
+        self.assertEqual(t["visuals"], [{"id": ids["visual"], "item": "LANE.1.a"}])
+        self.assertEqual(t["chat"], {"awaiting_agent": True, "reply_to": ids["chat"]})
+        self.assertEqual(t["inbox"], ["LANE.1/Q2"])
+        self.assertEqual(t["awaiting_agent"], ["LANE", "LANE.1"])  # LANE.1.a's last word is the agent's visual
+        self.assertEqual(t["seq"], v["seq"])
+        everything = json.dumps(t)
+        for gone in (ids["done_fork"], ids["drawn_visual"]):
+            self.assertNotIn(gone, everything)
+        self.assertNotIn("LANE.1/Q1", t["inbox"])  # locked; named only as the roar's about_qid
+
+    def test_todo_is_the_views_rule_not_a_second_one(self):
+        # AC1.2's counter-check. Catches: a todo computed by its own rule that agrees on this
+        # fixture and drifts later. One waiting rule is changed; the view AND todo both follow.
+        from unittest import mock
+        st, ids = self.every_waiting_kind()
+        before = V.todo(V.build(st, ITEMS, lambda c: True))
+        self.assertTrue(before["forks"])
+        with mock.patch.object(V, "fork_done", lambda f: True):
+            v = V.build(st, ITEMS, lambda c: True)
+            after = V.todo(v)
+        self.assertTrue(all(f["done"] for f in v["forks"].values()))
+        self.assertEqual(after["forks"], [])
+        self.assertEqual(self.ids_in_todo(after), self.waiting_in_view(v))
+        with mock.patch.object(V, "fork_done", lambda f: False):
+            v = V.build(st, ITEMS, lambda c: True)
+            again = V.todo(v)
+        self.assertIn(ids["done_fork"], {f["id"] for f in again["forks"]})
+        self.assertEqual(self.ids_in_todo(again), self.waiting_in_view(v))
+
+    def test_todo_stays_small_on_a_large_console(self):
+        # AC1.1, on a synthetic console the size of a live one (hundreds of KB of view).
+        # Catches: a todo that grows with history rather than with what is waiting.
+        items = {"AREA": {"title": "root", "parent": None, "status": "open"}}
+        items.update({f"AREA.{n}": {"title": f"topic {n}", "parent": "AREA", "status": "open"}
+                      for n in range(60)})
+        st = Store(self.path, known_items=items, clock=self.clock)
+        prose = "A decision with the facts it rests on, cited from the spec and the code. " * 8
+        for n in range(60):
+            item = f"AREA.{n}"
+            for q in range(1, 6):
+                st.append(question(qid=f"{item}/Q{q}", text=prose))
+                if q < 5:  # four decided, one left for the owner
+                    a = st.append(answer(qid=f"{item}/Q{q}", picks=("a",), own_text=prose))
+                    st.append(lock(a))
+            f = st.append(fork(item=item, text=prose))
+            st.append(message(item=item, by="agent", text="Result: 4 questions\n" + prose, reply_to=f["id"]))
+            m = st.append(message(item=item, text=prose))
+            st.append(message(item=item, by="agent", text=prose, reply_to=m["id"]))
+        for n in range(3):
+            st.append(fork(item=f"AREA.{n}", text="look again"))
+        st.append(message(item="AREA.7", text="one more thing"))
+        st.append(message(item=S.CHAT_ITEM, intent="chat", text="status?"))
+        st.append(message(item="AREA.9", intent="visual", text="draw it"))
+        v = V.build(st, items, lambda c: True)
+        t = V.todo(v)
+        self.assertGreater(_compact(v), 256 * 1024)  # the fixture really is large
+        self.assertLessEqual(_compact(t), 8 * 1024)
+        self.assertEqual((len(t["forks"]), len(t["inbox"]), len(t["visuals"])), (3, 60, 1))
+        self.assertEqual(self.ids_in_todo(t), self.waiting_in_view(v))
+
+    def test_view_item_is_that_item_and_everything_under_it(self):
+        # E2. Catches: a narrowed view that keeps a sibling's thread or questions, or loses a child's.
+        st, ids = self.every_waiting_kind()
+        payload = {"view": V.build(st, ITEMS, lambda c: True), "items": ITEMS, "cursor": {}}
+        got = V.item_view(payload, "LANE.1")
+        v = got["view"]
+        self.assertEqual(set(got["items"]), {"LANE.1", "LANE.1.a"})
+        self.assertEqual(set(v["items"]), {"LANE.1", "LANE.1.a"})
+        self.assertEqual(set(v["threads"]), {"LANE.1", "LANE.1.a"})
+        self.assertNotIn(ids["done_fork"], v["forks"])   # its fork is on LANE, the parent
+        self.assertIn(ids["roar"], v["forks"])
+        self.assertEqual(v["waiting_visuals"], [{"id": ids["visual"], "item": "LANE.1.a"}])
+        self.assertEqual(v["scope"], "LANE.1")
+        chat = V.item_view(payload, S.CHAT_ITEM)["view"]
+        self.assertEqual((set(chat["threads"]), chat["questions"], chat["items"]), ({S.CHAT_ITEM}, {}, {}))
+        with self.assertRaisesRegex(KeyError, "no item 'NOPE'"):
+            V.item_view(payload, "NOPE")
+
+    def test_since_keeps_only_what_changed_after_a_seq(self):
+        # E5. Catches: --since that drops a new answer on an old question, or keeps old history.
+        st = self.store()
+        st.append(question(qid="LANE.1/Q1"))
+        st.append(question(qid="LANE.1/Q2"))
+        old = st.append(message(item="LANE", text="old"))
+        cut = old["seq"]
+        st.append(answer(qid="LANE.1/Q1"))
+        new = st.append(message(item="LANE", text="new"))
+        v = V.since(V.build(st, ITEMS, lambda c: True), cut)
+        self.assertEqual(set(v["questions"]), {"LANE.1/Q1"})
+        self.assertEqual([m["id"] for m in v["threads"]["LANE"]], [new["id"]])
+        self.assertEqual(set(v["items"]), {"LANE.1", "LANE"})
+        self.assertEqual(v["inbox"], ["LANE.1/Q2", "LANE.1/Q1"])  # state stays whole
+        self.assertEqual(v["since"], cut)
+
+
+class SlimSkillTests(unittest.TestCase):
+    """AC1.4: the four skills read `todo` or `view --item`, never the whole view."""
+
+    CMD = re.compile(r"(?:^|\s|`)(?:A|python3 \S*agent\.py(?: --\S+(?: \S+)?)*?) view\b([^`\n]*)")
+
+    @staticmethod
+    def commands(text: str) -> list[str]:
+        """Every command line in a fenced or indented code block, and every inline code span."""
+        out, fenced = [], False
+        for line in text.splitlines():
+            if line.lstrip().startswith("```"):
+                fenced = not fenced
+                continue
+            if fenced or line.startswith("    "):
+                out.append(line.strip())
+        out += re.findall(r"`([^`\n]+)`", text)
+        return out
+
+    def test_no_skill_runs_the_whole_view(self):
+        # Catches: a skill that names `todo` once and still runs bare `view` in a later step.
+        for name in SLIM_SKILLS:
+            text = (SKILLS / name / "SKILL.md").read_text(encoding="utf-8")
+            cmds = self.commands(text)
+            self.assertTrue(any(c in ("A todo",) or c.startswith("A view --item") for c in cmds), name)
+            for c in cmds + text.splitlines():  # code first, then prose: "run `A view`" is a command too
+                for m in self.CMD.finditer(c):
+                    self.assertRegex(m.group(1), r"^\s+--item\s", f"{name}: bare view in {c!r}")
+
+    def test_the_check_sees_a_bare_view(self):
+        # The test above, run on a decoy, so a check that matches nothing cannot pass for one that works.
+        decoy = "## 3. Reply\n\n    A todo\n\nthen\n\n    A view\n"
+        self.assertTrue(any(self.CMD.search(c) and not re.match(r"\s+--item", self.CMD.search(c).group(1))
+                            for c in self.commands(decoy)))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

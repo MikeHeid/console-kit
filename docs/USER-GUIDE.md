@@ -182,9 +182,15 @@ Console reads can be large. Measured on a live console with 461 store records
 
 So:
 
-- **Prefer the scoped reads.** Use `inbox` (since the cursor), `answers --item
-  ITEM`, `check`, `health` and `fork-context FORK`, and run `view` only when
-  nothing narrower answers the question.
+- **Prefer the scoped reads.** Use `todo` (what is waiting: forks not done,
+  threads and the chat awaiting the agent, visual requests, inbox qids),
+  `view --item ITEM` (one item and everything under it), `inbox` (since the
+  cursor), `answers --item ITEM`, `check`, `health` and `fork-context FORK`.
+  `view --since SEQ` and `answers --since SEQ` print only what changed after a
+  store seq.
+- **Reads are capped.** `todo`, `view` and `answers` refuse to print more
+  than 64 KiB without `--full`: they print nothing, name the narrower command
+  and exit 4. JSON is compact when the output is not a terminal.
 - **Give each project its own console and state.** A store that only grows
   makes every `view` grow with it.
 - **Keep deliberations small.** Pick one to three follow-up seats instead of a
@@ -192,5 +198,3 @@ So:
 - **Cite excerpts, not whole files.** A question anchored on an excerpt stays
   valid through unrelated edits. A whole-file hash goes stale, and every stale
   answer is another round trip.
-- Slimmer reads (a purpose-built `todo`, compact JSON) are proposed in the
-  same spec (§8.4), not built yet.

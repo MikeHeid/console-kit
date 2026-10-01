@@ -41,7 +41,8 @@ into the document that owns it.
 ```
 
 - `item` is the item the question belongs to; it must already exist on the
-  console (`A view` lists `items`). `qid` is `<item>/Q<n>`, with `n` the next
+  console (`A view --item ITEM` lists it under `items`, and refuses an item
+  the register does not hold). `qid` is `<item>/Q<n>`, with `n` the next
   number unused on that item. A qid is minted once: re-asking one is refused.
 - Every option has a non-empty `description` saying what it does **and what
   it costs**. `star` is the recommended option and `star_by` whose
@@ -77,5 +78,10 @@ question.
 
 ## 4. Check, then tell the owner
 
-`A view` must list every new qid under `inbox`. Only then say the questions
-are on the console, naming the items they are on.
+For each item you posted on,
+
+    A view --item ITEM
+
+must list every new qid there under `inbox`. Only then say the questions are
+on the console, naming the items they are on. (`A todo` lists the whole
+inbox's qids, when you posted on many items.)
