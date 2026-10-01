@@ -466,8 +466,10 @@ def _check_follow_up(rec: dict) -> list[str]:
     and a follow-up on ONE locked answer (`about_qid`, 0.4.0), which the owner
     starts from that question's card. An item fork's first round runs the
     default committee and names no seats, so `roles` comes only with one of the
-    two. That the named fork or question exists, is in the fork's scope and is
-    locked is the STORE's check.
+    two. That the named fork or question exists and is in the fork's scope is
+    the STORE's check. Seats may be called on an OPEN question too (a
+    deliberation before answering); a roar, refine or drill needs it locked,
+    and that is the store's check as well.
 
     A refine or drill (`step`, 0.8.0) works on the same two targets but calls
     no seats: it runs the project's own skill. A roar (0.8.0) is one seat,

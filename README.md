@@ -283,6 +283,14 @@ and bring any follow-up questions back to the same item. The locked answer
 stands; a seat that finds its premise false says so in a question, and only
 you supersede it.
 
+A question that is still open (unanswered, or answered and not locked) has a
+**⑂ Deliberate before answering** button instead. The same seat picker, with
+explore as the default mode and the cost shown before you send (about 100k
+tokens per seat). The seats reply on that question with a ★ recommendation and
+their reasons, and ask a replacement question only when the options
+themselves are wrong. A roar, refine or drill still needs a locked answer, and
+the answer and the lock stay yours.
+
 ### When a locked answer goes stale
 
 A question says what must stay true for its answer to stand (`valid_if`):

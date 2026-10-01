@@ -71,6 +71,9 @@
   // 0.8.0, mirrors schema.py: the roar seat (alone, on one answer, once per lock)
   // and the two other kinds of fork. The server refuses anything else by name.
   const ROAR = 'roar';
+  // What one seat of a deliberation costs, as measured: about 100k tokens. Shown before
+  // a deliberation on an open question is sent, so the owner sees the price first.
+  const SEAT_TOKENS_K = 100;
   const STEP_WORDS = {
     refine: { title: 'Refine', mode: 'tighten',
       what: 'revise the spec or document this answer rests on, to match what you decided' },
@@ -1196,18 +1199,8 @@
       actions.appendChild(nextBtn);
       bodyEl.appendChild(actions);
       bodyEl.appendChild(nextPanel);
-      const asked = Object.values(view.forks).filter(f => f.message.about_qid === qData.qid)
-        .sort((a, b) => b.message.seq - a.message.seq);
-      if (asked.length) {
-        const f = asked[0];
-        const who = f.message.step ? 'a ' + f.message.step
-          : (f.message.roles || []).map(r => ROSTER_LABEL[r] || r.replace(/^other:/, '')).join(', ');
-        bodyEl.appendChild(el('p', { className: 'ck-muted' }, [
-          '⑂ ' + (f.message.step ? STEP_WORDS[f.message.step].title : 'Follow-up with ' + who) + ' ' +
-          relTime(f.message.ts) + ': ' + (f.questions.length
-            ? f.questions.length + ' question' + (f.questions.length === 1 ? '' : 's') + ' back (' + f.questions.join(', ') + ').'
-            : 'waiting for the seats\' questions.')]));
-      }
+      const asked = askedLine(qData.qid);
+      if (asked) bodyEl.appendChild(asked);
     } else if (state === 'unlocked') {
       // Fix #4: Two-step locking — first show receipt and "Lock this answer..." button
       bodyEl.appendChild(renderReceipt(qData, headAnswer));
@@ -1236,9 +1229,11 @@
       });
       actions.appendChild(changeBtn);
       bodyEl.appendChild(actions);
+      bodyEl.appendChild(deliberateOpen(q));
     } else {
       // awaiting_you: show answer form
       bodyEl.appendChild(renderAnswerForm(q, false, null));
+      bodyEl.appendChild(deliberateOpen(q));
     }
 
     // Answer history
@@ -2061,7 +2056,7 @@
   // The seat picker a follow-up uses (D13): 1 to 3 roster seats, or a typed
   // "other" seat sent as other:<role>. roles() returns the list, or null after
   // saying (visibly and to a screen reader) what is wrong with the pick.
-  function seatPicker(key, errEl, withRoar) {
+  function seatPicker(key, errEl, withRoar, onCount) {
     const picked = new Set();
     const fs = el('fieldset', { className: 'ck-roster' }, [el('legend', {}, ['Seats (1 to 3)'])]);
     const boxes = [];
@@ -2077,6 +2072,7 @@
       for (const b of boxes) b.disabled = roar || (full && !b.checked);
       otherInput.disabled = roar;
       if (roarBox) roarBox.disabled = !roar && (picked.size > 0 || !!otherInput.value.trim());
+      if (onCount) onCount(roar ? 1 : picked.size + (otherInput.value.trim() ? 1 : 0));
     };
     for (const r of ROSTER) {
       const b = el('input', { type: 'checkbox', value: r, name: key + '-seat' });
@@ -2165,6 +2161,119 @@
         delete draftTexts[key];
         openForms.delete(key);
         announce('Follow-up requested on ' + qData.qid + '.');
+        renderPanel();
+      }
+    });
+    form.appendChild(el('div', { className: 'ck-actions' }, [send, cancel]));
+    return form;
+  }
+
+  // The latest fork about one question (a follow-up, a refine or drill, or a deliberation
+  // before answering), and what it has brought back so far; null when there is none.
+  function askedLine(qid, open) {
+    const asked = Object.values(view.forks).filter(f => f.message.about_qid === qid)
+      .sort((a, b) => b.message.seq - a.message.seq);
+    if (!asked.length) return null;
+    const f = asked[0];
+    const who = f.message.step ? 'a ' + f.message.step
+      : (f.message.roles || []).map(r => ROSTER_LABEL[r] || r.replace(/^other:/, '')).join(', ');
+    const what = f.message.step ? STEP_WORDS[f.message.step].title
+      : (open ? 'Deliberation with ' : 'Follow-up with ') + who;
+    const replies = ((view.threads && view.threads[f.message.item]) || [])
+      .filter(m => m.by === 'agent' && m.reply_to === f.message.id).length;
+    const back = f.questions.length
+      ? f.questions.length + ' question' + (f.questions.length === 1 ? '' : 's') + ' back (' + f.questions.join(', ') + ').'
+      : replies ? 'the seats replied on ' + f.message.item + '.' : 'waiting for the seats.';
+    return el('p', { className: 'ck-muted ck-asked', dataFork: f.message.id }, [
+      '⑂ ' + what + ' ' + relTime(f.message.ts) + ': ' + back]);
+  }
+
+  // "Deliberate before answering" (owner ruling build_reply): the button under an OPEN
+  // question, and the line saying a deliberation on it is waiting or back.
+  function deliberateOpen(q) {
+    const qData = q.question;
+    const wrap = el('div', { className: 'ck-deliberate-open' });
+    const [btn, slot] = disclosure('⑂ Deliberate before answering…', 'delib-' + qData.qid,
+      () => renderOpenDeliberation(q));
+    btn.setAttribute('aria-label', 'Deliberate before answering: ' + truncateText(qData.text, 40));
+    btn.setAttribute('data-step', 'deliberate');
+    wrap.appendChild(el('div', { className: 'ck-actions' }, [btn]));
+    wrap.appendChild(slot);
+    const asked = askedLine(qData.qid, true);
+    if (asked) wrap.appendChild(asked);
+    return wrap;
+  }
+
+  // The cost of a deliberation, before it is sent: seats × ~100k tokens each, as measured.
+  function seatCost(n) {
+    if (!n) return 'Cost: about ' + SEAT_TOKENS_K + 'k tokens per seat. Pick 1 to 3 seats.';
+    return 'Cost: ≈ ' + n + ' seat' + (n === 1 ? '' : 's') + ' × ~' + SEAT_TOKENS_K + 'k tokens = ~' +
+      (n * SEAT_TOKENS_K) + 'k tokens.';
+  }
+
+  // Deliberate on ONE OPEN question before answering it. One owner message: intent 'fork',
+  // about_qid naming the question, the seats picked here. The seats reply on the question
+  // with a recommendation (and, only if they show the options are wrong, a replacement
+  // question). The answer and the lock stay the owner's: this form writes neither, and the
+  // server refuses a roar, refine or drill here, since those work on a locked answer.
+  function renderOpenDeliberation(q) {
+    const qData = q.question;
+    const key = 'delib-' + qData.qid;
+    const id = key.replace(/[^A-Za-z0-9_-]/g, '-');
+    const form = el('div', { className: 'ck-fork-form ck-deliberate', role: 'group', 'aria-labelledby': id + '-h' });
+    form.appendChild(el('div', { className: 'ck-confirm-heading', id: id + '-h' }, ['Deliberate before answering']));
+    form.appendChild(el('p', { className: 'ck-muted' }, [
+      'The seats you pick weigh the options of ' + qData.qid + ' and reply here with a recommendation and their ' +
+      'reasons. If they find the options themselves are wrong, they ask a replacement question instead. ' +
+      'Answering and locking stay yours.']));
+    const err = el('p', { className: 'ck-error-msg', role: 'status', 'aria-live': 'polite' });
+    const cost = el('p', { className: 'ck-cost', id: id + '-cost', 'aria-live': 'polite' }, [seatCost(0)]);
+    const seats = seatPicker(id, err, false, n => { cost.textContent = seatCost(n); });
+    form.appendChild(seats.fieldset);
+
+    const modeName = id + '-mode';
+    const modeFs = el('fieldset', { className: 'ck-roster' }, [el('legend', {}, ['Mode'])]);
+    for (const m of ['explore', 'tighten']) {  // explore first and default: nothing is decided yet
+      const r = el('input', { type: 'radio', name: modeName, value: m });
+      if (m === 'explore') r.checked = true;
+      modeFs.appendChild(el('label', { className: 'ck-option' }, [r, m === 'explore'
+        ? ' Explore: weigh every option, and say if one is missing' : ' Tighten: narrow to one recommendation']));
+    }
+    form.appendChild(modeFs);
+
+    const noteId = id + '-note';
+    const text = el('textarea', { className: 'ck-textarea', rows: '2', id: noteId,
+      placeholder: 'e.g. Which option survives a second site?' });
+    if (draftTexts[key] !== undefined) text.value = draftTexts[key];
+    text.addEventListener('input', () => { draftTexts[key] = text.value; });
+    form.appendChild(el('label', { for: noteId, className: 'ck-field-label' }, ['Note for the seats (optional)']));
+    form.appendChild(text);
+    form.appendChild(cost);
+    form.appendChild(err);
+
+    const send = el('button', { className: 'ck-btn ck-btn-primary', type: 'button',
+      'aria-describedby': id + '-cost',
+      'aria-label': 'Send deliberation before answering: ' + truncateText(qData.text, 40) }, ['Send']);
+    const cancel = el('button', { className: 'ck-btn', type: 'button' }, ['Cancel']);
+    cancel.addEventListener('click', () => { openForms.delete(key); renderPanel(); });
+    send.addEventListener('click', async () => {
+      err.textContent = '';
+      const roles = seats.roles();
+      if (!roles) return;
+      const mode = form.querySelector('input[name="' + modeName + '"]:checked').value;
+      const body = { item: qData.item, intent: 'fork', mode: mode, about_qid: qData.qid, roles: roles,
+        text: text.value.trim() || ('Deliberate on the open question ' + qData.qid + ' before I answer it, with ' +
+          roles.map(r => ROSTER_LABEL[r] || r.replace(/^other:/, '')).join(', ') + '.') };
+      send.disabled = true;
+      const result = await apiPost('/message', body, key);
+      send.disabled = false;
+      if (result.error) {
+        err.textContent = 'Not sent: ' + result.error;
+        announce('Error: ' + result.error);
+      } else {
+        delete draftTexts[key];
+        openForms.delete(key);
+        announce('Deliberation requested on ' + qData.qid + '.');
         renderPanel();
       }
     });

@@ -1,6 +1,6 @@
 ---
 name: console-fork
-description: Use to run one owner-console deliberation (a "fork", its follow-up round, a roar panel on one answer, or a refine or drill) - build the round's bundle, sit the committee or run the project's skill, and write back one to five lockable questions plus one summary message. Called by console-process for every waiting fork.
+description: Use to run one owner-console deliberation (a "fork", its follow-up round, a roar panel on one answer, a refine or drill, or a deliberation on an open question before the owner answers it) - build the round's bundle, sit the committee or run the project's skill, and write back one to five lockable questions plus one summary message (or, before an answer, one recommendation reply). Called by console-process for every waiting fork.
 ---
 
 # Run one deliberation round
@@ -19,8 +19,10 @@ user's registry only, and stop if this project is not registered there.
     A view
 
 `forks` maps each fork message's record id to `{message, questions}`. The fork
-to run is an owner message with `intent: "fork"` whose `questions` is empty,
-whether it was started on an item or beside one locked answer.
+to run is an owner message with `intent: "fork"` whose `questions` is empty
+and that no agent message replies to (`reply_to` the fork's id, in
+`threads[item]`), whether it was started on an item, beside one locked answer,
+or beside an open question.
 From its message read:
 
 - `item`: the scope is this item **and everything under it** (D14);
@@ -31,6 +33,9 @@ From its message read:
 - `about_qid` and `roles`, present only on a **follow-up on one answer**: the
   owner pressed "Follow up" beside that question's locked answer. Section 6
   below changes steps 3 to 5 for it.
+- `about_qid` and `roles` where that question is **open** (`questions[about_qid].state`
+  is `awaiting_you` or `unlocked`): the owner pressed "Deliberate before
+  answering". Section 9 replaces steps 4 and 5.
 - `roles: ["roar"]` (0.8.0): the owner picked **Roar** as the seat. Section 7
   replaces steps 3 to 5.
 - `step: "refine"` or `step: "drill"` (0.8.0), with `about_qid` (one locked
@@ -269,3 +274,40 @@ or drills; it names the kind and the project names the skill.
 - **The same limits.** At most five questions, the tighten-mode options when
   the fork's mode is `tighten` (refine forks default to tighten, drill forks
   to explore), and one reply to the fork naming the target.
+
+## 9. Deliberate before answering (`about_qid` on an open question)
+
+The owner has not locked this question (it is unanswered, or answered and not
+locked) and asked chosen seats to weigh it first. The store has checked that
+the question exists and sits on the fork's item or under it, and that `roles`
+holds one to three valid seats; it refuses a roar, refine or drill on an open
+question. The bundle (`A fork-context FORK_ID`) leads with the question, its
+options and any answer so far, under a heading that says it is open.
+
+- **Seats: exactly the ones in `roles`** (step 3), each told the question is
+  open and that their job is to say which option should win and why, with
+  the file and line each reason rests on.
+- **The result is ONE reply, not a round of questions.** Post it on the fork's
+  item, replying to the fork:
+
+      A reply ITEM "..." --reply-to FORK_ID
+
+  It says, in this order: **★ `<option id>` (label)**, the recommendation;
+  the reasons for it, each with its file:line; what the seats found against
+  the other options; and where the seats disagreed, if they did. Name the
+  question (`ITEM/Q3`) in its first line. A `free` question has no option ids:
+  the ★ is a recommended answer in a sentence.
+- **A replacement question only when the options themselves are wrong** (the
+  seats show none of them can be right, or the right one is missing, citing
+  why). Then post one new question with `A ask FILE` exactly as in step 4:
+  the next free `Q<n>` on the same item, `forked_from` this fork, a `star` and
+  `star_by`, and text that opens "Replaces ITEM/Q3, whose options ...". Then
+  post the one reply as above, saying the old question's options are wrong and
+  naming the replacement's qid, so the owner answers that one instead. There
+  is no record that marks a question superseded: the old question stays as
+  it is, and the reply is the pointer. Never more than one replacement.
+- **Never answer, never lock.** Answers and locks are the owner's (the server
+  refuses either from the agent's door); the reply recommends, and the owner
+  decides on the question's own card.
+- If the question was locked after the owner asked (the bundle then reads as
+  a locked answer), run it as a follow-up on that answer (section 6) instead.

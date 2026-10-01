@@ -334,12 +334,18 @@ class Store:
                              f"Start a new deliberation instead")
 
     def _check_about(self, rec: dict) -> None:
-        """A follow-up on one answer names a question in the fork's scope whose current answer is locked (0.4.0).
+        """A fork about one question names a question in the fork's scope (0.4.0; an open one after 0.8.7).
 
         The page is untrusted, so each of these is checked here, not assumed
-        from the button: the question exists, it sits on the fork's item or an
-        item under it (D14), and its current answer is locked. Seats and their
-        count are the schema's check, which `append` has already run.
+        from the button: the question exists, and it sits on the fork's item or
+        an item under it (D14). Seats and their count are the schema's check,
+        which `append` has already run.
+
+        Seats called on an OPEN question (unanswered, or answered and not
+        locked) are a deliberation before answering (owner ruling
+        "build_reply"): allowed, and a fork is only a message, so it changes
+        nothing about the question; its answer and lock stay the owner's.
+        A roar, a refine and a drill still work on a LOCKED answer only.
         """
         qid = rec["about_qid"]
         q = self.question(qid)
@@ -348,9 +354,13 @@ class Store:
         if not self._in_scope(q["item"], rec["item"]):
             raise StoreError(f"about_qid {qid} is on item {q['item']!r}, outside this fork's scope "
                              f"({rec['item']!r} and everything under it)")
+        if "step" not in rec and S.ROAR not in (rec.get("roles") or ()):
+            return
         head = self.head(qid)
         if head is None or self.lock_of(head["id"]) is None:
-            raise StoreError(f"{qid} has no locked answer; a follow-up on an answer comes after it is locked")
+            what = f"a {rec['step']}" if "step" in rec else "a roar"
+            raise StoreError(f"{qid} has no locked answer; {what} on an answer comes after it is locked. "
+                             f"To deliberate before answering, call seats instead")
 
     def _in_scope(self, item: str, root: str) -> bool:
         """Whether `item` is `root` or under it, walking `item_parents`; with no tree known, only `root` itself."""

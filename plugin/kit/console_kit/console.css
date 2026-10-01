@@ -797,6 +797,11 @@
 .ck-followup .ck-error-msg:empty { display: none; }
 .ck-followup .ck-field-label { display: block; margin: 10px 0 4px; }
 .ck-followup .ck-input, .ck-followup .ck-textarea { box-sizing: border-box; max-width: 100%; }
+/* Deliberate before answering (owner ruling build_reply): the same form, plus its cost. */
+.ck-deliberate .ck-error-msg:empty { display: none; }
+.ck-deliberate .ck-field-label { display: block; margin: 10px 0 4px; }
+.ck-deliberate .ck-input, .ck-deliberate .ck-textarea { box-sizing: border-box; max-width: 100%; }
+.ck-deliberate .ck-cost { font-size: 13px; font-weight: 600; margin: 8px 0; overflow-wrap: anywhere; }
 
 /* ==========================================================================
    0.7.0: a live console. Tabs, the Feed, the chat, the review-round form,

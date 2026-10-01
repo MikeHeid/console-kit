@@ -107,10 +107,14 @@ PR path. `@chat` is not an item: do not pass it to `A working`.
 ## 4. Run each waiting fork
 
 Every owner message with `intent: "fork"` that has no questions yet
-(`view.forks[<id>].questions` is empty) is a deliberation to run: use the
-**console-fork** skill for each. That includes a follow-up on one locked
-answer, a fork that carries `about_qid` (its doorbell line carries it too);
-console-fork's section 6 covers it. So does a **roar** (`roles: ["roar"]`,
+(`view.forks[<id>].questions` is empty) and no agent reply to it (`reply_to`
+the fork's id) is a deliberation to run: use the **console-fork** skill for
+each. That includes a follow-up on one locked answer, a fork that carries
+`about_qid` (its doorbell line carries it too); console-fork's section 6
+covers it. A fork whose `about_qid` names an OPEN question is a deliberation
+before answering: console-fork's section 9, whose result is one
+recommendation reply (and a replacement question only when the options are
+wrong), never an answer or a lock. So does a **roar** (`roles: ["roar"]`,
 section 7: a three-round panel, whose transcript you store with
 `A transcript`) and a **refine** or **drill** (`step`, section 8: the
 skill `.console-kit.json`'s `next_step` names, resolved only among your
