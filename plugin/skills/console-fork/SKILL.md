@@ -99,6 +99,12 @@ and the owner's note. Each returns **at most one page** of findings, each
 finding with the file and line it rests on and a recommendation. At most five
 agents per fork, the synthesiser included (§6.6).
 
+**Start every seat's task description with `ck-fork:FORK_ID ROLE`** (the fork
+record id, all 24 hex characters, then the seat, e.g.
+`ck-fork:0123456789abcdef01234567 ux seat`). That prefix is
+the only way `agent.py costs collect` puts a seat's recorded tokens on this
+fork's bill; a seat without it is counted as unattributed.
+
 ## 4. Synthesise: one to five questions
 
 Write the questions yourself from the seats' pages, or give that to one more

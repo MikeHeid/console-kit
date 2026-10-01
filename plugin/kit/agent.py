@@ -54,6 +54,11 @@
                                                 marks, by --as name), and it lapses after an hour
     agent.py --state DIR synced [--through SEQ] [--error MSG]
                                                 record that the agent has processed the doorbell up to SEQ
+    agent.py --state DIR costs collect | show --fork RECORD_ID
+                                                collect: sum this project's subagent transcripts (usage, id
+                                                and agentType only, deduplicated by message id) into
+                                                STATE/costs.jsonl, a sidecar the store never holds;
+                                                show: one fork's bill, unattributed subagents apart (K2)
     agent.py --state DIR register --project DIR [--steward NAME]
                                                 switch the plugin on for a project (you run this, never a session)
     agent.py --state DIR steward [NAME | --clear]
@@ -421,6 +426,34 @@ def _visual_export(state: Path, project: Path, ids: list[str]) -> int:
     return 3 if done["written"] else 1
 
 
+def _costs(a) -> int:
+    """`costs collect` / `costs show --fork ID` (K2). Reads transcripts here, in the session; the server never does."""
+    from console_kit import costs as C
+    if a.action == "show" and not a.fork:
+        print("costs show needs --fork RECORD_ID", file=sys.stderr)
+        return 1
+    if a.action == "collect":
+        why = steward_refusal(a.state, a.agent, "`costs collect`")   # §8.5: the steward runs it
+        if why:
+            print(why, file=sys.stderr)
+            return 1
+    try:
+        if a.action == "show":
+            rows, bad = C.read_counted(a.state)
+            out = C.fork_card(rows, a.fork)
+        else:
+            lines, stats = C.collect(a.state, agent=a.agent)
+            out = {**C.write(a.state, lines), **stats}
+            bad = out["dropped_malformed"]
+    except (C.CostError, R.RegistryError, OSError) as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 1
+    if bad:
+        print(f"note: {bad} malformed line(s) in {a.state / C.FILE} were dropped", file=sys.stderr)
+    sys.stdout.write(_json(out))
+    return 0
+
+
 def _refused_note(files: list, n: int, why: str | None, rc: int = 1) -> int:
     """A batch ask stopped at files[n]: say what was posted and what was not, so a re-run sends only the rest."""
     if why:
@@ -513,6 +546,10 @@ def main(argv=None) -> int:
     g = s.add_mutually_exclusive_group()
     g.add_argument("name", nargs="?", help="the steward's agent name, e.g. agent-5")
     g.add_argument("--clear", action="store_true", help="no steward: every session may watch, sync and fold")
+    s = sub.add_parser("costs", description="The cost sidecar (K2): `collect` sums this project's subagent "
+                       "transcripts into STATE/costs.jsonl; `show --fork ID` prints that fork's bill.")
+    s.add_argument("action", choices=("collect", "show"))
+    s.add_argument("--fork", help="show: the fork record id whose tagged subagents to total")
     a = ap.parse_args(argv)
     # The agent name: --as, then this session's /console-kit:as (0.8.4), then CONSOLE_KIT_AGENT (0.8.2);
     # an empty variable counts as unset.
@@ -570,6 +607,8 @@ def _run(a, bell: Path) -> int:
         print((f"steward {a.name}" if a.name else "no steward") + f" for the console at "
               f"{Path(a.state).resolve()}: {', '.join(roots)} in {R.location()}")
         return 0
+    if a.cmd == "costs":
+        return _costs(a)
     if a.cmd in ("watch", "synced"):
         why = steward_refusal(a.state, a.agent, f"`{a.cmd}`")
         if why:
