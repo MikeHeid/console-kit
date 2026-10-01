@@ -70,6 +70,20 @@ The console shows those items as **agent active** instead of "awaiting agent"
 until step 5's `synced` clears it. A mark lapses after an hour, so if the
 work runs longer, run `working` again.
 
+**Then push what git says**, from the project root:
+
+    A history-push
+
+The console server starts no git (CONSOLE-kit/Q23): a repository's own config
+can make git run a program, so git runs here, in your session, instead. This
+reads only what the server asks for (the version each stale answer was locked
+against, and when each cited spec was last committed) and sends it as data.
+The server checks every past version against the hash the lock already names
+and shows it "(from the steward)"; without a push, or once a file has changed
+since, those panels say git history is unavailable. Exit 1 names what was
+refused; the rest was still sent. Run it again after a commit you want the
+refine chips to see.
+
 ## 2. Fold newly locked answers, through a PR
 
 An answer is a ruling only once it is **locked by the owner and folded** (R1).

@@ -95,6 +95,195 @@ def seam_open():
     return mock.patch.object(G, "_OPEN", True)
 
 
+class EarlyRefusalDrainTests(unittest.TestCase):
+    """A refusal sent before the body is read must not cut off a client still sending it (the BrokenPipe flake)."""
+
+    def test_a_body_sent_after_the_refusal_is_read_not_cut_off(self):
+        # Catches: closing the connection right after an early 403/404 with the declared body unread. Python's
+        # http.client sends headers and body in two writes; on a Unix socket the second then fails with EPIPE.
+        # Here the body is sent only AFTER the whole refusal arrived, which makes that race certain, not rare.
+        import socket as so
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        (d / "page.html").write_text(PAGE)
+        cfg = SV.Config(root=d, page=d / "page.html", state=d / "state", adapter=d / "unused.py",
+                        team_domain="t.example.com", aud=AUD, hostname=HOSTNAME, port=0)
+        cfg.state.mkdir()
+        (d / "unused.py").write_text("def items():\n    return {}\ndef seed_questions():\n    return []\n"
+                                     "def record(entries, dry_run):\n    return []\n")
+        console = SV.Console(cfg, SV.load_adapter(cfg.adapter))
+        srv = SV.UnixHTTPServer(str(d / "a.sock"), type("H", (SV.AgentHandler,), {"console": console}))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        body = b'{"x": 1}'
+        s = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+        s.settimeout(10)
+        s.connect(str(d / "a.sock"))
+        s.sendall(b"POST /no-such-route HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                  b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n")
+        got = b""
+        while b"\r\n\r\n" not in got or not got.endswith(b"}"):
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            got += chunk
+        self.assertTrue(got.startswith(b"HTTP/1.0 404") or got.startswith(b"HTTP/1.1 404"), got[:40])
+        time.sleep(0.2)                                   # the server has answered; is it still listening?
+        s.sendall(body)                                   # EPIPE here when it closed without reading
+        s.close()
+
+    # -- the drain is bounded (K4 security review): by size, and by ONE total deadline ------------
+
+    def server(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        (d / "page.html").write_text(PAGE)
+        cfg = SV.Config(root=d, page=d / "page.html", state=d / "state", adapter=d / "unused.py",
+                        team_domain="t.example.com", aud=AUD, hostname=HOSTNAME, port=0)
+        cfg.state.mkdir()
+        (d / "unused.py").write_text("def items():\n    return {}\ndef seed_questions():\n    return []\n"
+                                     "def record(entries, dry_run):\n    return []\n")
+        console = SV.Console(cfg, SV.load_adapter(cfg.adapter))
+        srv = SV.UnixHTTPServer(str(d / "a.sock"), type("H", (SV.AgentHandler,), {"console": console}))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return d / "a.sock"
+
+    def refused_then_eof(self, sock, declared: int, feed=None) -> float:
+        """Send headers declaring `declared` body bytes to an unknown route, read the 404, then time to EOF."""
+        import socket as so
+        s = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+        s.settimeout(15)
+        s.connect(str(sock))
+        self.addCleanup(s.close)
+        s.sendall(b"POST /no-such-route HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                  b"Content-Length: " + str(declared).encode() + b"\r\n\r\n")
+        got = b""
+        while not got.endswith(b"}"):
+            chunk = s.recv(4096)
+            self.assertTrue(chunk, "the connection closed before the refusal arrived")
+            got += chunk
+        self.assertIn(b" 404 ", got.split(b"\r\n", 1)[0])
+        t0 = time.monotonic()
+        stop = threading.Event()
+        if feed is not None:
+            threading.Thread(target=feed, args=(s, stop), daemon=True).start()
+        try:
+            self.assertEqual(s.recv(1), b"")              # EOF: the server closed
+        except (ConnectionResetError, BrokenPipeError):
+            pass                                          # closed with bytes unread: an RST, also a close
+        finally:
+            stop.set()
+        return time.monotonic() - t0
+
+    def test_the_agent_door_serves_one_request_per_connection(self):
+        # Pins the premise /history-blob's per-INSTANCE max_body rests on (lane 4 review, LOW): HTTP/1.0, so a
+        # handler object never serves a second request. Catches: a move to HTTP/1.1 keep-alive, under which the
+        # raised limit would carry over to every later route on the same connection.
+        self.assertEqual(SV.AgentHandler.protocol_version, "HTTP/1.0")
+
+    def test_a_body_nested_past_the_decoders_depth_is_refused_as_not_json(self):
+        # Catches (lane 4 review, LOW): json.loads raising RecursionError, which `except ValueError` lets escape,
+        # so the handler dies and the client gets a dropped connection instead of the normal refusal.
+        import http.client
+        import socket as so
+        sock = self.server()
+        deep = ("[" * 100_000 + "]" * 100_000).encode()
+
+        class Conn(http.client.HTTPConnection):
+            def connect(self):
+                self.sock = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+                self.sock.connect(str(sock))
+
+        for route in ("/cursor", "/history-blob", "/history-specs"):
+            c = Conn("localhost", timeout=10)
+            c.request("POST", route, body=deep, headers={"Content-Type": "application/json"})
+            r = c.getresponse()
+            self.assertEqual((r.status, json.loads(r.read()).get("error")), (400, "the body is not JSON"), route)
+            c.close()
+
+    def test_a_trickled_body_is_refused_at_one_total_deadline(self):
+        # Catches (lane 4 review, LOW): a body read under the 30 s socket timeout alone, which is per read and
+        # restarts with every byte, so a client sending a byte every 0.2 s holds a handler thread for as long as
+        # it likes. Here 100 declared bytes at that pace would take 20 s; the deadline (patched to 1 s) ends it.
+        import socket as so
+        from unittest import mock
+        sock = self.server()
+        s = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+        s.settimeout(15)
+        s.connect(str(sock))
+        self.addCleanup(s.close)
+        stop = threading.Event()
+
+        def trickle():
+            try:
+                while not stop.wait(0.2):
+                    s.sendall(b" ")
+            except OSError:
+                pass
+
+        with mock.patch.object(SV, "BODY_SECONDS", 1.0):
+            t0 = time.monotonic()
+            s.sendall(b"POST /cursor HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n")
+            threading.Thread(target=trickle, daemon=True).start()
+            got = b""
+            try:
+                while not got.endswith(b"}"):
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    got += chunk
+            finally:
+                stop.set()
+            took = time.monotonic() - t0
+        self.assertIn(b" 408 ", got.split(b"\r\n", 1)[0], got[:80])
+        self.assertIn(b"the body did not arrive within 1 seconds", got)
+        self.assertLess(took, 3.0)
+
+    def test_a_body_larger_than_max_body_is_not_read_or_waited_for(self):
+        # Catches: draining whatever length is declared (an 8 MiB claim must not be read, nor waited on).
+        took = self.refused_then_eof(self.server(), SV.AGENT_MAX_BODY * 4)
+        self.assertLess(took, 1.0)
+
+    def test_a_client_that_declares_a_body_and_stops_is_cut_off_at_the_deadline(self):
+        from unittest import mock
+        with mock.patch.object(SV, "DRAIN_SECONDS", 0.5):
+            took = self.refused_then_eof(self.server(), 1000)
+        self.assertLess(took, 2.0)                        # not the 30 s per-read timeout
+
+    def test_a_trickling_client_cannot_stretch_the_deadline(self):
+        # Catches: a per-read timeout standing in for a total one. A byte every 0.2 s restarts any per-read
+        # timer for ever; the total deadline still closes the connection on time.
+        from unittest import mock
+
+        def trickle(s, stop):
+            while not stop.is_set():
+                try:
+                    s.send(b" ")
+                except OSError:
+                    return
+                time.sleep(0.2)
+        with mock.patch.object(SV, "DRAIN_SECONDS", 0.5):
+            took = self.refused_then_eof(self.server(), 100_000, feed=trickle)
+        self.assertLess(took, 2.0)
+
+
+def steward_push(console, root) -> dict:
+    """What `agent.py history-push` does, in-process: the server says what it wants, the steward reads git
+    (the seam open, as in the agent's process) for exactly that, and pushes it through the console's own door."""
+    from console_kit import stewardgit as SG
+    want = console.history_wants()
+    with seam_open():
+        blobs, specs = SG.collect(root, want)
+    for b in blobs:
+        console.push_history_blob(b)
+    return {"want": want, "blobs": blobs, "specs": console.push_history_specs({"specs": specs})}
+
+
 class ServerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -670,13 +859,9 @@ class ServerTests(unittest.TestCase):
         self.assertEqual((p["lock"], p["changes"], p["fresh"]), (lk["id"], [], False))
 
     def agent_side_plan(self):
-        """`plan_reanchor` as an agent-side caller runs it, with git history (what the follow-up lane restores)."""
-        real = SV.A.plan_reanchor
-
-        def plan(*a, **kw):
-            with seam_open():
-                return real(*a, **kw)
-        return plan
+        """`plan_reanchor` after the steward pushed git history (Q23 part 2): the server plans it ITSELF."""
+        steward_push(self.console, self.cfg.root)
+        return SV.A.plan_reanchor
 
     def test_reanchor_takes_no_anchors_from_the_caller(self):
         code, out = SV.agent_request(self.cfg.socket, "POST", "/reanchor",
@@ -2684,6 +2869,11 @@ a = call("owner POST /api/answer", owner, "POST", "/api/answer",
          {"qid": "LANE.1/Q2", "picks": ["a"], "own_text": "", "nonce": "nogitanswer1"})
 call("owner POST /api/lock", owner, "POST", "/api/lock",
      {"qid": "LANE.1/Q2", "answer": a["record"]["id"], "nonce": "nogitlock001"})
+if "push" in p:   # Q23 part 2: what the steward computed with git in ITS process, pushed as data
+    out["wants"] = call("agent GET /history-wants", agent, "GET", "/history-wants")
+    for b in p["push"]["blobs"]:
+        call("agent POST /history-blob", agent, "POST", "/history-blob", b)
+    out["specs"] = call("agent POST /history-specs", agent, "POST", "/history-specs", {"specs": p["push"]["specs"]})
 for path in ("/", "/index.html", "/api/board", "/api/usage", "/api/feed", "/api/wait?since=0&timeout=0",
              "/api/evidence?qid=LANE.1/Q2", "/api/visual?id=" + "0" * 24):
     call("owner GET " + path, owner, "GET", path)
@@ -3011,11 +3201,11 @@ class _OneServer:
         self.stop()
         self.tmp.cleanup()
 
-    def spawn(self, script=ONE_SERVER):
+    def spawn(self, script=ONE_SERVER, prefix=()):
         roots = ",".join(str(v["root"]) for v in self.p.values())
         # stderr to a file, not a pipe: an undrained pipe fills at 64 KiB of access lines and stalls the server.
         self.errlog = open(self.t / f"server-{len(self.logs)}.err", "w+")
-        self.proc = subprocess.Popen([sys.executable, "-c", script, str(HERE / "plugin" / "kit"),
+        self.proc = subprocess.Popen([*prefix, sys.executable, "-c", script, str(HERE / "plugin" / "kit"),
                                       str(self.sfile), str(self.sock), str(self.pem), str(self.audit), roots],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.errlog,
                                      text=True, env={**os.environ, "XDG_CONFIG_HOME": str(self.cfg)})
@@ -3360,6 +3550,68 @@ def prefix_read(root: Path, rel: str) -> bytes:
     return Path(p).read_bytes()
 
 
+def page_opens(trace: str, names: tuple[str, ...]) -> tuple[int, list[str]]:
+    """(safe count, unsafe lines) among the open syscalls in a strace log that name one of `names`.
+
+    Safe: openat/openat2 with a real dirfd (never AT_FDCWD), a path of ONE component (no "/"), and O_NOFOLLOW
+    (openat2 shows RESOLVE_NO_SYMLINKS instead). Anything else naming the file or its folder is unsafe.
+    """
+    import re
+    safe, unsafe = 0, []
+    call = re.compile(r'^\d+\s+(open|openat|openat2)\((?:(AT_FDCWD|\d+),\s*)?"([^"]*)",\s*(.*)$')
+    for line in trace.splitlines():
+        m = call.match(line)
+        if not m:
+            continue
+        sysc, dirfd, path, rest = m.groups()
+        if not any(path == n or path.endswith("/" + n) or ("/" + n + "/") in path for n in names):
+            continue
+        ok = (sysc in ("openat", "openat2") and dirfd not in (None, "AT_FDCWD") and "/" not in path
+              and ("O_NOFOLLOW" in rest or "RESOLVE_NO_SYMLINKS" in rest))
+        if ok:
+            safe += 1
+        else:
+            unsafe.append(line)
+    return safe, unsafe
+
+
+AT_CALLS = {"openat": "open", "openat2": "open", "newfstatat": "stat", "statx": "stat", "fstatat64": "stat",
+            "mkdirat": "", "unlinkat": "", "renameat": "", "renameat2": "", "readlinkat": ""}
+
+
+def dirfd_ops(trace: str, names: tuple[str, ...]) -> tuple[int, list[str]]:
+    """(safe count, unsafe lines) among ALL file syscalls in a `strace -e trace=%file` log naming one of `names`.
+
+    Safe: an *at call, every path it names given as ONE component (no "/") after a real dirfd (never AT_FDCWD);
+    an open also carries O_NOFOLLOW (openat2: RESOLVE_NO_SYMLINKS), a stat AT_SYMLINK_NOFOLLOW. Any other call
+    naming one of `names` (open, mkdir, rename, unlink, stat, lstat ...) is unsafe: it looks the path up again.
+    """
+    import re
+    safe, unsafe = 0, []
+    call = re.compile(r'^\d+\s+(\w+)\((.*)$')
+    pair = re.compile(r'(?:^|,\s*)(AT_FDCWD|-?\d+),\s*"([^"]*)"')
+    for line in trace.splitlines():
+        m = call.match(line)
+        if not m:
+            continue
+        sysc, args = m.groups()
+        paths = re.findall(r'"([^"]*)"', args)
+        if not any(p == n or p.endswith("/" + n) or ("/" + n + "/") in p for p in paths for n in names):
+            continue
+        pairs = pair.findall(args)
+        ok = (sysc in AT_CALLS and len(pairs) == len(paths)
+              and all(fd != "AT_FDCWD" and "/" not in p for fd, p in pairs))
+        if ok and AT_CALLS[sysc] == "open":
+            ok = "O_NOFOLLOW" in args or "RESOLVE_NO_SYMLINKS" in args
+        if ok and AT_CALLS[sysc] == "stat":
+            ok = "AT_SYMLINK_NOFOLLOW" in args
+        if ok:
+            safe += 1
+        else:
+            unsafe.append(line)
+    return safe, unsafe
+
+
 def check_then_open_read(root: Path, rel: str) -> bytes:
     """NEGATIVE CONTROL for the race: resolve, compare, then open the resolved path (two steps)."""
     p = os.path.realpath(os.path.join(root, rel))
@@ -3546,7 +3798,6 @@ class RootConfinementTests(_OneServer, unittest.TestCase):
 
     def test_ac38_a_swapped_parent_never_serves_the_other_side(self):
         # Catches: realpath-then-open (passes AC3.7, loses this race) and O_NOFOLLOW on the last component only.
-        import shutil
         from console_kit import rootfs as RF
         A, B = self.p["alpha"], self.p["beta"]
         (B["state"] / "page.html").write_text("SENTINEL-RACE-B-STATE\n")
@@ -3618,10 +3869,433 @@ class RootConfinementTests(_OneServer, unittest.TestCase):
         finally:
             stop.set()
             th.join()
+
+    def test_ac38_every_open_of_the_page_is_dir_relative_and_follows_no_link(self):
+        # The syscall half of AC3.8: the server, run under strace, opens the page's folder and the page itself
+        # only RELATIVE to a held descriptor (openat with a real dirfd, a single component, never AT_FDCWD or a
+        # path with a "/") and with O_NOFOLLOW. Catches: a reader that checks safely and then opens by path,
+        # which the race above catches only when it happens to lose. NEGATIVE CONTROL: the same parser must
+        # flag a plain open() of the same file, or a parser that sees nothing would pass anything.
+        import shutil
+        import subprocess
         if shutil.which("strace") is None:
-            self.skipTest("the strace half of AC3.8 needs strace, which is not installed (the race half ran: "
-                          f"{counts})")
-        self.fail("strace is installed: the syscall assertion of AC3.8 is not written yet (see the K3 report)")
+            self.skipTest("strace not installed: the syscall half of AC3.8 needs it (the race half runs anyway)")
+        A = self.p["alpha"]
+        self.SF.add("alpha", A["state"], "alpha.example.com", AUD, 4901, TEAM, page="race/page.html",
+                    registry=self.reg, path=self.sfile)
+        (A["root"] / "race").mkdir()
+        (A["root"] / "race" / "page.html").write_text("<html><body>ORDINARY-RACE</body></html>\n")
+        trace = self.t / "server.strace"
+        self.spawn(prefix=("strace", "-f", "-qq", "-e", "trace=open,openat,openat2", "-o", str(trace)))
+        for _ in range(20):
+            code, body = self.owner("alpha", "GET", "/")
+            self.assertEqual(code, 200, body)
+        self.stop()
+        safe, unsafe = page_opens(trace.read_text(), ("race", "page.html"))
+        self.assertEqual(unsafe, [])
+        self.assertGreaterEqual(safe, 40)                     # the folder and the page, each of the 20 times
+        ctl = self.t / "control.strace"
+        subprocess.run(["strace", "-f", "-qq", "-e", "trace=open,openat,openat2", "-o", str(ctl), sys.executable,
+                        "-c", f"open({str(A['root'] / 'race' / 'page.html')!r}).read()"], check=True, timeout=60)
+        self.assertEqual(len(page_opens(ctl.read_text(), ("race", "page.html"))[1]), 1)   # the control is caught
+
+
+class StewardGitTests(_Live, unittest.TestCase):
+    """CONSOLE-kit/Q23 part 2, "restore it agent-side": git runs in the steward, the server gets DATA.
+
+    Same project as NoServerGitTests (a git work tree whose spec was committed,
+    locked against, then committed again), the seam closed as `serve` closes it.
+    Each feature is shown both ways: the steward's data when its key matches,
+    the existing label when it does not.
+    """
+
+    setUp = NoServerGitTests.setUp
+
+    def push(self):
+        return steward_push(self.console, self.root)
+
+    def blob_dir(self):
+        return self.cfg.state / "steward-git" / "blobs"
+
+    def condition(self):
+        code, out = self.req("GET", "/api/check", tok=token())
+        self.assertEqual(code, 200, out)
+        [c] = out["stale"]["LANE.1/Q2"]["conditions"]
+        return out, c
+
+    def refine(self):
+        tags = self.req("GET", "/api/view", tok=token())[1]["view"]["tags"]
+        [r] = [t for t in tags["questions"]["LANE.1/Q2"] if t["step"] == "refine"]
+        return tags, r["reason"]
+
+    # -- what the server asks for -------------------------------------------------------------
+
+    def test_the_server_asks_only_for_what_its_own_store_and_tree_name(self):
+        code, want = SV.agent_request(self.cfg.socket, "GET", "/history-wants")
+        self.assertEqual(code, 200, want)
+        self.assertEqual(want["blobs"], [{"path": "specs/spec.md", "sha256": self.v1}])
+        st = (self.root / "specs/spec.md").stat()
+        self.assertEqual(want["specs"], [{"path": "specs/spec.md", "mtime_ns": st.st_mtime_ns, "size": st.st_size}])
+
+    def test_a_malformed_condition_is_skipped_not_a_500(self):
+        # Catches (lane 4 review, LOW): wants() indexing c["sha256"] and calling .get on every condition with
+        # none of named_shas' isinstance guards, so one malformed condition turned /history-wants into a 500.
+        from unittest import mock
+        from console_kit import anchors as A
+        real = A.conditions_for
+        junk = ["not a dict", None, {"kind": "file_sha256"}, {"kind": "file_sha256", "sha256": 5, "path": "x"},
+                {"kind": "file_sha256", "sha256": "a" * 64, "path": ["specs/spec.md"]}]
+        with mock.patch.object(A, "conditions_for", lambda store, q: (junk + list(real(store, q)[0]),
+                                                                       real(store, q)[1])):
+            code, want = SV.agent_request(self.cfg.socket, "GET", "/history-wants")
+        self.assertEqual(code, 200, want)
+        self.assertEqual(want["blobs"], [{"path": "specs/spec.md", "sha256": self.v1}])
+
+    # -- 1. check history ----------------------------------------------------------------------
+
+    def test_check_history_returns_from_the_steward_and_the_label_without_it(self):
+        # Before: the label. After a push: the server's OWN verdict on the cited lines, from a verified blob.
+        out, c = self.condition()
+        self.assertEqual((out["history"], c["history"]), (NOGIT, NOGIT))
+        self.push()
+        out, c = self.condition()
+        commit = subprocess_git(self.root, "rev-list", "--max-parents=0", "HEAD")
+        self.assertTrue(out["history"].startswith("from the steward, pushed "), out["history"])
+        self.assertEqual((c["reason"], c["history"], c["cited_text"], c["locked_version"]),
+                         ("file_changed", "from the steward", "unchanged", commit[:12]))
+        self.assertIn("came from the steward, checked against the lock's hash", c["words"])
+        self.assertNotIn(NOGIT, c["words"])
+
+    def test_a_blob_that_does_not_hash_to_its_key_is_refused_and_the_label_stays(self):
+        # Catches: storing what the steward says without re-hashing it.
+        good = self.push()["blobs"][0]
+        __import__("shutil").rmtree(self.blob_dir())
+        lie = {**good, "content_b64": __import__("base64").b64encode(b"# Spec\nsomething else\n").decode()}
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob", lie)
+        self.assertEqual(code, 400, out)
+        self.assertIn(f"does not hash to {self.v1}", out["error"])
+        self.assertFalse((self.blob_dir() / self.v1).exists())
+        self.assertEqual(self.condition()[1]["history"], NOGIT)
+
+    def test_a_blob_changed_on_disk_after_the_push_proves_nothing(self):
+        # Catches: trusting the stored file on read (the hash is checked again every time it is used).
+        self.push()
+        (self.blob_dir() / self.v1).write_text("# Spec\n\nThe cited claim, line one.\nThe cited claim, line two.\n")
+        self.assertEqual(self.condition()[1]["history"], NOGIT)
+
+    def test_a_blob_no_current_lock_names_is_neither_stored_nor_kept(self):
+        # Catches: a store that fills with whatever is pushed, and a prune that never runs.
+        import base64, hashlib
+        data = b"a version no lock was taken against\n"
+        sha = hashlib.sha256(data).hexdigest()
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob",
+                                     {"sha256": sha, "commit": "a" * 40, "content_b64": base64.b64encode(data).decode()})
+        self.assertEqual(code, 400, out)
+        self.assertIn(f"no current lock names {sha}", out["error"])
+        self.assertFalse((self.blob_dir() / sha).exists())
+        self.push()
+        planted = self.blob_dir() / sha             # one that got there some other way
+        planted.write_bytes(data)
+        self.console.push_history_specs({"specs": []})
+        self.assertFalse(planted.exists())
+        self.assertTrue((self.blob_dir() / self.v1).exists())
+
+    def test_a_client_sent_path_never_names_a_file(self):
+        # Catches: a blob stored under a name the client chose (the closed schema refuses the key outright).
+        good = self.push()["blobs"][0]
+        __import__("shutil").rmtree(self.blob_dir())
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob",
+                                     {**good, "path": "../../escaped"})
+        # First what reached the disk, then the status: a server that took the path writes `escaped` somewhere.
+        self.assertEqual(sorted(str(p) for p in self.cfg.state.parent.rglob("escaped*")), [])
+        self.assertEqual(code, 400, out)
+        self.assertEqual(self.condition()[1]["history"], NOGIT)
+
+    def test_the_stored_versions_have_a_total_cap(self):
+        # Catches: a per-blob cap with no total, so many locks fill the state disk.
+        from unittest import mock
+        from console_kit import stewardgit as SG
+        good = steward_push(self.console, self.root)["blobs"][0]
+        (self.blob_dir() / ("f" * 64)).write_bytes(b"x" * 100)   # what the folder already holds, for a live lock
+        real = SG.named_shas
+        also = mock.patch.object(SG, "named_shas", lambda store: {**real(store), "f" * 64: "specs/other.md"})
+        size = (self.blob_dir() / self.v1).stat().st_size
+        with also, mock.patch.object(SG, "MAX_STORED", size + 99):
+            code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob", good)
+        self.assertEqual(code, 400, out)
+        self.assertIn(f"would pass {size + 99} bytes", out["error"])
+        with also, mock.patch.object(SG, "MAX_STORED", size + 100):   # the control: exactly at the cap is allowed
+            self.assertEqual(SV.agent_request(self.cfg.socket, "POST", "/history-blob", good)[0], 200)
+
+    def test_blobs_no_lock_names_never_count_against_the_cap(self):
+        # Catches (lane 4 review, MEDIUM): a cap that counts dead blobs, so versions whose locks have moved on
+        # fill it and every later push of a NAMED blob is refused until a specs push happens to prune them.
+        from unittest import mock
+        from console_kit import stewardgit as SG
+        good = steward_push(self.console, self.root)["blobs"][0]
+        size = (self.blob_dir() / self.v1).stat().st_size
+        (self.blob_dir() / self.v1).unlink()
+        dead = [self.blob_dir() / (c * 64) for c in "abcd"]
+        for p in dead:
+            p.write_bytes(b"x" * size)                            # four dead versions, together 4x the cap
+        with mock.patch.object(SG, "MAX_STORED", size):
+            code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob", good)
+        self.assertEqual(code, 200, out)
+        self.assertEqual(sorted(p.name for p in self.blob_dir().iterdir()), [self.v1])
+        self.assertEqual(self.condition()[1]["history"], "from the steward")
+
+    def test_a_symlink_planted_where_a_blob_goes_is_not_followed(self):
+        # Catches: opening a blob by name with the link followed. The target holds the TRUE v1 bytes, so
+        # only O_NOFOLLOW (not the hash) stands between it and the panel.
+        self.push()
+        outside = self.root.parent / f"{self.root.name}-v1-outside"
+        outside.write_bytes((self.blob_dir() / self.v1).read_bytes())
+        self.addCleanup(lambda: outside.unlink(missing_ok=True))
+        (self.blob_dir() / self.v1).unlink()
+        (self.blob_dir() / self.v1).symlink_to(outside)
+        self.assertEqual(self.condition()[1]["history"], NOGIT)
+
+    def test_a_symlink_planted_where_the_steward_folder_goes_is_refused_and_never_read(self):
+        # Catches: opening STATE/steward-git (or blobs/) with the link followed. The link's target holds the TRUE
+        # blob and index, so only O_NOFOLLOW on the folder stands between them and the panel, and a push must not
+        # write through it either.
+        import shutil
+        good = self.push()["blobs"][0]
+        outside = self.root.parent / f"{self.root.name}-sg-outside"
+        self.addCleanup(lambda: shutil.rmtree(outside, ignore_errors=True))
+        shutil.move(str(self.cfg.state / "steward-git"), str(outside))
+        (self.cfg.state / "steward-git").symlink_to(outside)
+        before = sorted(p.name for p in (outside / "blobs").iterdir())
+        self.assertEqual(self.condition()[1]["history"], NOGIT)
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob", good)
+        self.assertEqual(code, 400, out)
+        self.assertIn("steward-git in the state folder is not a plain folder", out["error"])
+        self.assertEqual(sorted(p.name for p in (outside / "blobs").iterdir()), before)
+
+    def test_an_index_nested_past_the_decoders_depth_reads_as_none(self):
+        # Catches (lane 4 review, LOW): a planted index.json nested deeper than json.loads recurses, whose
+        # RecursionError escaped `except ValueError` and turned every check and view into a 500.
+        self.push()
+        (self.cfg.state / "steward-git" / "index.json").write_text("[" * 100_000 + "]" * 100_000)
+        out, c = self.condition()                                 # 200, not a 500
+        self.assertEqual((c["history"], c["locked_version"]), ("from the steward", None))   # the blob, no commit
+        self.assertEqual(self.req("GET", "/api/view", tok=token())[0], 200)
+
+    def test_a_commit_id_in_any_other_shape_is_dropped(self):
+        good = self.push()["blobs"][0]
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob", {**good, "commit": "HEAD; rm -rf"})
+        self.assertEqual((code, out["commit"]), (200, None), out)
+        _, c = self.condition()
+        self.assertIsNone(c["locked_version"])
+        self.assertIn("from the steward", c["history"])
+        self.assertNotIn("rm -rf", json.dumps(c))
+
+    # -- 2. reanchor ------------------------------------------------------------------------
+
+    def test_reanchor_is_planned_by_the_server_from_the_blob_and_written(self):
+        # The agent sends only {"dry_run": false}; the replacement excerpt is computed here, from a verified blob,
+        # and re-checked against the tree before the write (still_supported). Without a push: the label.
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/reanchor", {"dry_run": False})
+        self.assertEqual((code, out["history"]), (200, NOGIT))
+        self.assertIn(NOGIT, out["plan"][0]["unresolved"][0]["why"])
+        self.push()
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/reanchor", {"dry_run": False})
+        self.assertEqual(code, 200, out)
+        [p] = out["plan"]
+        self.assertIn("record", p)
+        self.assertEqual(p["anchors"], [{"kind": "excerpt", "path": "specs/spec.md",
+                                         "text": "The cited claim, line one.\nThe cited claim, line two."}])
+        self.assertIn("(from the steward)", p["changes"][0]["why"])
+        self.assertEqual(self.req("GET", "/api/view", tok=token())[1]["view"]["questions"]["LANE.1/Q2"]["state"],
+                         "locked")
+
+    # -- 3. refine tags ---------------------------------------------------------------------
+
+    def test_refine_shows_the_last_commit_while_its_key_matches_and_the_label_after(self):
+        tags, why = self.refine()
+        self.assertEqual(tags["git"], NOGIT)
+        self.assertIn(f"file time 2020-09-13T12:26:40Z; the last-commit time is {NOGIT}", why)
+        self.push()
+        head = subprocess_git(self.root, "rev-parse", "HEAD")
+        ct = int(subprocess_git(self.root, "log", "-1", "--format=%ct", "--", "specs/spec.md"))
+        tags, why = self.refine()
+        self.assertEqual(tags["git"], "from the steward")
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ct))
+        self.assertIn(f"last commit {stamp} (from the steward, HEAD {head[:12]})", why)
+        # The key moves (the file is touched, same bytes): the pushed time is never shown for it again.
+        os.utime(self.root / "specs/spec.md", (1_600_000_100, 1_600_000_100))
+        tags, why = self.refine()
+        self.assertEqual(tags["git"], NOGIT)
+        self.assertIn(f"the last-commit time is {NOGIT}", why)
+        self.assertNotIn("from the steward", why)
+
+    def test_a_spec_time_the_server_did_not_ask_for_is_ignored(self):
+        # Catches: storing a record for a path the client chose, or for a stat the server does not see.
+        st = (self.root / "specs/spec.md").stat()
+        rec = {"path": "specs/spec.md", "mtime_ns": st.st_mtime_ns, "size": st.st_size, "head": "b" * 40,
+               "edited": 1}
+        out = self.console.push_history_specs({"specs": [{**rec, "path": "specs/other.md"},
+                                                         {**rec, "size": st.st_size + 1}]})
+        self.assertEqual((out["specs"], out["ignored"]), (0, ["specs/other.md", "specs/spec.md"]))
+        self.assertIn(f"the last-commit time is {NOGIT}", self.refine()[1])
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/history-specs", {"specs": [{**rec, "path": "../x"}]})
+        self.assertEqual(code, 400, out)
+
+    # -- the steward's own command, and the server starting nothing --------------------------
+
+    def test_history_push_from_the_cli_in_its_own_process(self):
+        # The real `agent.py history-push`, a separate process (git allowed there), against this server.
+        from console_kit import registry as R
+        reg = self.root.parent / f"{self.root.name}-cfg" / "console-kit" / "projects.json"
+        R.register(self.root, self.cfg.state, Path(SV.__file__).resolve().parent.parent, path=reg)
+        self.addCleanup(lambda: __import__("shutil").rmtree(reg.parent.parent, ignore_errors=True))
+        env = {**os.environ, "XDG_CONFIG_HOME": str(reg.parent.parent)}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        r = subprocess.run([sys.executable, str(Path(SV.__file__).resolve().parent.parent / "agent.py"),
+                            "--state", str(self.cfg.state), "history-push", "--project", str(self.root)],
+                           capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads(r.stdout)
+        self.assertEqual((got["blobs"], got["specs"]["specs"], got["refused"]),
+                         ({"asked": 1, "sent": 1, "not_in_history": 0}, 1, []))
+        self.assertEqual(self.condition()[1]["history"], "from the steward")
+
+    def test_the_served_server_starts_no_process_with_steward_data_in_hand(self):
+        # The real `serve`, an audit hook on every spawn event, every route that once reached git, AFTER a
+        # push. Catches a server that, given the steward's data, goes to git anyway (or instead).
+        root = Path(tempfile.mkdtemp(prefix="ck-audit-push-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        v1 = git_project(root)
+        (root / "page.html").write_text(PAGE)
+        (root / "adapter.py").write_text(
+            "def items():\n    return {'LANE': {'title': 'a lane', 'parent': None, 'status': 'open'},\n"
+            "            'LANE.1': {'title': 'a phase', 'parent': 'LANE', 'status': 'open'}}\n"
+            "def seed_questions():\n    return []\n"
+            "def record(entries, dry_run):\n    return []\n")
+        st = (root / "specs/spec.md").stat()
+        from console_kit import stewardgit as SG
+        with seam_open():
+            blobs, specs = SG.collect(root, {"blobs": [{"path": "specs/spec.md", "sha256": v1}],
+                                             "specs": [{"path": "specs/spec.md", "mtime_ns": st.st_mtime_ns,
+                                                        "size": st.st_size}]})
+        params = {"kit": str(Path(SV.__file__).resolve().parent.parent), "root": str(root), "host": HOSTNAME,
+                  "question": spec_question(v1), "push": {"blobs": blobs, "specs": specs}}
+        r = subprocess.run([sys.executable, "-c", AUDIT_CHILD, json.dumps(params), json.dumps(SPAWN_EVENTS)],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual(got["spawned"], [], "the server started a process")
+        for name, code in got["codes"].items():
+            self.assertLess(code, 500, name)
+        self.assertEqual(got["codes"]["agent POST /history-blob"], 200)
+        out = got["out"]
+        self.assertEqual(out["specs"]["specs"], 1)
+        [c] = out["check"]["stale"]["LANE.1/Q2"]["conditions"]
+        self.assertEqual((c["history"], c["cited_text"]), ("from the steward", "unchanged"))
+        self.assertEqual(out["view"]["view"]["tags"]["git"], "from the steward")
+        self.assertIn("record", out["reanchor"]["plan"][0])
+
+
+def subprocess_git(root: Path, *args) -> str:
+    import subprocess
+    return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=True).stdout.strip()
+
+
+class OneServerStewardGitTests(_OneServer, unittest.TestCase):
+    """The same data reaches the one server (K3) through /p/<name>/, with the audit hook watching it."""
+
+    def test_history_push_reaches_the_one_server_and_it_starts_nothing(self):
+        import subprocess
+        alpha = self.p["alpha"]
+        v1 = git_project(alpha["root"])
+        self.spawn()
+        items = {"LANE": {"title": "a lane", "parent": None, "status": "open"},
+                 "LANE.1": {"title": "a phase", "parent": "LANE", "status": "open"}}
+        self.assertEqual(self.push("alpha", items)[0], 200)
+        code, out = self.agent("POST", "/p/alpha/question", spec_question(v1))
+        self.assertEqual(code, 200, out)
+        code, a = self.owner("alpha", "POST", "/api/answer", {"qid": "LANE.1/Q2", "picks": ["a"], "own_text": "",
+                                                             "nonce": "k3gitanswer1"})
+        self.assertEqual(code, 200, a)
+        code, lk = self.owner("alpha", "POST", "/api/lock", {"qid": "LANE.1/Q2", "answer": a["record"]["id"],
+                                                           "nonce": "k3gitlock001"})
+        self.assertEqual(code, 200, lk)
+        _, before = self.agent("GET", "/p/alpha/check")
+        self.assertEqual(before["history"], NOGIT)
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg)}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        r = subprocess.run([sys.executable, str(HERE / "plugin" / "kit" / "agent.py"), "--state", str(alpha["state"]),
+                            "history-push", "--project", str(alpha["root"])],
+                           capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        _, after = self.agent("GET", "/p/alpha/check")
+        [c] = after["stale"]["LANE.1/Q2"]["conditions"]
+        self.assertEqual((c["history"], c["cited_text"]), ("from the steward", "unchanged"))
+        self.assertEqual(self.owner("alpha", "GET", "/api/view")[1]["view"]["tags"]["git"], "from the steward")
+        self.assertEqual(self.agent("GET", "/p/beta/check")[1]["history"], NOGIT)   # beta's data is its own
+        self.stop()
+        self.assertEqual(self.violations(), [])                 # no spawn, import or compile from a root
+
+    def history_push(self, alpha):
+        import subprocess
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg)}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        r = subprocess.run([sys.executable, str(HERE / "plugin" / "kit" / "agent.py"), "--state", str(alpha["state"]),
+                            "history-push", "--project", str(alpha["root"])],
+                           capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_every_steward_git_file_operation_is_dir_relative_and_follows_no_link(self):
+        # The syscall half of the K4 review's dir-fd finding: under strace, every file syscall of the server that
+        # names steward-git, blobs/, index.json or a blob (create, write, rename, list, stat, prune, read) goes
+        # through a held folder descriptor, one component at a time, with no link followed. Catches: any one of
+        # them done by path, which a symlink swapped in between two calls would redirect. NEGATIVE CONTROL: the
+        # same parser must flag path-based calls on the same names, or a parser that sees nothing passes anything.
+        import shutil
+        import subprocess
+        if shutil.which("strace") is None:
+            self.skipTest("strace not installed")
+        alpha = self.p["alpha"]
+        v1 = git_project(alpha["root"])
+        trace = self.t / "steward.strace"
+        self.spawn(prefix=("strace", "-f", "-qq", "-e", "trace=%file", "-o", str(trace)))
+        items = {"LANE": {"title": "a lane", "parent": None, "status": "open"},
+                 "LANE.1": {"title": "a phase", "parent": "LANE", "status": "open"}}
+        self.assertEqual(self.push("alpha", items)[0], 200)
+        import base64, hashlib
+        now = (alpha["root"] / "specs/spec.md").read_bytes()
+        v2 = hashlib.sha256(now).hexdigest()                      # a second lock, on the current version
+        for n, (qid, sha) in enumerate((("LANE.1/Q2", v1), ("LANE.1/Q3", v2))):
+            q = {**spec_question(sha), "qid": qid, "nonce": f"k4dirfdque{n}"}
+            self.assertEqual(self.agent("POST", "/p/alpha/question", q)[0], 200)
+            code, a = self.owner("alpha", "POST", "/api/answer", {"qid": qid, "picks": ["a"], "own_text": "",
+                                                                 "nonce": f"k4dirfdans{n}"})
+            self.assertEqual(code, 200, a)
+            self.assertEqual(self.owner("alpha", "POST", "/api/lock", {"qid": qid, "answer": a["record"]["id"],
+                                                                       "nonce": f"k4dirfdloc{n}"})[0], 200)
+        self.history_push(alpha)                                  # creates the folders, writes a blob and the index
+        code, out = self.agent("POST", "/p/alpha/history-blob",   # a second named blob: the cap stats the first
+                               {"sha256": v2, "commit": None, "content_b64": base64.b64encode(now).decode()})
+        self.assertEqual(code, 200, out)
+        dead = "e" * 64
+        (alpha["state"] / "steward-git" / "blobs" / dead).write_bytes(b"no lock names this\n")
+        self.history_push(alpha)                                  # stats, lists and prunes, then writes again
+        self.assertFalse((alpha["state"] / "steward-git" / "blobs" / dead).exists())
+        [c] = self.agent("GET", "/p/alpha/check")[1]["stale"]["LANE.1/Q2"]["conditions"]
+        self.assertEqual(c["history"], "from the steward")       # the blob and the index were read
+        self.assertEqual(self.owner("alpha", "GET", "/api/view")[1]["view"]["tags"]["git"], "from the steward")
+        self.stop()
+        names = ("steward-git", "blobs", "index.json", v1, v2, dead)
+        safe, unsafe = dirfd_ops(trace.read_text(), names)
+        self.assertEqual(unsafe, [])
+        self.assertGreaterEqual(safe, 12)                         # every kind above happened, each at least once
+        ctl = self.t / "control.strace"
+        sg = alpha["state"] / "steward-git"
+        subprocess.run(["strace", "-f", "-qq", "-e", "trace=%file", "-o", str(ctl), sys.executable, "-c",
+                        f"import os; os.lstat({str(sg)!r}); open({str(sg / 'index.json')!r}).read(); "
+                        f"os.rename({str(sg / 'index.json')!r}, {str(sg / 'index.json')!r}); "
+                        f"os.listdir({str(sg / 'blobs')!r})"], check=True, timeout=60)
+        self.assertEqual(len(dirfd_ops(ctl.read_text(), names)[1]), 4)   # each path-based call is caught
 
 
 if __name__ == "__main__":

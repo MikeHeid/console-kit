@@ -112,6 +112,7 @@ First Next Last One Two Three Ok Okay Sure Fine Good Great Right Agreed Thanks
 Fix Record Leave Pick Option Options Answer Question
 """.split())
 TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+SG_FROM = "from the steward"   # stewardgit.FROM (not imported: stewardgit imports anchors, as this does)
 
 
 def _norm(t: str) -> str:
@@ -318,12 +319,35 @@ def _under(path: str, d: str) -> bool:
     return path == d or path.startswith(d + "/")
 
 
-def compute(store, view: dict, items: Mapping[str, dict], root: Path, specs_dir: str | None) -> dict:
-    """Tags for every question and every round in `view` (see the module doc)."""
+def cited_specs(store, root: Path, specs_dir: str | None) -> dict[str, tuple[int, int]]:
+    """path -> (mtime_ns, size), as THIS process sees it, of each spec a locked answer cites: what refine needs."""
+    if not specs_dir:
+        return {}
+    idx = _index(root, specs_dir)
+    out: dict[str, tuple[int, int]] = {}
+    for q in (r for r in store.records() if r["type"] == "question"):
+        head = store.head(q["qid"])
+        if head is None or store.lock_of(head["id"]) is None:
+            continue
+        for path in cited_paths(q):
+            if _under(path, specs_dir) and idx.has(path):
+                out[path] = idx.files[path]
+    return out
+
+
+def compute(store, view: dict, items: Mapping[str, dict], root: Path, specs_dir: str | None,
+            times=None) -> dict:
+    """Tags for every question and every round in `view` (see the module doc).
+
+    `times` (Q23 part 2): with the seam closed, the steward's pushed spec times
+    (`stewardgit.PushedTimes`); one is used only while its (path, mtime_ns,
+    size) is the file's now, and is named "(from the steward)".
+    """
     idx = _index(root, specs_dir) if specs_dir else None
     git = _git(root)
     head: list = []           # HEAD, read at most once per call, and only when a spec is cited by a lock
     basis: set[str] = set()
+    steward_used = False
     # Item titles, lower-cased: a name the register already uses is not new (drill rule 1).
     titles = "\n".join(_norm(str(d.get("title") or "")) for d in items.values() if isinstance(d, Mapping))
     out_q: dict[str, list[dict]] = {}
@@ -339,14 +363,21 @@ def compute(store, view: dict, items: Mapping[str, dict], root: Path, specs_dir:
             for path in cited_paths(rec):
                 if locked_at is None or not _under(path, specs_dir) or not idx.has(path):
                     continue
-                if not head:
-                    head.append(git.head())
-                edited, how = git.edited_at(path, idx.files[path], head[0])
+                pushed = times.edited_at(path, idx.files[path]) if times is not None else None
+                if pushed is not None:   # the steward's git, its key still the file's own
+                    edited, how = pushed[0], "git"
+                    steward_used = True
+                else:
+                    if not head:
+                        head.append(git.head())
+                    edited, how = git.edited_at(path, idx.files[path], head[0])
                 basis.add(how)
                 if edited <= locked_at:
                     when = "last commit" if how == "git" else "file time"
                     shown = f"{when} {time.strftime(TS_FORMAT, time.gmtime(edited))}"
-                    if not G.is_open():  # Q23: say which time is shown, and why not the commit's
+                    if pushed is not None:
+                        shown += f" ({SG_FROM}{f', HEAD {pushed[1][:12]}' if pushed[1] else ''})"
+                    elif not G.is_open():  # Q23: say which time is shown, and why not the commit's
                         shown += f"; the last-commit time is {G.UNAVAILABLE}"
                     tags.append({"step": "refine", "reason": f"cites {path}, not edited since you locked this "
                                                              f"({shown}, lock {lk['ts']})"})
@@ -388,6 +419,6 @@ def compute(store, view: dict, items: Mapping[str, dict], root: Path, specs_dir:
             out_f[fid] = tags
     out = {"questions": out_q, "forks": out_f, "specs_dir": specs_dir,
            "basis": sorted(basis), "notes": list(idx.notes) if idx is not None else []}
-    if not G.is_open():
-        out["git"] = G.UNAVAILABLE   # Q23: named even when no tag needed git this time
+    if not G.is_open():   # Q23: named even when no tag needed git this time
+        out["git"] = SG_FROM if steward_used else G.UNAVAILABLE
     return out

@@ -82,6 +82,7 @@ from . import names as N
 from . import projectcfg as PC
 from . import publish as P
 from . import schema as S
+from . import stewardgit as SG
 from . import tags as T
 from . import view as V
 from . import visuals as VIS
@@ -89,6 +90,8 @@ from .fold import load_adapter
 from .store import Store, StoreError
 
 HOST = "127.0.0.1"          # never configurable: the tunnel is the only way in
+DRAIN_SECONDS = 2.0         # at most this long, in all, reading a body an early refusal left unread
+BODY_SECONDS = 30.0         # at most this long, in all, receiving one request body (the per-read timeout restarts)
 MAX_BODY = 64 * 1024        # far above any real answer (MAX_TEXT is 20 000 characters)
 OWNER_ROUTES = {"/api/message": "message", "/api/answer": "answer", "/api/lock": "lock"}
 # The live console (0.7.0). A long poll: the page asks "has anything changed
@@ -478,7 +481,8 @@ class Console:
     def tags(self, view: dict, items: dict[str, dict]) -> dict:
         """Suggested next steps (0.8.0). A failure here costs the chips, never the page."""
         try:
-            return T.compute(self.store, view, items, self.cfg.root, self.project.specs_dir)
+            return T.compute(self.store, view, items, self.cfg.root, self.project.specs_dir,
+                             times=None if G.is_open() else SG.PushedTimes(self.cfg.state))
         except Exception as e:  # a spec caught mid-write, git gone odd: named in the log
             sys.stderr.write(f"console tags: {type(e).__name__}: {e}\n")
             return {"questions": {}, "forks": {}, "specs_dir": self.project.specs_dir, "basis": [],
@@ -598,12 +602,51 @@ class Console:
         history is unavailable, and so does `history` here.
         """
         items = self.items()
-        return {"stale": A.check(self.store, self.cfg.root, self._status(items)), **self._no_git("history")}
+        return {"stale": A.check(self.store, self.cfg.root, self._status(items), history=self._history()),
+                **self._history_note()}
 
     @staticmethod
     def _no_git(key: str) -> dict:
         """`{key: "unavailable (no git in the server)"}` once the seam is closed (as `serve` closes it), else {}."""
         return {} if G.is_open() else {key: G.UNAVAILABLE}
+
+    def _history(self):
+        """Where past versions come from: git here, or (seam closed) only blobs the steward pushed and proved."""
+        return None if G.is_open() else SG.PushedHistory(self.cfg.state)
+
+    def _history_note(self) -> dict:
+        """`history`: unset with git here; else what the steward last pushed, or the label when it never has."""
+        if G.is_open():
+            return {}
+        pushed = SG.pushed_at(self.cfg.state)
+        return {"history": f"{SG.FROM}, pushed {pushed}" if pushed else G.UNAVAILABLE}
+
+    # -- git, from the steward (CONSOLE-kit/Q23, part 2) ----------------------------------------
+
+    def history_wants(self) -> dict:
+        """What `agent.py history-push` should compute: every path in it is the server's own, never the client's."""
+        items = self.items()
+        return SG.wants(self.store, self.cfg.root, self._status(items),
+                        T.cited_specs(self.store, self.cfg.root, self.project.specs_dir))
+
+    def push_history_blob(self, body: object) -> dict:
+        try:
+            with self._lock:
+                out = SG.push_blob(self.cfg.state, self.store, body)
+        except SG.PushError as e:
+            raise RequestError(400, str(e)) from None
+        self._bump()
+        return out
+
+    def push_history_specs(self, body: object) -> dict:
+        wanted = T.cited_specs(self.store, self.cfg.root, self.project.specs_dir)
+        try:
+            with self._lock:
+                out = SG.push_specs(self.cfg.state, self.store, body, wanted)
+        except SG.PushError as e:
+            raise RequestError(400, str(e)) from None
+        self._bump()
+        return out
 
     def reanchor(self, body: object) -> dict:
         """Re-anchor every stale lock that git history can justify; with dry_run, only say what would change.
@@ -619,9 +662,9 @@ class Console:
         dry = body.get("dry_run", True)
         # Planned outside the write lock (git can take seconds); a lock that is no
         # longer current by the time it is written is skipped, never re-anchored.
-        plan = A.plan_reanchor(self.store, self.cfg.root, self._status(self.items()))
+        plan = A.plan_reanchor(self.store, self.cfg.root, self._status(self.items()), history=self._history())
         if dry:
-            return {"dry_run": True, "plan": plan, **self._no_git("history")}
+            return {"dry_run": True, "plan": plan, **self._history_note()}
         with self._lock:
             for p in plan:
                 if not p["changes"]:
@@ -649,7 +692,7 @@ class Console:
                 p["record"] = rec["id"]
         if any("record" in p for p in plan):
             self._bump()
-        return {"dry_run": dry, "plan": plan, **self._no_git("history")}
+        return {"dry_run": dry, "plan": plan, **self._history_note()}
 
     def _lock_anchors(self, body: dict, items: dict[str, dict]) -> None:
         """Give a RE-lock fresh anchors from the tree as it is now (0.5.0); a first lock takes none.
@@ -1049,6 +1092,57 @@ class _Handler(BaseHTTPRequestHandler):
     sys_version = ""
     timeout = 30  # seconds per socket read, so a stalled client cannot hold a thread for ever
     max_body = MAX_BODY
+    _body_taken = False
+
+    def finish(self) -> None:
+        """Read a body no route read (an early refusal: 403, 404, 415) before the connection closes.
+
+        A client may send its body after its headers, in a second write; closing
+        with that write still coming makes it fail with EPIPE instead of reading
+        the answer it was sent. Only a body within `max_body` is read: a larger
+        one is refused unread, as `_body` refuses it.
+        """
+        try:
+            raw = self.headers.get("Content-Length") if getattr(self, "headers", None) is not None else None
+            if not self._body_taken and raw and re.fullmatch(r"[0-9]{1,12}", raw.strip()) \
+                    and 0 < int(raw) <= self.max_body:
+                self._drain(int(raw))
+        except OSError:
+            pass   # the client went away, or the deadline passed: close, the answer is already sent
+        finally:
+            super().finish()
+
+    def _drain(self, left: int) -> None:
+        """Read and drop up to `left` bytes within DRAIN_SECONDS IN ALL, then stop."""
+        self._read_within(left, DRAIN_SECONDS, keep=False)
+
+    def _read_within(self, left: int, seconds: float, keep: bool = True) -> bytes | None:
+        """Up to `left` bytes, read within `seconds` IN ALL: what arrived before EOF, or None past the deadline.
+
+        The socket timeout alone is per read and restarts with every byte, so a
+        client trickling one byte at a time could hold this thread for hours,
+        and ThreadingMixIn caps nothing. Each read gets only the time that is
+        left of one total deadline. `keep=False` drops what it reads.
+        """
+        deadline = time.monotonic() + seconds
+        chunks: list[bytes] = []
+        try:
+            while left > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self.connection.settimeout(remaining)
+                got = self.rfile.read1(min(left, 64 * 1024))
+                if not got:
+                    break
+                if keep:
+                    chunks.append(got)
+                left -= len(got)
+        except TimeoutError:
+            return None
+        finally:
+            self.connection.settimeout(self.timeout)   # the answer is written under the usual per-write timeout
+        return b"".join(chunks)
 
     def _send_raw(self, code: int, data: bytes, ctype: str, csp: str) -> None:
         """A body that is not JSON, under its own Content-Security-Policy (0.8.0, a stored visual)."""
@@ -1086,9 +1180,13 @@ class _Handler(BaseHTTPRequestHandler):
         n = int(raw)
         if n > self.max_body:
             raise RequestError(413, f"the body is over {self.max_body} bytes")
+        self._body_taken = True
+        data = self._read_within(n, BODY_SECONDS)
+        if data is None:   # the connection is closed after this answer, so the unread rest never matters
+            raise RequestError(408, f"the body did not arrive within {BODY_SECONDS:g} seconds")
         try:
-            return json.loads(self.rfile.read(n) or b"null")
-        except ValueError:
+            return json.loads(data or b"null")
+        except (ValueError, RecursionError):   # bad JSON, bad UTF-8, or nesting deeper than the decoder recurses
             raise RequestError(400, "the body is not JSON") from None
 
     def log_message(self, fmt: str, *args) -> None:  # the request line only: never a header, so never a token
@@ -1279,6 +1377,8 @@ class AgentHandler(_Handler):
         if self.path == "/health":
             ok, body = self.console.health()
             return self._send(200 if ok else 503, body)
+        if self.path == "/history-wants":   # Q23 part 2: what `agent.py history-push` should compute
+            return self._send(200, self.console.history_wants())
         self._send(404, {"error": "not found"})
 
     def _agent(self) -> str | None:
@@ -1306,6 +1406,14 @@ class AgentHandler(_Handler):
                 return self._send(200, self.console.add_visual(self._body(), agent))
             if self.path == "/visual-export":  # 0.8.1: a read; agent.py writes into the agent's own worktree
                 return self._send(200, self.console.visual_export(self._body()))
+            if self.path == "/history-blob":   # Q23 part 2: one past version, proved by its own hash
+                # Set on the INSTANCE, and safe there: the handler speaks HTTP/1.0 (BaseHTTPRequestHandler's
+                # default protocol_version), so one handler object serves exactly one request and the larger
+                # limit cannot carry over to another route on a kept-alive connection.
+                self.max_body = SG.MAX_BLOB_BODY
+                return self._send(200, self.console.push_history_blob(self._body()))
+            if self.path == "/history-specs":  # Q23 part 2: spec last-commit times, and a prune of the blobs
+                return self._send(200, self.console.push_history_specs(self._body()))
             kind = AGENT_ROUTES.get(self.path)
             if kind is None:
                 return self._send(404, {"error": "not found"})
