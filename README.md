@@ -301,6 +301,24 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   into it. `collect` is steward-only; `show` only reads. Symlinks are
   refused, and lines and files are size-capped.
 
+### The server starts no git (0.8.10)
+
+- **Why.** Git obeys the repository's own `.git/config`, which an agent can
+  write, and some keys make git run a program. The console server runs
+  outside every agent's jail, so it no longer runs git at all. A list of
+  forbidden config keys was rejected: git has no switch to ignore repository
+  config, so a new key would defeat any list.
+- **What you see.** Anything git history fed now says "unavailable (no git in
+  the server)" rather than going blank. `check` can't show which version a
+  whole-file hash was locked against. `reanchor` leaves locks stale and says
+  why. Refine chips show a spec's file time in place of its last commit.
+  These return once an agent-side step computes and supplies them.
+- **How it is held.** `console_kit/gitseam.py` is the only place a process
+  can be started, and the server closes it before reading the project. A test
+  runs the real server under an audit hook and fails if any route starts a
+  process. A second test walks every kit module's syntax tree and fails on
+  any other way to start one.
+
 ## How it fits together
 
 ```
