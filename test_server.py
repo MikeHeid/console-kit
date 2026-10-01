@@ -3194,6 +3194,8 @@ class _OneServer:
             R.register(root, state, HERE / "plugin" / "kit", path=self.reg)
             SF.add(name, state, f"{name}.example.com", AUD, 4901 + i, TEAM, registry=self.reg, path=self.sfile)
             self.p[name] = {"root": root, "state": state, "marker": marker}
+        # Each project's token as `server add` minted it (K4): `agent()` sends the path's project's own token.
+        self.tokens = {n: SF.read_token(n, self.sfile) for n in self.p}
         self.proc = None
         self.logs: list[str] = []
 
@@ -3231,7 +3233,9 @@ class _OneServer:
         self.proc = None
 
     def agent(self, method, path, body=None):
-        return SV.agent_request(self.sock, method, path, body)
+        """The agent door with the token of the project the path names (K4); `/health` and the rest go bare."""
+        m = MS.PROJECT_PATH.match(path)
+        return SV.agent_request(self.sock, method, path, body, token=self.tokens.get(m.group(1)) if m else None)
 
     def owner(self, name, method, path, body=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.info["ports"][name], timeout=30)
@@ -3324,7 +3328,7 @@ class OneServerTests(_OneServer, unittest.TestCase):
         # Catches: any route (or a fault check) reached before the seam, and an unknown project told apart.
         self.assertEqual(set(self.AGENT_POSTS) >= set(SV.AGENT_ROUTES), True)   # the list keeps up with the table
         (self.p["beta"]["state"] / "store.jsonl").write_text('{"not": "a record"}\n')   # beta is a refused project
-        self.spawn(ONE_SERVER.replace("r = MS.start(", "MS.authorize = lambda project, headers: False\nr = MS.start("))
+        self.spawn(ONE_SERVER.replace("r = MS.start(", "MS.authorize = lambda ms, project, headers: False\nr = MS.start("))
         for name in ("alpha", "beta", "nobody"):
             for path in self.AGENT_GETS:
                 self.assertEqual(self.agent("GET", f"/p/{name}{path}"), (403, {"error": "forbidden"}), (name, path))
@@ -3406,7 +3410,7 @@ class OneServerTests(_OneServer, unittest.TestCase):
         self.spawn()
         r = subprocess.run([sys.executable, agent_py, "--state", str(fixture), "items-push", "--adapter",
                             "console_adapter.py", "--project", str(self.p["alpha"]["root"])],
-                           capture_output=True, text=True, env=env, timeout=60)
+                           capture_output=True, text=True, env=env, timeout=60, cwd=self.p["alpha"]["root"])
         self.assertEqual(r.returncode, 0, r.stderr)
         for path in ("/view", "/check", "/health"):
             self.assertEqual(self.agent("GET", f"/p/alpha{path}")[0], 200, path)
@@ -3637,7 +3641,7 @@ class RootConfinementTests(_OneServer, unittest.TestCase):
         """Targets with a sentinel each, and the links in alpha's root that point at them."""
         A, B = self.p["alpha"], self.p["beta"]
         tokens = self.cfg / "console-kit" / "tokens"
-        tokens.mkdir(parents=True)
+        tokens.mkdir(parents=True, exist_ok=True)
         (tokens / "beta").write_text("SENTINEL-TOKEN-FILE-beta\n")
         (B["root"] / "secret.txt").write_text("SENTINEL-B-ROOT-FILE\n")
         (B["root"] / "pgb").mkdir()
