@@ -53,17 +53,17 @@ Write down what you have now. You will need it to roll back:
 
 ## Placeholders
 
-| Placeholder | Meaning | Gradiance |
+| Placeholder | Meaning | Example |
 |---|---|---|
 | `<kit-clone>` | your development clone of console-kit | `~/dev/projects/console-kit` |
 | `<tag>` | the pinned release | `v0.8.7` |
 | `<pins>` | where pinned releases live | `~/.local/share/console-kit/releases` |
 | `<current>` | a symlink to the pinned release in use | `~/.local/share/console-kit/current` |
-| `<project>` | the checkout the unit serves | `~/dev/projects/gradiance` |
+| `<project>` | the checkout the unit serves | `~/src/acme` |
 | `<vendored>` | the vendored copy, relative to `<project>` | `tools/console-kit` |
-| `<name>` | the unit name, `<name>-console.service` | `gradiance` |
-| `<state>` | the server's `--state` directory | `~/.local/state/gradiance-console` |
-| `<venv>` | a Python with the kit's pinned PyJWT and cryptography | `~/.local/share/gradiance-console/venv` |
+| `<name>` | the unit name, `<name>-console.service` | `acme` |
+| `<state>` | the server's `--state` directory | `~/.local/state/acme-console` |
+| `<venv>` | a Python with the kit's pinned PyJWT and cryptography | `~/.local/share/acme-console/venv` |
 
 `~/.local/share/console-kit/kit` and `~/.local/share/console-kit/venv` belong to
 `deploy/install.sh` (the zip route in `INSTALL.md`). The pinned releases go in
@@ -121,21 +121,34 @@ and use that as `<venv>`.
 
 The registry (`~/.config/console-kit/projects.json`) tells the plugin's hook
 and skills which `agent.py` to run for a project. `register` records the
-directory of the `agent.py` you run it with, so run the **pinned** one:
+directory of the `agent.py` you run it with, so run the **pinned** one.
 
-    python3 <current>/plugin/kit/agent.py --state <state> register --project <project>
+**`register` replaces the project's whole entry.** It drops any existing
+entry for that root (`projects.pop(root)` in `console_kit/registry.py`) and
+writes a new one. Back the registry up first, and note the steward if one is
+set:
 
-It prints `registered <project>: state <state>, kit <pins>/<tag>/plugin/kit`.
-The path is resolved, so the registry names the release itself, not
-`<current>`. A steward already set on this console is kept; pass
-`--steward NAME` only to set one.
+    cp ~/.config/console-kit/projects.json ~/.config/console-kit/projects.json.bak-before-pin
+    python3 <current>/plugin/kit/agent.py --state <state> steward      # prints the steward, if any
+
+Then register with the **pinned** `agent.py`, passing `--steward NAME` again if
+the line above printed one:
+
+    python3 <current>/plugin/kit/agent.py --state <state> register --project <project> [--steward NAME]
+
+The current code carries a steward over from another entry on the same state,
+but re-passing it makes the result not depend on that. It prints
+`registered <project>: state <state>, kit <pins>/<tag>/plugin/kit`. The path is
+resolved, so the registry names the release itself, not `<current>`.
 
 Check it:
 
     cat ~/.config/console-kit/projects.json        # "kit" is <pins>/<tag>/plugin/kit
     python3 <current>/plugin/kit/agent.py --state <state> health
 
-**Rollback:** register again with the vendored `agent.py`:
+**Rollback:** restore the backup
+(`cp ~/.config/console-kit/projects.json.bak-before-pin ~/.config/console-kit/projects.json`),
+or register again with the vendored `agent.py` (and `--steward NAME`):
 `python3 <project>/<vendored>/agent.py --state <state> register --project <project>`.
 
 ## 3. Run the server from the pinned kit
@@ -209,19 +222,31 @@ marketplace of the same name at `<current>` instead. `<current>` is a
 marketplace: it holds `.claude-plugin/marketplace.json`, named `console-kit`,
 whose plugin is `./plugin`, and `plugin/kit/` is inside it.
 
-In a `claude` session (or as `claude plugin ...` in a shell):
+**A directory marketplace's plugin loads in place.** Claude Code runs it from
+the marketplace's folder, not from a copy: an edit there applies at the next
+session start or `/reload-plugins`
+([plugins: in-place and copied plugins](https://code.claude.com/docs/en/plugins/loading.md#in-place-and-copied-plugins)).
+So once the marketplace points at `<current>`, every session loads the skills
+and hooks from the pin, and until it does, they load from the vendored folder.
 
-    /plugin marketplace remove console-kit
-    /plugin marketplace add <current>
-    /plugin install console-kit@console-kit
-    /reload-plugins
+1. **First, the settings entry.** If `~/.claude/settings.json` declares the
+   marketplace under `extraKnownMarketplaces`, change that entry's `"path"` to
+   `<current>`, written as an absolute path (JSON does not expand `~`).
+   `marketplace remove` uninstalls the marketplace's plugins and clears their
+   `enabledPlugins` entries, but the docs do not say it clears
+   `extraKnownMarketplaces`
+   ([install: manage marketplaces](https://code.claude.com/docs/en/plugins/install.md#manage-marketplaces)),
+   so an entry left on the old path could bring it back.
+2. **Then repoint the marketplace**, in a shell (absolute path):
 
-`marketplace remove` also uninstalls the plugin and clears its
-`enabledPlugins` entry, and the install puts it back. If your
-`~/.claude/settings.json` declares the marketplace under
-`extraKnownMarketplaces` (a documented settings key), change that entry's
-`"path"` to `<current>` too, so a later start does not bring the old path
-back. The docs do not say whether `marketplace remove` edits that key.
+       claude plugin marketplace remove console-kit
+       claude plugin marketplace add <current>
+       claude plugin marketplace list        # console-kit, at <current>
+
+3. **Then reinstall and reload**, in a `claude` session:
+
+       /plugin install console-kit@console-kit
+       /reload-plugins
 
 If the plugin asks for its two optional defaults again (team domain, default
 zone), give the same values, or set them later with
@@ -237,8 +262,8 @@ Check it, in a new session in the project:
 - the SessionStart note's `agent.py` path is under `<pins>/<tag>/plugin/kit`;
 - `cat ~/.claude/plugins/known_marketplaces.json` shows `console-kit` at `<current>`.
 
-**Rollback:** the same four commands with the vendored directory in place of
-`<current>`, and the old `extraKnownMarketplaces` path.
+**Rollback:** the same three steps with the vendored directory in place of
+`<current>`, including the old `extraKnownMarketplaces` path.
 
 ## 6. Only then: remove the vendored copy from the project
 
@@ -253,10 +278,10 @@ deletion within minutes, with nobody watching:
   retries it in a loop, and the console is down;
 - if the registry still named `<vendored>`, every session's SessionStart note
   and every skill would run an `agent.py` that no longer exists;
-- if the plugin still came from `<vendored>`, its next reload or update would
-  fail. Whether Claude Code runs a directory marketplace's plugin from its
-  cache or from the directory itself is not documented, so do not rely on the
-  cache.
+- if the marketplace still pointed at `<vendored>`, every session would lose
+  console-kit's skills and hooks at its next start or `/reload-plugins`: a
+  directory marketplace's plugin loads in place from that folder, with no copy
+  to fall back on (step 5).
 
 Done in this order, the deletion changes nothing that runs.
 
@@ -283,9 +308,7 @@ What the project change usually touches, besides `<vendored>` itself:
     python3 <current>/plugin/kit/agent.py --state <state> register --project <project>   # each project
     systemctl --user restart <name>-console.service                                       # each project
     python3 <current>/plugin/kit/agent.py --state <state> health                          # the new version
-    /plugin marketplace update console-kit
-    /plugin update console-kit@console-kit
-    /reload-plugins
+    /reload-plugins            # the plugin loads in place from <current>
 
 Read the release's notes in `INSTALL.md` ("Upgrading to …") first. Some
 releases ask for a step of their own, such as `reanchor` or a
@@ -298,8 +321,7 @@ a while: it is your rollback.
     <venv>/bin/pip install -q -r <current>/plugin/kit/requirements.txt
     python3 <current>/plugin/kit/agent.py --state <state> register --project <project>
     systemctl --user restart <name>-console.service
-    /plugin marketplace update console-kit
-    /plugin update console-kit@console-kit
+    /reload-plugins
 
 Check `INSTALL.md`'s "Going back to an older kit" first. An older kit refuses
 by name a store record it does not know, and a steward must be cleared before
@@ -311,7 +333,6 @@ To retire an old pin: `git -C <kit-clone> worktree remove <pins>/<old-tag>`.
 
 ## A worked example
 
-[MIGRATION-GRADIANCE.md](MIGRATION-GRADIANCE.md) runs every step above on a real
-project (a flat vendored copy under `tools/console-kit`, its own unit templates and a
-follow-main timer), with the exact commands, the measured drift check, and the list of
-files that project's own deletion PR has to touch.
+A project keeps its own worked example, with its real paths, unit flags and the
+list of files its deletion PR touches, in its own repository. This repository
+names no consumer project.
