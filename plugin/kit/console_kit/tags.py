@@ -81,6 +81,7 @@ from typing import Mapping
 
 from . import anchors as A
 from . import gitseam as G
+from . import rootfs as RF
 from . import schema as S
 from . import view as V
 
@@ -156,6 +157,8 @@ class SpecIndex:
         self._found: dict[str, bool] = {}
 
     def _walk(self) -> tuple[dict[str, tuple[int, int]], list[str]]:
+        if RF.confined():
+            return self._confined_walk()
         top = self.root / self.specs_dir
         out: dict[str, tuple[int, int]] = {}
         notes: list[str] = []
@@ -183,6 +186,31 @@ class SpecIndex:
                 out[rel] = (st.st_mtime_ns, st.st_size)
         return out, notes
 
+    def _confined_walk(self) -> tuple[dict[str, tuple[int, int]], list[str]]:
+        """The one console server's walk (K3, §3.6): beneath the held root, no symlink followed at any depth."""
+        out: dict[str, tuple[int, int]] = {}
+        notes: list[str] = []
+        try:
+            found = RF.files_under(self.root, self.specs_dir.rstrip("/"), MAX_SPEC_FILES + 1)
+        except OSError:
+            return out, notes
+        total = 0
+        for rel, mtime, size in found:
+            if S.secret_path(rel) or size > A.MAX_READ:
+                continue
+            if len(out) >= MAX_SPEC_FILES or total + size > MAX_SPEC_BYTES:
+                notes.append(f"the spec index stopped at {len(out)} files ({total} bytes): "
+                             f"the limits are {MAX_SPEC_FILES} files and {MAX_SPEC_BYTES} bytes")
+                return out, notes
+            total += size
+            out[rel] = (mtime, size)
+        return out, notes
+
+    def _read(self, rel: str) -> bytes:
+        if RF.confined():
+            return RF.read(self.root, rel, A.MAX_READ)
+        return (self.root / rel).read_bytes()
+
     def refresh(self) -> None:
         files, notes = self._walk()
         sig = tuple(sorted(files.items()))
@@ -191,8 +219,8 @@ class SpecIndex:
         texts, names = [], []
         for rel in files:
             try:
-                texts.append(_norm((self.root / rel).read_bytes().decode("utf-8", errors="replace")))
-            except OSError:
+                texts.append(_norm(self._read(rel).decode("utf-8", errors="replace")))
+            except (OSError, ValueError):
                 continue
             stem = rel.rsplit("/", 1)[-1].rsplit(".", 1)[0].lower()
             names += [stem, _norm(stem.replace("-", " ").replace("_", " "))]

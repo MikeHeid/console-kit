@@ -45,6 +45,8 @@ from typing import Callable
 
 from . import gitseam as G
 from . import projectcfg as PC
+from . import publish as P
+from . import rootfs as RF
 from . import names as N
 from . import schema as S
 from . import serverfile as SF
@@ -57,6 +59,7 @@ OLD_SOCKET = "agent.sock"
 SOCKET = "server.sock"
 MAX_ITEMS = 4 << 20
 MAX_ITEM_COUNT = 10_000
+MAX_PAGE = 4 << 20
 PROJECT_PATH = re.compile(r"^/p/([a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31})(/[^?#]*)\Z")
 FORBIDDEN = {"error": "forbidden"}   # one body for every refusal at the agent door: it names nothing (§3.5)
 
@@ -161,6 +164,13 @@ class ProjectConsole(SV.Console):
     the page renders for a single-project server: nothing here adds a second label.
     """
 
+    def page(self) -> str:
+        """The host page, read beneath the held root with no symlink followed (§3.6); RF.Refused otherwise."""
+        rel = Path(self.cfg.page).relative_to(self.cfg.root).as_posix()
+        html = RF.read(self.cfg.root, rel, MAX_PAGE).decode("utf-8")
+        block = P.console_block(json.dumps({"api": "/api", "project": self.cfg.project}))
+        return P.inject(html, block)
+
     def board(self) -> dict | None:
         """None (the door's 404) until a push carries a board; a pushed one is checked as the adapter's was."""
         if self.adapter.board() is None:
@@ -228,6 +238,12 @@ def open_project(name: str, entry: dict, team_domain: str) -> Hosted:
             h.fault = f"cannot open {state}: {e.strerror}"
         return h
     root = Path(entry["root"])
+    try:
+        RF.hold(root)   # the one descriptor every read of this project's tree starts from (§3.6)
+    except OSError as e:
+        h.fault = f"{name}'s root cannot be opened: {e.strerror}"
+        h.close()
+        return h
     cfg = SV.Config(root=root, page=root / entry["page"], state=state, adapter=Path(os.devnull),
                     team_domain=team_domain, aud=entry["aud"], hostname=entry["hostname"], port=entry["port"],
                     project=name)
@@ -314,6 +330,24 @@ class MultiAgentHandler(SV.AgentHandler):
         super().do_POST()
 
 
+class MultiOwnerHandler(SV.OwnerHandler):
+    """A project's owner door on the one server: today's gate and routes; the host page read confined."""
+
+    def do_GET(self) -> None:
+        if self.path in ("/", "/index.html"):
+            if not self._gate():
+                return
+            try:
+                html = self.console.page()
+            except (OSError, ValueError, UnicodeDecodeError) as e:   # RF.Refused, absent, too large: the path as given
+                return self._send(404, {"error": str(e) if isinstance(e, (RF.Refused, FileNotFoundError))
+                                        else "the host page could not be read"})
+            except P.PublishError as e:   # no single </body>: named by count, never by the page's own text
+                return self._send(404, {"error": f"the host page cannot carry the console: {e}"})
+            return self._send(200, html, "text/html; charset=utf-8")
+        super().do_GET()
+
+
 class FaultOwnerHandler(SV._Handler):
     """A refused project's owner door: past the same Access gate, every request is 503 with the reason."""
 
@@ -381,6 +415,7 @@ def start(server_file: Path | None = None, sock: Path | None = None,
           port_for: Callable[[Hosted], int] | None = None) -> Running:
     """Open every project and start every door, each serving in its own threads. Closes the git seam first."""
     G.close()   # this process holds every project's store: no git, i.e. no project-controlled program, runs here
+    RF.confine()   # and every read of a project's tree starts from its held root, following no symlink
     sf = Path(server_file or SF.location())
     ms = MultiServer(sf)
     verify_for = verify_for or (lambda aud: SV.access_verifier(ms.team_domain, aud))
@@ -394,7 +429,10 @@ def start(server_file: Path | None = None, sock: Path | None = None,
             continue   # no gate can be built for an entry this broken; its refusal is on the agent door
         verify = verify_for(h.entry["aud"])
         if h.console is not None:
-            srv = SV.owner_server(h.console, verify, port_for(h))
+            handler = type("BoundMultiOwnerHandler", (MultiOwnerHandler,),
+                           {"console": h.console, "verify": staticmethod(verify)})
+            srv = ThreadingHTTPServer((SV.HOST, port_for(h)), handler)
+            srv.daemon_threads = True
         else:
             handler = type("BoundFaultOwnerHandler", (FaultOwnerHandler,),
                            {"verify": staticmethod(verify), "fault": f"{name}: {h.fault}"})

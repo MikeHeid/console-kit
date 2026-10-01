@@ -2964,8 +2964,8 @@ r.shutdown()
 '''
 
 
-class OneServerTests(unittest.TestCase):
-    """K3 step 3: the one server's doors, items-push, and its rules (AC3.3, AC3.5, AC3.6)."""
+class _OneServer:
+    """A fixture of two projects, alpha and beta, on one server run as its own process."""
 
     def setUp(self):
         import test_kit as TK
@@ -3001,6 +3001,7 @@ class OneServerTests(unittest.TestCase):
             SF.add(name, state, f"{name}.example.com", AUD, 4901 + i, TEAM, registry=self.reg, path=self.sfile)
             self.p[name] = {"root": root, "state": state, "marker": marker}
         self.proc = None
+        self.logs: list[str] = []
 
     def tearDown(self):
         self.stop()
@@ -3008,13 +3009,17 @@ class OneServerTests(unittest.TestCase):
 
     def spawn(self, script=ONE_SERVER):
         roots = ",".join(str(v["root"]) for v in self.p.values())
+        # stderr to a file, not a pipe: an undrained pipe fills at 64 KiB of access lines and stalls the server.
+        self.errlog = open(self.t / f"server-{len(self.logs)}.err", "w+")
         self.proc = subprocess.Popen([sys.executable, "-c", script, str(HERE / "plugin" / "kit"),
                                       str(self.sfile), str(self.sock), str(self.pem), str(self.audit), roots],
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.errlog,
                                      text=True, env={**os.environ, "XDG_CONFIG_HOME": str(self.cfg)})
         line = self.proc.stdout.readline()
         if not line:
-            raise AssertionError(f"the one server did not start: {self.proc.stderr.read()}")
+            self.proc.wait(timeout=60)
+            self.errlog.seek(0)
+            raise AssertionError(f"the one server did not start: {self.errlog.read()}")
         self.info = json.loads(line)
         return self.info
 
@@ -3026,6 +3031,9 @@ class OneServerTests(unittest.TestCase):
             self.proc.communicate(timeout=60)
         else:
             self.proc.communicate(input="", timeout=60)
+        self.errlog.seek(0)
+        self.logs.append(self.errlog.read())   # every log line the server wrote, for the sentinel checks
+        self.errlog.close()
         self.proc = None
 
     def agent(self, method, path, body=None):
@@ -3059,6 +3067,10 @@ class OneServerTests(unittest.TestCase):
 
     def violations(self):
         return self.audit.read_text().splitlines() if self.audit.exists() else []
+
+
+class OneServerTests(_OneServer, unittest.TestCase):
+    """K3 step 3: the one server's doors, items-push, and its rules (AC3.3, AC3.5, AC3.6)."""
 
     def test_ac35_no_project_code_and_items_only_from_the_push(self):
         # Catches: importing the adapter (or reading its source and exec-ing a string), spawning git or anything
@@ -3187,6 +3199,286 @@ class OneServerTests(unittest.TestCase):
         self.assertTrue((fixture / "items.json").exists())
         for tag, kit in kits.items():                          # the rollback: every released kit starts on it
             self.TK.start_old_server(kit, self.t / f"work-{tag}", fixture, stay=False)
+
+
+REFUSAL = "is not a plain file under the project root"
+
+
+def naive_read(root: Path, rel: str) -> bytes:
+    """NEGATIVE CONTROL: open the path as given."""
+    return (Path(root) / rel).read_bytes()
+
+
+def prefix_read(root: Path, rel: str) -> bytes:
+    """NEGATIVE CONTROL: a check on the path string (`startswith root`) without resolving symlinks."""
+    p = os.path.abspath(os.path.join(root, rel))
+    if not p.startswith(str(root).rstrip("/") + "/"):
+        raise PermissionError(rel)
+    return Path(p).read_bytes()
+
+
+def check_then_open_read(root: Path, rel: str) -> bytes:
+    """NEGATIVE CONTROL for the race: resolve, compare, then open the resolved path (two steps)."""
+    p = os.path.realpath(os.path.join(root, rel))
+    if not p.startswith(str(root).rstrip("/") + "/"):
+        raise PermissionError(rel)
+    with open(p, "rb") as fh:
+        return fh.read()
+
+
+class RootConfinementTests(_OneServer, unittest.TestCase):
+    """K3 step 4: root reads are confined (AC3.7) and cannot race (AC3.8)."""
+
+    def setUp(self):
+        super().setUp()
+        A = self.p["alpha"]
+        self.SF.add("alpha", A["state"], "alpha.example.com", AUD, 4901, TEAM, page="pg/page.html",
+                    registry=self.reg, path=self.sfile)
+        (A["root"] / "pg").mkdir()
+        (A["root"] / "pg" / "page.html").write_text("<html><body>ORDINARY-PAGE</body></html>\n")
+        (A["root"] / "ok.txt").write_text("ORDINARY-OK a plain file inside the root\n")
+
+    def plant(self):
+        """Targets with a sentinel each, and the links in alpha's root that point at them."""
+        A, B = self.p["alpha"], self.p["beta"]
+        tokens = self.cfg / "console-kit" / "tokens"
+        tokens.mkdir(parents=True)
+        (tokens / "beta").write_text("SENTINEL-TOKEN-FILE-beta\n")
+        (B["root"] / "secret.txt").write_text("SENTINEL-B-ROOT-FILE\n")
+        (B["root"] / "pgb").mkdir()
+        (B["root"] / "pgb" / "page.html").write_text("SENTINEL-B-ROOT-PAGE\n")
+        (A["root"] / "inside.txt").write_text("SENTINEL-INSIDE-A-ROOT\n")
+        doc = json.loads(self.sfile.read_text())
+        doc["note"] = "SENTINEL-SERVER-JSON"
+        self.sfile.write_text(json.dumps(doc))
+        targets = {"b_store": (B["state"] / "store.jsonl", "SENTINEL-B-STORE"),
+                   "a_store": (A["state"] / "store.jsonl", "SENTINEL-A-STORE"),
+                   "b_token": (tokens / "beta", "SENTINEL-TOKEN-FILE-beta"),
+                   "server_json": (self.sfile, "SENTINEL-SERVER-JSON"),
+                   "b_root": (B["root"] / "secret.txt", "SENTINEL-B-ROOT-FILE")}
+        host = Path("/etc/hostname")
+        if host.is_file() and len(host.read_text().strip()) >= 10:   # the excerpt is [1:-1] and needs 8+
+            targets["etc_hostname"] = (host, host.read_text().strip())
+        self.cases = []   # (case, path in alpha's root, sentinel)
+        for i, (case, (target, sentinel)) in enumerate(targets.items()):
+            (A["root"] / f"t{i}").symlink_to(target)
+            self.cases.append((case, f"t{i}", sentinel))
+        (A["root"] / "mid").symlink_to(B["root"])              # a symlinked directory in the middle
+        self.cases.append(("middle_dir", "mid/secret.txt", "SENTINEL-B-ROOT-FILE"))
+        (A["root"] / "inlink").symlink_to(A["root"] / "inside.txt")   # a symlink pointing inside the root
+        self.cases.append(("inside_link", "inlink", "SENTINEL-INSIDE-A-ROOT"))
+        (A["root"] / "loopa").symlink_to(A["root"] / "loopb")
+        (A["root"] / "loopb").symlink_to(A["root"] / "loopa")
+        self.cases.append(("loop", "loopa", None))
+        self.cases.append(("dotdot", "../root-beta/secret.txt", "SENTINEL-B-ROOT-FILE"))
+        self.sentinels = {s for _, _, s in self.cases if s} | {"SENTINEL-B-ROOT-PAGE"}
+
+    def point_page(self, case: str, rel: str) -> None:
+        """Make alpha's host page `pg/page.html` lead where the case's link leads."""
+        A = self.p["alpha"]
+        pg = A["root"] / "pg"
+        if pg.is_symlink():
+            pg.unlink()
+        elif pg.exists():
+            for f in pg.iterdir():
+                f.unlink()
+            pg.rmdir()
+        if case == "middle_dir":
+            pg.symlink_to(self.p["beta"]["root"] / "pgb")       # the middle component is the link
+            return
+        pg.mkdir()
+        if case == "loop":
+            (pg / "page.html").symlink_to(pg / "page2.html")
+            (pg / "page2.html").symlink_to(pg / "page.html")
+        elif case == "dotdot":
+            (pg / "page.html").symlink_to("../../root-beta/secret.txt")   # a relative link out
+        else:
+            (pg / "page.html").symlink_to(os.readlink(A["root"] / rel))
+
+    def test_ac37_every_planted_link_is_refused_alike_and_no_sentinel_leaves(self):
+        # Catches: a `startswith root` string check (every link passes it), and a check of only the final
+        # component (the symlinked middle directory passes it). Both ship below as named negative controls.
+        self.spawn()
+        for name, sentinel in (("alpha", "SENTINEL-A-STORE"), ("beta", "SENTINEL-B-STORE")):
+            self.assertEqual(self.push(name)[0], 200)
+            code, out = self.agent("POST", f"/p/{name}/message", {"item": "PUSHED", "text": sentinel,
+                                                                  "nonce": f"k3sent{name}01"})
+            self.assertEqual(code, 200, out)
+        self.plant()
+        seen: list[str] = []
+        for n, (case, rel, sentinel) in enumerate(self.cases, 1):
+            # As the host page.
+            self.point_page(case, rel)
+            code, out = self.owner("alpha", "GET", "/")
+            seen.append(json.dumps(out))
+            self.assertEqual((code, out), (404, {"error": f"pg/page.html: refused, not a plain file under the project "
+                                                          f"root"}), case)
+            # As an anchor's file: an evidence row is read when the question is asked.
+            code, out = self.question_with(n, evidence=[{"cite": f"{rel}:1"}])
+            seen.append(json.dumps(out))
+            self.assertEqual(code, 400, case)
+            if case != "dotdot":                              # '..' is refused by the cite grammar, before any read
+                self.assertIn(f"{rel} {REFUSAL}", out["error"], case)
+            # As a valid_if path: the excerpt is the sentinel minus its ends, so a followed link would HOLD, and the
+            # whole sentinel can appear in a reply only if the file's bytes did (the reply echoes the excerpt).
+            code, out = self.question_with(100 + n, valid_if=[{"kind": "excerpt", "path": rel,
+                                                                "text": (sentinel or "-SENTINEL-LOOP-NEVER-")[1:-1]}])
+            seen.append(json.dumps(out))
+            if code == 200:
+                self.lock(f"PUSHED/Q{100 + n}")
+                code, chk = self.agent("GET", "/p/alpha/check")
+                seen.append(json.dumps(chk))
+                self.assertIn(f"{rel} {REFUSAL}", json.dumps(chk), case)
+            else:
+                self.assertEqual(case, "dotdot", out)          # only the grammar's own refusal comes earlier
+        # After the loop and all the rest, everything else still serves, and an ordinary file is still read.
+        pg = self.p["alpha"]["root"] / "pg"
+        if pg.is_symlink():
+            pg.unlink()
+        else:
+            for f in pg.iterdir():
+                f.unlink()
+            pg.rmdir()
+        pg.mkdir()
+        (pg / "page.html").write_text("SENTINEL-NO-BODY a plain page the console cannot be injected into\n")
+        self.sentinels.add("SENTINEL-NO-BODY")
+        self.assertEqual(self.owner("alpha", "GET", "/"),   # named, not a dropped connection
+                         (404, {"error": "the host page cannot carry the console: the page has 0 </body> tags; "
+                                         "expected exactly one"}))
+        (pg / "page.html").write_text("<html><body>ORDINARY-PAGE</body></html>\n")
+        code, html = self.owner("alpha", "GET", "/")
+        self.assertEqual(code, 200)
+        self.assertIn("ORDINARY-PAGE", html)
+        self.assertEqual(self.question_with(999, evidence=[{"cite": "ok.txt:1"}])[0], 200)
+        self.assertEqual(self.agent("GET", "/p/beta/view")[0], 200)
+        self.assertEqual(self.owner("alpha", "GET", "/api/view")[0], 200)
+        self.stop()
+        blob = "\n".join(seen + self.logs)
+        for s in self.sentinels:
+            self.assertNotIn(s, blob)
+        self.assertNotIn("alpha.example.com", "\n".join(self.logs))   # nothing of server.json in a log line
+
+    def test_ac37_negative_controls_leak_where_the_real_reader_refuses(self):
+        # The counter-check: the same planted tree read three ways, in this process.
+        from console_kit import rootfs as RF
+        self.spawn()
+        for name, sentinel in (("alpha", "SENTINEL-A-STORE"), ("beta", "SENTINEL-B-STORE")):
+            self.push(name)
+            self.agent("POST", f"/p/{name}/message", {"item": "PUSHED", "text": sentinel, "nonce": f"k3ctl{name}01"})
+        self.stop()
+        self.plant()
+        root = self.p["alpha"]["root"]
+        RF.hold(root)
+
+        def leaks(reader):
+            out = []
+            for case, rel, sentinel in self.cases:
+                try:
+                    data = reader(root, rel)
+                except (OSError, ValueError):
+                    continue
+                if sentinel and sentinel.encode() in data:
+                    out.append(case)
+            return out
+        naive = leaks(naive_read)
+        self.assertEqual(naive[:1], [self.cases[0][0]])          # fails on its FIRST planted link
+        symlinks = [c for c, _, s in self.cases if s and c != "dotdot"]
+        self.assertEqual(sorted(leaks(prefix_read)), sorted(symlinks))   # every symlink case passes a string check
+        self.assertEqual(leaks(lambda r, p: RF.read(r, p, 1 << 20)), [])
+        self.assertEqual(RF.read(root, "ok.txt", 1 << 20), b"ORDINARY-OK a plain file inside the root\n")
+
+    def question_with(self, n, **fields):
+        body = {"qid": f"PUSHED/Q{n}", "item": "PUSHED", "text": "Which?", "kind": "single",
+                "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}], "star": "b", "valid_if": [],
+                "source": "ok.txt:1", "nonce": f"k3conf{n:05d}", **fields}
+        return self.agent("POST", "/p/alpha/question", body)
+
+    def lock(self, qid):
+        code, a = self.owner("alpha", "POST", "/api/answer", {"qid": qid, "picks": ["a"], "own_text": "",
+                                                              "nonce": f"ans{qid.split('Q')[1]:0>9}"})
+        self.assertEqual(code, 200, a)
+        code, lk = self.owner("alpha", "POST", "/api/lock", {"qid": qid, "answer": a["record"]["id"],
+                                                             "nonce": f"lck{qid.split('Q')[1]:0>9}"})
+        self.assertEqual(code, 200, lk)
+
+    def test_ac38_a_swapped_parent_never_serves_the_other_side(self):
+        # Catches: realpath-then-open (passes AC3.7, loses this race) and O_NOFOLLOW on the last component only.
+        import shutil
+        from console_kit import rootfs as RF
+        A, B = self.p["alpha"], self.p["beta"]
+        (B["state"] / "page.html").write_text("SENTINEL-RACE-B-STATE\n")
+        self.SF.add("alpha", A["state"], "alpha.example.com", AUD, 4901, TEAM, page="race/page.html",
+                    registry=self.reg, path=self.sfile)
+        race, real = A["root"] / "race", A["root"] / "race.real"
+        race.mkdir()
+        (race / "page.html").write_text("<html><body>ORDINARY-RACE</body></html>\n")
+        stop = threading.Event()
+
+        def swap():
+            while not stop.is_set():
+                try:
+                    os.rename(race, real)
+                    os.symlink(B["state"], race)
+                    os.unlink(race)
+                    os.rename(real, race)
+                except OSError:
+                    pass
+
+        def run(reader, n, deadline):
+            leaked = served = refused = 0
+            t0 = time.monotonic()
+            for _ in range(n):
+                if time.monotonic() - t0 > deadline:
+                    break
+                try:
+                    data = reader()
+                except (OSError, ValueError):
+                    refused += 1
+                    continue
+                if b"SENTINEL-RACE-B-STATE" in data:
+                    leaked += 1
+                else:
+                    served += 1
+            return leaked, served, refused
+        RF.hold(A["root"])
+        th = threading.Thread(target=swap, daemon=True)
+        th.start()
+        try:
+            # The named negative control must lose the race, or the swap is too slow to prove anything.
+            leaked, _, _ = run(lambda: check_then_open_read(A["root"], "race/page.html"), 200_000, 20.0)
+            if leaked == 0:
+                self.fail("inconclusive: the check-then-open control never served B's sentinel, so the swap loop "
+                          "is too slow to prove the real reader safe")
+            self.assertEqual(run(lambda: RF.read(A["root"], "race/page.html", 1 << 20), 200_000, 20.0)[0], 0)
+            # And through the server's own door, 10,000 times.
+            stop.set()
+            th.join()
+            if real.exists():
+                race.unlink(missing_ok=True) if race.is_symlink() else None
+                os.rename(real, race)
+            self.spawn()
+            stop.clear()
+            th = threading.Thread(target=swap, daemon=True)
+            th.start()
+            counts = {"ok": 0, "refused": 0}
+            for _ in range(10_000):
+                code, body = self.owner("alpha", "GET", "/")
+                text = body if isinstance(body, str) else json.dumps(body)
+                self.assertNotIn("SENTINEL-RACE-B-STATE", text)
+                if code == 200:
+                    self.assertIn("ORDINARY-RACE", text)
+                    counts["ok"] += 1
+                else:
+                    self.assertEqual(code, 404, text)
+                    counts["refused"] += 1
+            self.assertGreater(counts["ok"], 0)
+        finally:
+            stop.set()
+            th.join()
+        if shutil.which("strace") is None:
+            self.skipTest("the strace half of AC3.8 needs strace, which is not installed (the race half ran: "
+                          f"{counts})")
+        self.fail("strace is installed: the syscall assertion of AC3.8 is not written yet (see the K3 report)")
 
 
 if __name__ == "__main__":
