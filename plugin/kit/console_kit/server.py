@@ -1169,7 +1169,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._body_taken = True
         try:
             return json.loads(self.rfile.read(n) or b"null")
-        except ValueError:
+        except (ValueError, RecursionError):   # bad JSON, bad UTF-8, or nesting deeper than the decoder recurses
             raise RequestError(400, "the body is not JSON") from None
 
     def log_message(self, fmt: str, *args) -> None:  # the request line only: never a header, so never a token

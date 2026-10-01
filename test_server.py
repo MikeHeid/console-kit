@@ -180,6 +180,26 @@ class EarlyRefusalDrainTests(unittest.TestCase):
             stop.set()
         return time.monotonic() - t0
 
+    def test_a_body_nested_past_the_decoders_depth_is_refused_as_not_json(self):
+        # Catches (lane 4 review, LOW): json.loads raising RecursionError, which `except ValueError` lets escape,
+        # so the handler dies and the client gets a dropped connection instead of the normal refusal.
+        import http.client
+        import socket as so
+        sock = self.server()
+        deep = ("[" * 100_000 + "]" * 100_000).encode()
+
+        class Conn(http.client.HTTPConnection):
+            def connect(self):
+                self.sock = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+                self.sock.connect(str(sock))
+
+        for route in ("/cursor", "/history-blob", "/history-specs"):
+            c = Conn("localhost", timeout=10)
+            c.request("POST", route, body=deep, headers={"Content-Type": "application/json"})
+            r = c.getresponse()
+            self.assertEqual((r.status, json.loads(r.read()).get("error")), (400, "the body is not JSON"), route)
+            c.close()
+
     def test_a_body_larger_than_max_body_is_not_read_or_waited_for(self):
         # Catches: draining whatever length is declared (an 8 MiB claim must not be read, nor waited on).
         took = self.refused_then_eof(self.server(), SV.AGENT_MAX_BODY * 4)
@@ -3993,6 +4013,15 @@ class StewardGitTests(_Live, unittest.TestCase):
         self.assertEqual(code, 400, out)
         self.assertIn("steward-git in the state folder is not a plain folder", out["error"])
         self.assertEqual(sorted(p.name for p in (outside / "blobs").iterdir()), before)
+
+    def test_an_index_nested_past_the_decoders_depth_reads_as_none(self):
+        # Catches (lane 4 review, LOW): a planted index.json nested deeper than json.loads recurses, whose
+        # RecursionError escaped `except ValueError` and turned every check and view into a 500.
+        self.push()
+        (self.cfg.state / "steward-git" / "index.json").write_text("[" * 100_000 + "]" * 100_000)
+        out, c = self.condition()                                 # 200, not a 500
+        self.assertEqual((c["history"], c["locked_version"]), ("from the steward", None))   # the blob, no commit
+        self.assertEqual(self.req("GET", "/api/view", tok=token())[0], 200)
 
     def test_a_commit_id_in_any_other_shape_is_dropped(self):
         good = self.push()["blobs"][0]

@@ -272,7 +272,7 @@ def _load_index(f: _Folders) -> dict:
         return _empty()
     try:
         doc = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):   # a planted index nested past the decoder's depth reads as none
         return _empty()
     if not isinstance(doc, dict):
         return _empty()
