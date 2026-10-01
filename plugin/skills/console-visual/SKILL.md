@@ -26,7 +26,7 @@ nothing in `view.visuals[ITEM]` names it as its `request`. Read its item:
     A view --item ITEM
 
 The request is the message with that id in `view.threads[ITEM]`, and its
-`text` says what to draw.
+`text` says what to draw. If a read exits 4, run the narrower command named on stderr; do not retry the same command and do not add --full.
 
 ## 2. Choose the form
 

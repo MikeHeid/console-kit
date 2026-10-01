@@ -85,7 +85,7 @@ small (a few KB, where the whole view runs to hundreds): `forks` not done
 (id, item, kind, mode, roles), `awaiting_agent`, `chat`, waiting `visuals`
 (id, item), the owner's `inbox` qids and the store `seq`. Never read the whole
 view to find work: a read over 64 KiB is refused anyway, naming the narrower
-command.
+command. If a read exits 4, run the narrower command named on stderr; do not retry the same command and do not add --full.
 
 `awaiting_agent` lists the items whose latest owner message is newer than the
 agent's. Read each one's thread, and only that:

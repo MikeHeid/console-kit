@@ -28,7 +28,7 @@ Then read its item, and only that:
 
 There `forks` maps each fork message's record id on that item to `{message,
 questions, kind, result, done}`. Never read the whole view: a read over
-64 KiB is refused, naming the narrower command.
+64 KiB is refused, naming the narrower command. If a read exits 4, run the narrower command named on stderr; do not retry the same command and do not add --full.
 
 **When a fork is done (one rule, the same in console-fork and console-process).**
 A fork is done when its result reply exists: an agent message on the fork's

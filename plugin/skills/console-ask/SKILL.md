@@ -84,4 +84,4 @@ For each item you posted on,
 
 must list every new qid there under `inbox`. Only then say the questions are
 on the console, naming the items they are on. (`A todo` lists the whole
-inbox's qids, when you posted on many items.)
+inbox's qids, when you posted on many items.) If a read exits 4, run the narrower command named on stderr; do not retry the same command and do not add --full.

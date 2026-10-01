@@ -4220,6 +4220,74 @@ class SlimReadTests(Tmp):
         self.assertEqual(v["since"], cut)
 
 
+class SlimSinceTests(Tmp):
+    """K1 review, MEDIUM 1: `--since` keeps a question by EVERY record that changes what it shows."""
+
+    def at(self, st, seq, rec):
+        """Append `rec` so that it lands at store seq `seq`, padding with agent notes on another item."""
+        while st.seq() < seq - 1:
+            st.append(message(item="LANE", by="agent", text="pad"))
+        got = st.append(rec)
+        self.assertEqual(got["seq"], seq)
+        return got
+
+    def test_a_lock_after_seq_on_an_older_answer_is_kept(self):
+        # Catches: a keep rule on the question and its answers only, which drops a lock made later.
+        st = self.store()
+        self.at(st, 5, question(qid="LANE.1/Q1"))
+        a = self.at(st, 10, answer(qid="LANE.1/Q1"))
+        self.at(st, 30, lock(a))
+        v = V.build(st, ITEMS, lambda c: True)
+        got = V.since(v, 20)["questions"]
+        self.assertEqual(list(got), ["LANE.1/Q1"])
+        self.assertEqual((got["LANE.1/Q1"]["state"], got["LANE.1/Q1"]["last_seq"]), ("locked", 30))
+        self.assertEqual(V.since(v, 30)["questions"], {})
+
+    def test_a_reanchor_after_seq_is_kept(self):
+        st = self.store()
+        st.append(question(qid="LANE.1/Q1"))
+        lk = st.append(lock(st.append(answer(qid="LANE.1/Q1"))))
+        cut = st.append(message(item="LANE", text="mark"))["seq"]
+        st.append({"type": "anchor", "schemaVersion": 1, "qid": "LANE.1/Q1", "lock": lk["id"],
+                   "anchors": [{"kind": "item_status", "item": "LANE.1", "status": "open"}],
+                   "basis": "re-anchored by hand", "by": "agent", "nonce": nonce()})
+        v = V.build(st, ITEMS, lambda c: True)
+        self.assertEqual(list(V.since(v, cut)["questions"]), ["LANE.1/Q1"])
+
+    def test_a_stale_question_is_always_kept(self):
+        # Staleness comes from a file or a status and has no seq: a stale answer is never silently missed.
+        st = self.store()
+        cond = {"kind": "item_status", "item": "LANE.1", "status": "open"}
+        st.append(question(qid="LANE.1/Q1", valid_if=[cond]))
+        st.append(lock(st.append(answer(qid="LANE.1/Q1"))))
+        cut = st.append(message(item="LANE", text="mark"))["seq"]
+        held = V.build(st, ITEMS, V.make_evaluator(self.dir, {"LANE.1": "open"}))
+        moved = V.build(st, ITEMS, V.make_evaluator(self.dir, {"LANE.1": "built"}))
+        self.assertEqual(V.since(held, cut)["questions"], {})
+        self.assertEqual(list(V.since(moved, cut)["questions"]), ["LANE.1/Q1"])
+
+    def test_a_transcript_after_seq_keeps_its_fork(self):
+        st = self.store()
+        st.append(question(qid="LANE.1/Q1"))
+        st.append(lock(st.append(answer(qid="LANE.1/Q1"))))
+        f = st.append(roar())
+        st.append(message(by="agent", text="Result: 0 questions", reply_to=f["id"]))
+        cut = st.append(message(item="LANE", text="mark"))["seq"]
+        st.append(transcript(f["id"]))
+        v = V.since(V.build(st, ITEMS, lambda c: True), cut)
+        self.assertEqual((list(v["forks"]), list(v["transcripts"])), ([f["id"]], [f["id"]]))
+
+    def test_a_view_without_last_seq_is_refused_not_guessed(self):
+        # A server older than K1: --since cannot see its locks, so it refuses rather than drop them.
+        st = self.store()
+        st.append(question(qid="LANE.1/Q1"))
+        v = V.build(st, ITEMS, lambda c: True)
+        old = {**v, "questions": {q: {k: x for k, x in d.items() if k != "last_seq"}
+                                  for q, d in v["questions"].items()}}
+        with self.assertRaisesRegex(V.ViewTooOld, r"questions\.\*\.last_seq"):
+            V.since(old, 0)
+
+
 class SlimReadOlderServerTests(Tmp):
     """K1 against a server one kit older: the client upgrades with the plugin, the server only on restart.
 
@@ -4266,9 +4334,18 @@ class SlimReadOlderServerTests(Tmp):
 
 
 class SlimSkillTests(unittest.TestCase):
-    """AC1.4: the four skills read `todo` or `view --item`, never the whole view."""
+    """AC1.4: the four skills read `todo`, `view --item` or a narrowed `answers`, never a whole read.
 
-    CMD = re.compile(r"(?:^|\s|`)(?:A|python3 \S*agent\.py(?: --\S+(?: \S+)?)*?) view\b([^`\n]*)")
+    The rule, per command found (in code blocks, inline code or prose):
+      view     must carry --item, and never --full
+      answers  must carry --item, --fork or --since, and never --full
+    and every one of the four skills says what to do when a read exits 4.
+    """
+
+    CMD = re.compile(r"(?:^|\s|`)(?:A|python3\s+\S*agent\.py(?:\s+--\S+(?:\s+\S+)?)*?)\s+(view|answers)\b([^`\n]*)")
+    NARROW = {"view": r"(?:^|\s)--item\s", "answers": r"(?:^|\s)--(?:item|fork|since)\b"}
+    EXIT4 = ("If a read exits 4, run the narrower command named on stderr; do not retry the same command "
+             "and do not add --full.")
 
     @staticmethod
     def commands(text: str) -> list[str]:
@@ -4283,21 +4360,38 @@ class SlimSkillTests(unittest.TestCase):
         out += re.findall(r"`([^`\n]+)`", text)
         return out
 
-    def test_no_skill_runs_the_whole_view(self):
+    def whole_reads(self, text: str) -> list[str]:
+        bad = []
+        for c in self.commands(text) + text.splitlines():  # code first, then prose: "run `A view`" counts too
+            for m in self.CMD.finditer(c):
+                verb, args = m.group(1), m.group(2)
+                if not re.search(self.NARROW[verb], args) or re.search(r"(?:^|\s)--full\b", args):
+                    bad.append(c)
+        return bad
+
+    def test_no_skill_runs_a_whole_read(self):
         # Catches: a skill that names `todo` once and still runs bare `view` in a later step.
         for name in SLIM_SKILLS:
             text = (SKILLS / name / "SKILL.md").read_text(encoding="utf-8")
             cmds = self.commands(text)
-            self.assertTrue(any(c in ("A todo",) or c.startswith("A view --item") for c in cmds), name)
-            for c in cmds + text.splitlines():  # code first, then prose: "run `A view`" is a command too
-                for m in self.CMD.finditer(c):
-                    self.assertRegex(m.group(1), r"^\s+--item\s", f"{name}: bare view in {c!r}")
+            self.assertTrue(any(c == "A todo" or c.startswith("A view --item") for c in cmds), name)
+            self.assertEqual(self.whole_reads(text), [], name)
 
-    def test_the_check_sees_a_bare_view(self):
-        # The test above, run on a decoy, so a check that matches nothing cannot pass for one that works.
-        decoy = "## 3. Reply\n\n    A todo\n\nthen\n\n    A view\n"
-        self.assertTrue(any(self.CMD.search(c) and not re.match(r"\s+--item", self.CMD.search(c).group(1))
-                            for c in self.commands(decoy)))
+    def test_every_skill_says_what_to_do_on_exit_4(self):
+        # Catches: a skill whose agent meets the cap and retries the same read, or adds --full.
+        for name in SLIM_SKILLS:
+            text = " ".join((SKILLS / name / "SKILL.md").read_text(encoding="utf-8").split())
+            self.assertIn(self.EXIT4, text, name)
+
+    def test_the_check_sees_each_whole_read(self):
+        # The check above, run on decoys, so a check that matches nothing cannot pass for one that works.
+        for decoy in ("    A view", "    A  view --full", "run `A view` first", "    A view --item X --full",
+                      "    A answers", "    A answers --json", "    A\tanswers --full --item X",
+                      "    python3 KIT/agent.py --state S  view"):
+            self.assertTrue(self.whole_reads(f"## step\n\n{decoy}\n"), decoy)
+        for fine in ("    A view --item LANE", "    A answers --since 20 --json", "    A todo",
+                     "    A answers --fork ID"):
+            self.assertEqual(self.whole_reads(f"## step\n\n{fine}\n"), [], fine)
 
 
 if __name__ == "__main__":

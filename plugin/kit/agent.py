@@ -166,7 +166,7 @@ def _emit(text: str, full: bool, what: str, narrower: str) -> int:
     return 0
 
 
-def _slim_view(state: Path):
+def _slim_view(state: Path, since: bool = False):
     """The view for a slim read, or an exit code after saying why not.
 
     The client upgrades with the plugin and the server only when restarted, so
@@ -180,6 +180,8 @@ def _slim_view(state: Path):
         V.check_view(out.get("view") if isinstance(out, dict) else None)
         if not isinstance(out.get("items"), dict):
             raise V.ViewTooOld("the payload has no items")
+        if since:
+            V.check_since(out["view"])
     except V.ViewTooOld as e:
         try:
             _code, health = agent_request(state / "agent.sock", "GET", "/health", None)
@@ -199,7 +201,7 @@ def _kit_version() -> str:
 
 def _view(state: Path, item: str | None, since: int | None, full: bool) -> int:
     """The view, narrowed to an item (E2) and to what changed after a seq (E5), capped (E4)."""
-    out, rc = _slim_view(state)
+    out, rc = _slim_view(state, since=since is not None)
     if out is None:
         return rc
     if item is not None:
@@ -226,7 +228,7 @@ def _todo(state: Path, full: bool) -> int:
 def _answers(state: Path, item: str | None, fork: str | None, as_json: bool, since: int | None = None,
              full: bool = False) -> int:
     """Print the answers sheet the page shows, from the same view (§7.6)."""
-    out, rc = _get_view(state)
+    out, rc = _slim_view(state, since=since is not None)
     if out is None:
         return rc
     if item is not None and item not in out["items"]:
@@ -236,7 +238,7 @@ def _answers(state: Path, item: str | None, fork: str | None, as_json: bool, sin
         print(f"no fork {fork!r}", file=sys.stderr)
         return 1
     view = out["view"]
-    if since is not None:  # only the questions asked or answered after SEQ (E5); the forks stay for --fork
+    if since is not None:  # only the questions changed after SEQ (E5); the forks stay for --fork
         view = {**view, "questions": V.since(view, since)["questions"]}
     sheet = V.answers_sheet(view, out["items"], item=item, fork=fork)
     return _emit(_json(sheet) if as_json else V.sheet_markdown(sheet), full, "answers",
@@ -448,14 +450,19 @@ def main(argv=None) -> int:
     s.add_argument("--full", action="store_true", help=f"print it even when over {MAX_READ} bytes")
     s = sub.add_parser("view")
     s.add_argument("--item", metavar="ID", help="only this item and everything under it (@chat: the chat)")
-    s.add_argument("--since", type=int, metavar="SEQ", help="only what changed after this store seq")
+    s.add_argument("--since", type=int, metavar="SEQ",
+                   help="only what changed after this store seq: a question when any record on it (asked, "
+                        "answered, locked, re-anchored) is newer, and every stale one, since staleness has no "
+                        "seq; a question that became valid again with no new record is not shown")
     s.add_argument("--full", action="store_true", help=f"print it even when over {MAX_READ} bytes")
     sub.add_parser("health")
     s = sub.add_parser("answers")
     s.add_argument("--item")
     s.add_argument("--fork")
     s.add_argument("--json", action="store_true")
-    s.add_argument("--since", type=int, metavar="SEQ", help="only questions asked or answered after this store seq")
+    s.add_argument("--since", type=int, metavar="SEQ",
+                   help="only questions with a record (asked, answered, locked, re-anchored) after this store "
+                        "seq, and every stale one; one that became valid again with no new record is not shown")
     s.add_argument("--full", action="store_true", help=f"print it even when over {MAX_READ} bytes")
     s = sub.add_parser("fork-context")
     s.add_argument("fork")

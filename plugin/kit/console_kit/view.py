@@ -101,6 +101,12 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
     `names` maps record id -> agent name (0.8.2); a named record gains `agent`, no other changes.
     """
     recs = store.records()
+    # The newest record that can change what a question shows (K1, for `since`): the question,
+    # an answer, a lock, a re-anchor. Staleness itself has no record: it is a file or a status.
+    last_seq: dict[str, int] = {}
+    for r in recs:
+        if r["type"] in ("question", "answer", "lock", "anchor"):
+            last_seq[r["qid"]] = r["seq"]
     questions: dict[str, dict] = {}
     for r in recs:
         if r["type"] != "question":
@@ -115,6 +121,7 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
             # Where the conditions deciding it came from: the question's valid_if,
             # the re-lock's own anchors, or an `agent.py reanchor` record.
             "anchored_by": origin,
+            "last_seq": last_seq[r["qid"]],
         }
 
     threads: dict[str, list[dict]] = {}
@@ -128,8 +135,8 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
                 forks[r["id"]] = {"message": r, "questions": [], "transcript": None}
         elif r["type"] == "transcript":
             # A roar's transcript (0.8.0), shown collapsed on its fork and that fork's questions.
-            transcripts[r["fork"]] = named({"id": r["id"], "fork": r["fork"], "ts": r["ts"], "text": r["text"],
-                                            "bytes": len(r["text"].encode("utf-8"))}, names)
+            transcripts[r["fork"]] = named({"id": r["id"], "seq": r["seq"], "fork": r["fork"], "ts": r["ts"],
+                                            "text": r["text"], "bytes": len(r["text"].encode("utf-8"))}, names)
         elif r["type"] == "visual":
             visuals.setdefault(r["item"], []).append(named(
                 {k: r[k] for k in ("id", "seq", "ts", "item", "request", "format", "title", "text",
@@ -322,22 +329,38 @@ def item_view(payload: dict, item: str) -> dict:
     return {**payload, "view": out, "items": {i: d for i, d in items.items() if i in scope}}
 
 
+def check_since(view: dict) -> None:
+    """Raise ViewTooOld when `view` lacks the seqs `since` keeps records by (a server older than K1)."""
+    missing = sorted({"questions.*.last_seq" for q in view["questions"].values() if "last_seq" not in q}
+                     | {"transcripts.*.seq" for t in view["transcripts"].values() if "seq" not in t})
+    if missing:
+        raise ViewTooOld(f"the view has no {', '.join(missing)}")
+
+
 def since(view: dict, seq: int) -> dict:
     """`view` with only what changed after store seq `seq`: the records-bearing parts are filtered.
 
-    A question is kept when it or any of its answers is after `seq`; a thread
-    keeps its messages after `seq`; a fork is kept when its message or result
-    is after `seq` or one of its kept questions came from it; a transcript
-    with its fork; a visual by its own seq. The summaries (inbox,
-    awaiting_agent, chat, waiting_visuals, seq) stay whole: they are state,
-    not history. `items` keeps the counts of the items the kept records are on.
+    A question is kept when any record about it is after `seq` (the question,
+    an answer, a lock or a re-anchor: its `last_seq`), and whenever it is
+    stale: staleness comes from a file or an item's status, which carry no
+    seq, so a stale question is always shown rather than silently missed. A
+    thread keeps its messages after `seq`; a fork is kept when its message,
+    result or transcript is after `seq` or one of its kept questions came from
+    it; a visual by its own seq. The summaries (inbox, awaiting_agent, chat,
+    waiting_visuals, seq) stay whole: they are state, not history. `items`
+    keeps the counts of the items the kept records are on.
+
+    Limit: a question that went from stale back to valid (its file restored)
+    with no record after `seq` is not shown. Raises ViewTooOld for a view
+    from a server older than K1, which carries no `last_seq`.
     """
-    questions = {q: v for q, v in view["questions"].items()
-                 if v["question"]["seq"] > seq or any(a["seq"] > seq for a in v["answers"])}
+    check_since(view)
+    questions = {q: v for q, v in view["questions"].items() if v["last_seq"] > seq or v["state"] == "stale"}
     threads = {i: kept for i, msgs in view["threads"].items() if (kept := [m for m in msgs if m["seq"] > seq])}
+    transcripts = {f: t for f, t in view["transcripts"].items() if t["seq"] > seq}
     forks = {f: v for f, v in view["forks"].items()
              if v["message"]["seq"] > seq or (v["result"] is not None and v["result"]["seq"] > seq)
-             or any(q in questions for q in v["questions"])}
+             or f in transcripts or any(q in questions for q in v["questions"])}
     visuals = {i: kept for i, vs in view["visuals"].items() if (kept := [v for v in vs if v["seq"] > seq])}
     touched = ({v["question"]["item"] for v in questions.values()} | set(threads) | set(visuals)
                | {v["message"]["item"] for v in forks.values()})

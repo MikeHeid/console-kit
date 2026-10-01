@@ -2436,8 +2436,11 @@ class SlimReadCliTests(_Live, unittest.TestCase):
         req = self.owner_msg(item="LANE.1", intent="visual", text="draw it")
         real = SV.V.build
 
-        def old_build(*a, **kw):
-            return {k: v for k, v in real(*a, **kw).items() if k != "waiting_visuals"}
+        def old_build(*a, **kw):  # a 0.8.8 view: none of the three fields K1 added
+            v = {k: x for k, x in real(*a, **kw).items() if k != "waiting_visuals"}
+            v["questions"] = {q: {k: x for k, x in d.items() if k != "last_seq"} for q, d in v["questions"].items()}
+            v["transcripts"] = {f: {k: x for k, x in t.items() if k != "seq"} for f, t in v["transcripts"].items()}
+            return v
 
         with mock.patch.object(SV.V, "build", old_build):
             rc, out, err = self.agent_cli("todo")
@@ -2446,6 +2449,17 @@ class SlimReadCliTests(_Live, unittest.TestCase):
             rc, out, err = self.agent_cli("view", "--item", "LANE.1")
             self.assertEqual(rc, 0, err)
             self.assertEqual(json.loads(out)["view"]["waiting_visuals"], [{"id": req["id"], "item": "LANE.1"}])
+            rc, out, err = self.agent_cli("answers", "--json")  # answers without --since needs nothing new
+            self.assertEqual(rc, 0, err)
+            # --since cannot see a 0.8.8 view's locks, so it refuses rather than drop them (review LOW c).
+            for args in (("answers", "--since", "0"), ("answers", "--json", "--since", "0"), ("view", "--since", "0")):
+                rc, out, err = self.agent_cli(*args)
+                self.assertEqual((rc, out), (1, ""), args)
+                said = [ln for ln in err.splitlines() if not ln.startswith("console ")]
+                self.assertEqual(len(said), 1, err)
+                self.assertNotIn("Traceback", err)
+                self.assertIn("questions.*.last_seq", said[0])
+                self.assertIn("restart the console server", said[0])
         self.fork()
 
         def older_still(*a, **kw):

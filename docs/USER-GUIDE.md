@@ -187,7 +187,12 @@ So:
   `view --item ITEM` (one item and everything under it), `inbox` (since the
   cursor), `answers --item ITEM`, `check`, `health` and `fork-context FORK`.
   `view --since SEQ` and `answers --since SEQ` print only what changed after a
-  store seq.
+  store seq: a question when anything recorded on it (asked, answered, locked,
+  re-anchored) is newer, plus every stale question, because a file changing
+  has no seq. A question that turned valid again with no new record is not
+  shown; `check` and the full read still are.
+- **If a read exits 4**, run the narrower command it names on stderr. Do not
+  retry the same command, and do not add `--full`.
 - **Reads are capped.** `todo`, `view` and `answers` refuse to print more
   than 64 KiB without `--full`: they print nothing, name the narrower command
   and exit 4. JSON is compact when the output is not a terminal.
