@@ -4394,5 +4394,227 @@ class SlimSkillTests(unittest.TestCase):
             self.assertEqual(self.whole_reads(f"## step\n\n{fine}\n"), [], fine)
 
 
+class CostSidecarTests(unittest.TestCase):
+    """K2: `agent.py costs collect` (spec §8.5, AC2.1–AC2.4), on synthetic transcripts only."""
+
+    SENTINEL = "SENTINEL-CONTENT-7f3a9c-must-never-leave-the-transcript"
+    FORK_A, FORK_B = "a" * 24, "b" * 24
+
+    def setUp(self):
+        from console_kit import costs as C
+        self.C = C
+        self.tmp = tempfile.TemporaryDirectory()
+        t = Path(os.path.realpath(self.tmp.name))
+        self.cfg = t / "cfg"                       # this test's own registry home (XDG_CONFIG_HOME)
+        self.claude = t / "claude"                 # CLAUDE_CONFIG_DIR
+        self.projects = self.claude / "projects"
+        self.root = t / "proj"
+        self.root.mkdir()
+        self.state = t / "state"
+        self.state.mkdir()
+        self.reg = self.cfg / "console-kit" / "projects.json"
+        R.register(self.root, self.state, KIT, path=self.reg)
+        self.main = C.slug_of(str(self.root))
+        self.sibling = self.main + "-foo"         # a project named `proj-foo`: a prefix match would take it
+        self.lane = "lane-worktree-slug"           # listed for this project in server.json
+        (self.reg.parent / "server.json").write_text(json.dumps(
+            {"projects": {"proj": {"state": str(self.state), "slugs": [self.lane]}}}))
+        # Credentials and settings beside the transcripts: the collector must never open them.
+        self.claude.mkdir(exist_ok=True)
+        for f in (".credentials.json", "settings.json"):
+            (self.claude / f).write_text(json.dumps({"secret": self.SENTINEL}))
+        self.want = {}
+        A, B = self.FORK_A, self.FORK_B
+        self.seat("S1", "a1", f"ck-fork:{A} ux seat", "console-kit:ux", [(100, 50, 1000, 10), (200, 0, 2000, 20)])
+        self.seat("S1", "a2", f"ck-fork:{A} architect seat", "console-kit:architect", [(300, 0, 500, 30)])
+        self.seat("S1", "b1", f"ck-fork:{B} ux seat", "console-kit:ux", [(7000, 0, 7000, 70)])
+        self.seat("S1", "gp", "review the diff", "general-purpose", [(900, 0, 900, 90)])
+        # Matched by role name or a fork's own words, never by the tag: unattributed.
+        self.seat("S1", "f85", "F85 fork: ux seat", "console-kit:ux", [(40, 0, 40, 4)])
+        self.seat("S2", "a3", f"ck-fork:{A} analyst seat", "console-kit:analyst", [(11, 1, 111, 1)], slug=self.lane)
+        self.seat("S9", "x1", f"ck-fork:{A} ux seat", "console-kit:ux", [(5000, 0, 5000, 500)],
+                  slug=self.sibling)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def seat(self, session, name, desc, kind, msgs, slug=None):
+        """One subagent: each message streamed over three lines repeating its usage, plus content lines."""
+        d = self.projects / (slug or self.main) / session / "subagents"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"agent-{name}.meta.json").write_text(json.dumps({"agentType": kind, "description": desc,
+                                                               "toolUseId": "toolu_x"}))
+        lines = [{"type": "user", "message": {"role": "user", "content": self.SENTINEL}}]
+        for i, (inp, create, read, out) in enumerate(msgs):
+            mid = f"msg_{name}_{i}"
+            for part in (1, 2, 3):   # a streamed message: its usage appears on every line, output growing
+                lines.append({"type": "assistant", "timestamp": "2026-10-01T00:00:00Z", "message": {
+                    "id": mid, "role": "assistant", "model": "m",
+                    "content": [{"type": "text", "text": self.SENTINEL},
+                                {"type": "tool_use", "id": "toolu_" + self.SENTINEL, "input": {"x": self.SENTINEL}}],
+                    "usage": {"input_tokens": inp, "cache_creation_input_tokens": create,
+                              "cache_read_input_tokens": read, "output_tokens": out * part // 3,
+                              "cache_creation": {"note": self.SENTINEL}}}})
+        lines.append({"type": "assistant", "message": {"role": "assistant", "content": self.SENTINEL,
+                                                         "usage": {"input_tokens": 10 ** 9}}})   # no id: not counted
+        (d / f"agent-{name}.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\nnot json\n")
+        self.want[name] = {"fresh": sum(m[0] + m[1] for m in msgs), "cache_read": sum(m[2] for m in msgs),
+                           "output": sum(m[3] for m in msgs), "turns": len(msgs)}
+
+    def run_cli(self, *args):
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg), "CLAUDE_CONFIG_DIR": str(self.claude)}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        return subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(self.state), *args],
+                              capture_output=True, text=True, env=env, timeout=60)
+
+    def lines(self):
+        return {Path(r["key"]).name[len("agent-"):-len(".jsonl")]: r for r in self.C.read(self.state)}
+
+    def test_ac21_sums_equal_the_transcripts_deduplicated_by_message_id(self):
+        # Catches: summing every line (a streamed message repeats its usage), and a `cost` estimated
+        # rather than read: the numbers must equal the fixture's own usage, message by message.
+        r = self.run_cli("costs", "collect")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = self.lines()
+        for name in ("a1", "a2", "b1", "gp", "f85", "a3"):
+            self.assertEqual({k: got[name][k] for k in ("fresh", "cache_read", "output", "turns")},
+                             self.want[name], name)
+        # The fixture discriminates: a naive sum over lines would be three times the input.
+        raw = (self.projects / self.main / "S1" / "subagents" / "agent-a1.jsonl").read_text().splitlines()
+        naive = sum(json.loads(x)["message"]["usage"].get("input_tokens", 0) for x in raw[:-1]
+                    if "id" in json.loads(x).get("message", {}))
+        self.assertEqual(naive, 3 * 300)
+        self.assertNotEqual(naive, self.want["a1"]["fresh"] - 50)
+        # Collecting again replaces each subagent's line; it never appends a second one.
+        before = (self.state / "costs.jsonl").read_bytes()
+        self.assertEqual(self.run_cli("costs", "collect").returncode, 0)
+        self.assertEqual((self.state / "costs.jsonl").read_bytes(), before)
+        self.assertEqual(len(before.splitlines()), 6)
+
+    def test_ac22_store_untouched_and_the_previous_kit_starts_on_the_dir(self):
+        # Catches: costs kept in store.jsonl behind a record type only the new kit accepts. The
+        # PREVIOUS kit (0.8.7, from this repository's tag) is started on the very dir.
+        old = Path(self.tmp.name) / "kit-0.8.7"
+        old.mkdir()
+        arch = subprocess.run(["git", "-C", str(HERE), "archive", "v0.8.7", "plugin/kit"],
+                              capture_output=True, timeout=60)
+        self.assertEqual(arch.returncode, 0, "the v0.8.7 tag must be fetched for this test: "
+                         + arch.stderr.decode(errors="replace"))
+        subprocess.run(["tar", "-x", "-C", str(old)], input=arch.stdout, check=True, timeout=60)
+        boot = r'''
+import sys, threading
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from console_kit import server as SV
+d, state = Path(sys.argv[2]), Path(sys.argv[3])
+(d / "page.html").write_text("<!doctype html><html><body></body></html>\n")
+class A:
+    def items(self): return {"LANE": {"title": "a lane", "parent": None, "status": "open"}}
+    def seed_questions(self):
+        return [{"qid": "LANE/Q1", "item": "LANE", "text": "Which?", "kind": "single",
+                 "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}], "star": "b",
+                 "valid_if": [], "source": "spec.md:1", "by": "agent", "nonce": "seednonce0001"}]
+    def record(self, entries, dry_run): return []
+cfg = SV.Config(root=d, page=d / "page.html", state=state, adapter=d / "unused.py",
+                team_domain="team.example.cloudflareaccess.com", aud="a" * 64, hostname="console.example.com", port=0)
+c = SV.Console(cfg, A()); c.seed()
+srv = SV.agent_server(c); threading.Thread(target=srv.serve_forever, daemon=True).start()
+code, out = SV.agent_request(cfg.socket, "GET", "/view")
+srv.shutdown(); srv.server_close()
+print(code)
+'''
+
+        def start_old():
+            r = subprocess.run([sys.executable, "-c", boot, str(old / "plugin" / "kit"), str(self.tmp.name),
+                                str(self.state)], capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.strip(), "200", r.stderr)
+        start_old()                                        # the old kit makes the store
+        store = (self.state / "store.jsonl").read_bytes()
+        self.assertEqual(self.run_cli("costs", "collect").returncode, 0)
+        self.assertTrue((self.state / "costs.jsonl").stat().st_size > 0)
+        self.assertEqual((self.state / "store.jsonl").read_bytes(), store)   # no record was added
+        self.assertEqual(stat_mode(self.state / "costs.jsonl"), 0o600)
+        start_old()                                        # and still starts with costs.jsonl beside it
+        self.assertTrue((self.state / "costs.jsonl").exists())
+
+    def test_ac23_a_fork_bills_exactly_its_tagged_subagents(self):
+        # Catches: summing every subagent of the steward's session, or matching seats by role name or
+        # time window: fork B's seat, a code review and "F85 fork: ux seat" are all in the session.
+        self.assertEqual(self.run_cli("costs", "collect").returncode, 0)
+        r = self.run_cli("costs", "show", "--fork", self.FORK_A)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        card = json.loads(r.stdout)
+        mine = ("a1", "a2", "a3")
+        self.assertEqual(card["seats"], 3)
+        for k in ("fresh", "cache_read", "output", "turns"):
+            self.assertEqual(card[k], sum(self.want[n][k] for n in mine), k)
+        self.assertEqual(sorted(Path(s["key"]).name for s in card["subagents"]),
+                         [f"agent-{n}.jsonl" for n in mine])
+        loose = card["unattributed"]
+        self.assertEqual(sorted(Path(k).name for k in loose["keys"]), ["agent-f85.jsonl", "agent-gp.jsonl"])
+        self.assertEqual(loose["fresh"], self.want["gp"]["fresh"] + self.want["f85"]["fresh"])
+        self.assertNotIn("agent-b1.jsonl", r.stdout)           # another fork's seat is neither mine nor loose
+        b = self.C.fork_card(self.C.read(self.state), self.FORK_B)
+        self.assertEqual((b["seats"], b["fresh"]), (1, self.want["b1"]["fresh"]))
+        self.assertEqual(self.lines()["f85"]["fork"], None)
+        self.assertEqual(self.lines()["a1"]["role"], "ux")
+
+    def test_ac24_own_slugs_only_and_only_three_fields(self):
+        # Catches: a collector globbing `*<name>*` (takes `proj-foo`'s seats), and one that keeps whole
+        # lines (holds content). The sentinel sits in every content field, in a tool id, in a nested
+        # usage object, and in the credentials and settings files beside the transcripts.
+        import builtins
+        from unittest import mock
+        opened = []
+        real_open, real_os_open = open, os.open
+
+        def spy_open(p, *a, **k):
+            opened.append(os.path.realpath(p))
+            return real_open(p, *a, **k)
+
+        def spy_os_open(p, *a, **k):
+            opened.append(os.path.realpath(p))
+            return real_os_open(p, *a, **k)
+
+        with mock.patch.object(builtins, "open", spy_open), mock.patch.object(os, "open", spy_os_open):
+            got = self.C.collect(self.state, registry=self.reg, projects_dir=self.projects)
+        self.assertTrue(opened)
+        allowed = [str(self.projects / self.main) + "/", str(self.projects / self.lane) + "/"]
+        for p in opened:
+            self.assertTrue(any(p.startswith(a) for a in allowed) or p in (str(self.reg),
+                            str(self.reg.parent / "server.json")), p)
+        self.assertEqual(sorted(self.C.project_slugs(self.state, self.reg)), sorted([self.main, self.lane]))
+        self.assertFalse(any(r["key"].startswith(self.sibling + "/") for r in got))
+        self.assertTrue(any(r["key"].startswith(self.lane + "/") for r in got))
+        self.assertNotIn(self.SENTINEL, json.dumps(got))
+        # And through the CLI: nothing written or printed carries content.
+        for r in (self.run_cli("costs", "collect"), self.run_cli("costs", "show", "--fork", self.FORK_A)):
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn(self.SENTINEL, r.stdout + r.stderr)
+        self.assertNotIn(self.SENTINEL, "".join(p.read_text(errors="replace")
+                                                for p in self.state.iterdir() if p.is_file()))
+        # The decoder drops every other key while it parses.
+        slim = self.C.slim_line(json.dumps({"type": "assistant", "message": {
+            "id": "m", "content": [{"id": self.SENTINEL}], "usage": {"output_tokens": 1, "x": self.SENTINEL}}}))
+        self.assertEqual(slim, {"message": {"id": "m", "usage": {"output_tokens": 1}}})
+
+    def test_unsafe_listed_slug_and_unregistered_state_are_refused(self):
+        (self.reg.parent / "server.json").write_text(json.dumps(
+            {"projects": {"proj": {"state": str(self.state), "slugs": ["../escape"]}}}))
+        r = self.run_cli("costs", "collect")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("single directory names", r.stderr)
+        self.assertFalse((self.state / "costs.jsonl").exists())
+        other = Path(self.tmp.name) / "other-state"
+        other.mkdir()
+        with self.assertRaises(self.C.CostError):
+            self.C.project_slugs(other, self.reg)
+
+
+def stat_mode(p: Path) -> int:
+    return os.stat(p).st_mode & 0o777
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
