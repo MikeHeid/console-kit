@@ -31,6 +31,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Mapping
 
+from . import gitseam as G
 from . import schema as S
 
 HISTORY_COMMITS = 300   # how far back `git log` looks for the version a lock was taken on
@@ -191,14 +192,9 @@ class History:
         self._versions: dict[str, list[tuple[str, bytes]] | None] = {}
 
     def _git(self, args: list[str], data: bytes | None = None) -> bytes | None:
-        try:
-            # Read-only, like tags.py (0.8.1): no optional locks, so git never rewrites the index.
-            r = subprocess.run(["git", "--no-optional-locks", *args], cwd=self.root, input=data,
-                               capture_output=True, timeout=GIT_TIMEOUT, check=False,
-                               env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
-        except (OSError, subprocess.SubprocessError):
-            return None
-        return r.stdout if r.returncode == 0 else None
+        # Through gitseam (Q23): read-only, and in the server (seam closed) no git is started at all.
+        out = G.run(args, self.root, data=data, timeout=GIT_TIMEOUT)
+        return None if isinstance(out, G.Unavailable) else out
 
     def versions(self, rel: str) -> list[tuple[str, bytes]] | None:
         """(commit, content) for each commit that touched `rel`, newest first; None without git."""
@@ -328,6 +324,10 @@ def explain(c: dict, tree: Tree, history: History, source: str) -> dict:
 
 def _file_changed(c: dict, text: str, history: History, source: str) -> dict:
     words = f"{c['path']} changed since this answer was locked."
+    if not G.is_open():  # in the server (Q23): no history was read, and the answer says so
+        return {"history": G.UNAVAILABLE,
+                "words": words + f" Git history is {G.UNAVAILABLE}, so the version it was locked against, "
+                                 f"and what changed, cannot be shown."}
     found = history.find(c["path"], c["sha256"])
     if found is None:
         return {"words": words + " The version it was locked against is not in the recent git history, "
@@ -426,6 +426,9 @@ def _reanchor_one(c: dict, tree: Tree, history: History, source: str) -> tuple[d
     rng = cited_range(source, c["path"])
     if rng is None:
         return None, f"the question's source ({source}) names no line range in {c['path']}"
+    if not G.is_open():  # in the server (Q23)
+        return None, (f"git history is {G.UNAVAILABLE}, so the version of {c['path']} it was locked "
+                      f"against cannot be looked up")
     found = history.find(c["path"], c["sha256"])
     if found is None:
         return None, (f"the version of {c['path']} it was locked against is not in the last "

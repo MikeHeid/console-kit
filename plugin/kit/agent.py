@@ -125,6 +125,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from console_kit import bundle as B  # noqa: E402
 from console_kit import doorbell as D  # noqa: E402
+from console_kit import gitseam as G  # noqa: E402
 from console_kit import names as N  # noqa: E402
 from console_kit import registry as R  # noqa: E402
 from console_kit import sessions as SN  # noqa: E402
@@ -275,6 +276,8 @@ def _check(state: Path, as_json: bool) -> int:
         sys.stdout.write(_json(out))
         return 0 if code == 200 else 1
     stale = out["stale"]
+    if out.get("history"):
+        print(f"git history: {out['history']}", file=sys.stderr)
     if not stale:
         print("No answer is stale.")
     for qid, s in stale.items():
@@ -296,6 +299,8 @@ def _reanchor(state: Path, dry_run: bool, as_json: bool) -> int:
     if code != 200 or as_json:
         sys.stdout.write(_json(out))
         return 0 if code == 200 else 1
+    if out.get("history"):
+        print(f"git history: {out['history']}", file=sys.stderr)
     verb = "would re-anchor" if dry_run else "re-anchored"
     not_done = {p["lock"] for p in out["plan"] if p.get("skipped") or p.get("error")}
     done = [p for p in out["plan"] if p["changes"] and p["lock"] not in not_done]
@@ -348,17 +353,16 @@ def _read_text(path: Path, what: str) -> str | None:
 
 
 def _git_top(d: Path) -> Path | None:
-    """The top of the git work tree holding `d`, or None when `d` is in none. Read-only: no optional locks."""
-    import os
-    import subprocess
-    try:
-        r = subprocess.run(["git", "--no-optional-locks", "-C", str(d), "rev-parse", "--is-inside-work-tree",
-                            "--show-toplevel"], capture_output=True, text=True, timeout=30, check=False,
-                           env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
-    except (OSError, subprocess.SubprocessError):
+    """The top of the git work tree holding `d`, or None when `d` is in none. Read-only: no optional locks.
+
+    Agent side: this runs in `agent.py`, inside the agent's own jail, so it may
+    use git (the server may not, CONSOLE-kit/Q23); it still goes through gitseam.
+    """
+    out = G.run(["rev-parse", "--is-inside-work-tree", "--show-toplevel"], d, timeout=30, text=True)
+    if not isinstance(out, str):
         return None
-    lines = r.stdout.splitlines()
-    if r.returncode != 0 or len(lines) != 2 or lines[0].strip() != "true":
+    lines = out.splitlines()
+    if len(lines) != 2 or lines[0].strip() != "true":
         return None
     return Path(lines[1]).resolve()
 

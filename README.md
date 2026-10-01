@@ -366,6 +366,15 @@ with evidence:
 Anything else stays stale and is listed with the reason. Each re-anchor is a
 new record in the store, and nothing already written changes.
 
+**The console server starts no git (owner ruling CONSOLE-kit/Q23).** Git obeys
+the repository's own `.git/config`, which an agent can write, and some keys
+make git run a program; the server runs outside every agent's jail. So until
+an agent-side step supplies it, everything git history fed says
+"unavailable (no git in the server)" instead: `check` cannot show which version
+a whole-file hash was locked against, `reanchor` re-anchors nothing (rule 2
+cannot be checked) and lists each lock with that reason, and a refine chip
+shows the spec's file time and says the last-commit time is unavailable.
+
 - **`server.py`** serves one page (yours) with the console injected. It
   refuses every request without a valid Access token, loopback included.
 - **`agent.py`** is the agent's side: `view`, `ask` (one question or a batch), `reply`, `inbox`,

@@ -355,9 +355,11 @@ The chips are rules, not judgement, and each says its reason (hover, or a
 screen reader reads it). `console_kit/tags.py` holds the exact rules.
 
 - **No refine chip ever**: no `specs_dir` in `.console-kit.json`, or the locked
-  question cites no file under it, or the spec's last commit (or, uncommitted,
-  its mtime) is after the lock. In a checkout where specs are only ever edited
-  and never committed, every edit counts by mtime.
+  question cites no file under it, or the spec's file time is after the lock.
+  The served console reads no git (CONSOLE-kit/Q23), so it always compares the
+  file's mtime, and the chip says "the last-commit time is unavailable (no git
+  in the server)". A checkout that touches every file (a fresh clone, a
+  branch switch) can therefore hide refine chips until the next lock.
 - **A drill chip for something a spec covers**: the term is spelled
   differently in the spec (a plural, a hyphen) or is a proper name. It is a
   suggestion; ignore it.
@@ -379,6 +381,9 @@ disappeared, or a status changed.
       python3 <vendored>/agent.py --state <state> reanchor
 
   It writes only what git history supports, and lists the rest with a reason.
+  Since CONSOLE-kit/Q23 the server reads no git history, so today it writes
+  nothing and every such lock is listed with "git history is unavailable (no
+  git in the server)"; the owner's "Still holds: re-lock…" still clears one.
 - **The text really changed**: the owner reads "Why stale?" and either
   re-locks ("Still holds: re-lock…") or answers again. Never write a lock or
   anchor by hand.

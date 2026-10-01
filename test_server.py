@@ -72,6 +72,26 @@ class FakeAdapter:
         return []
 
 
+def seam_closed(test) -> None:
+    """Close the git seam for one test, as `serve` closes it for the server process (CONSOLE-kit/Q23).
+
+    The in-process servers these tests build never run `serve`, so without this
+    they would read git where the served console does not. Reopened after the test.
+    """
+    from unittest import mock
+    from console_kit import gitseam as G
+    p = mock.patch.object(G, "_OPEN", False)
+    p.start()
+    test.addCleanup(p.stop)
+
+
+def seam_open():
+    """The seam as an agent-side caller finds it: open, so git is read."""
+    from unittest import mock
+    from console_kit import gitseam as G
+    return mock.patch.object(G, "_OPEN", True)
+
+
 class ServerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -619,7 +639,12 @@ class ServerTests(unittest.TestCase):
         code, via_agent = SV.agent_request(self.cfg.socket, "GET", "/check")
         self.assertEqual((code, via_agent), (200, out))
 
-    def test_reanchor_dry_run_writes_nothing_and_a_real_run_only_appends(self):
+    def test_reanchor_in_the_server_reads_no_git_and_writes_nothing(self):
+        # CONSOLE-kit/Q23: the server starts no git, so it cannot find the version a lock was taken
+        # on. Catches: a reanchor that silently re-anchors nothing (the reason must name the cause),
+        # and one that still reads history in the server. The agent-side half of the same tree is
+        # NoServerGitTests.test_agent_side_history_still_finds_what_the_server_cannot.
+        seam_closed(self)
         spec, _, lk = self.locked_on_spec()
         self.git("init", "-q")
         self.git("add", "spec.md")
@@ -627,23 +652,28 @@ class ServerTests(unittest.TestCase):
         spec.write_text("A new first line.\n" + self.SPEC)
         self.git("commit", "-qam", "unrelated")
         before = self.cfg.store.read_bytes()
-        rc, out, err = self.agent_cli("reanchor", "--dry-run")
-        self.assertEqual(rc, 0, err)
-        self.assertIn("LANE.1/Q2: would re-anchor spec.md", out)
-        self.assertEqual(self.cfg.store.read_bytes(), before)
-        self.assertEqual(self.state_of("LANE.1/Q2")["state"], "stale")
-        rc, out, err = self.agent_cli("reanchor")
-        self.assertEqual(rc, 0, err)
-        after = self.cfg.store.read_bytes()
-        self.assertTrue(after.startswith(before))  # nothing already written changed
-        [new] = [json.loads(x) for x in after[len(before):].decode().splitlines()]
-        self.assertEqual((new["type"], new["by"], new["lock"]), ("anchor", "agent", lk["id"]))
-        self.assertEqual(new["anchors"], [{"kind": "excerpt", "path": "spec.md",
-                                           "text": "The cited claim, line one.\nThe cited claim, line two."}])
-        q = self.state_of("LANE.1/Q2")
-        self.assertEqual((q["state"], q["anchored_by"]), ("locked", "reanchor"))
-        self.assertEqual(self.agent_cli("reanchor")[0], 0)  # a second run finds nothing stale
-        self.assertEqual(self.cfg.store.read_bytes(), after)
+        for args in (("reanchor", "--dry-run"), ("reanchor",)):
+            with self.subTest(args=args):
+                rc, out, err = self.agent_cli(*args)
+                self.assertEqual(rc, 0, err)
+                self.assertIn("LANE.1/Q2: left stale, spec.md: git history is unavailable (no git in the server)",
+                              out)
+                self.assertIn("git history: unavailable (no git in the server)", err)
+                self.assertEqual(self.cfg.store.read_bytes(), before)
+                self.assertEqual(self.state_of("LANE.1/Q2")["state"], "stale")
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/reanchor", {"dry_run": False})
+        self.assertEqual((code, out["history"]), (200, "unavailable (no git in the server)"))
+        [p] = out["plan"]
+        self.assertEqual((p["lock"], p["changes"], p["fresh"]), (lk["id"], [], False))
+
+    def agent_side_plan(self):
+        """`plan_reanchor` as an agent-side caller runs it, with git history (what the follow-up lane restores)."""
+        real = SV.A.plan_reanchor
+
+        def plan(*a, **kw):
+            with seam_open():
+                return real(*a, **kw)
+        return plan
 
     def test_reanchor_takes_no_anchors_from_the_caller(self):
         code, out = SV.agent_request(self.cfg.socket, "POST", "/reanchor",
@@ -665,7 +695,10 @@ class ServerTests(unittest.TestCase):
         self.git("commit", "-qm", "v1")
         spec.write_text("A new first line.\n" + self.SPEC)
         self.git("commit", "-qam", "unrelated")
-        real = SV.A.plan_reanchor
+        # The write path's guards, fed the plan an agent-side caller would make: the server
+        # itself reads no git (Q23), so without this its plan has nothing to write.
+        seam_closed(self)
+        real = self.agent_side_plan()
 
         def plan_then_owner_relocks(*a, **kw):
             plan = real(*a, **kw)
@@ -690,7 +723,10 @@ class ServerTests(unittest.TestCase):
         self.git("commit", "-qm", "v1")
         spec.write_text("A new first line.\n" + self.SPEC)
         self.git("commit", "-qam", "unrelated")
-        real = SV.A.plan_reanchor
+        # The write path's guards, fed the plan an agent-side caller would make: the server
+        # itself reads no git (Q23), so without this its plan has nothing to write.
+        seam_closed(self)
+        real = self.agent_side_plan()
 
         def plan_then_edit(*a, **kw):
             plan = real(*a, **kw)
@@ -2494,6 +2530,281 @@ class SlimReadCliTests(_Live, unittest.TestCase):
         self.assertEqual((rc, json.loads(out)["rows"]), (0, []))
         rc, out, _ = self.agent_cli("answers", "--json", "--since", "0")
         self.assertEqual([r["qid"] for r in json.loads(out)["rows"]], ["LANE.1/Q1"])
+
+
+# -- CONSOLE-kit/Q23: the console server spawns no git ------------------------------------
+
+NOGIT = "unavailable (no git in the server)"
+SPAWN_EVENTS = ("subprocess.Popen", "os.posix_spawn", "os.exec", "os.spawn", "os.system", "os.fork",
+                "os.forkpty", "pty.spawn")
+
+
+def git_project(root: Path) -> str:
+    """A project in a git work tree: specs/spec.md committed, then committed again with an unrelated first line.
+
+    The spec's file time is set long before any lock, so a refine tag is due
+    whichever time is read. Returns the first version's sha256: the version a
+    question is locked against, which only git history still holds.
+    """
+    import hashlib
+    (root / "specs").mkdir()
+    spec = root / "specs/spec.md"
+    spec.write_text(ServerTests.SPEC)
+    (root / ".console-kit.json").write_text(json.dumps({"specs_dir": "specs/"}))
+    git(root, "init", "-q")
+    git(root, "add", "specs/spec.md", ".console-kit.json")
+    git(root, "commit", "-qm", "v1")
+    spec.write_text("A new first line.\n" + ServerTests.SPEC)
+    git(root, "commit", "-qam", "unrelated")
+    os.utime(spec, (1_600_000_000, 1_600_000_000))
+    return hashlib.sha256(ServerTests.SPEC.encode()).hexdigest()
+
+
+def spec_question(v1: str) -> dict:
+    return {"qid": "LANE.1/Q2", "item": "LANE.1", "text": "Still?", "kind": "single",
+            "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}], "star": None,
+            "valid_if": [{"kind": "file_sha256", "path": "specs/spec.md", "sha256": v1}],
+            "source": "specs/spec.md:5-6", "nonce": "nogitquest01"}
+
+
+# The real server (`server.serve`, as `server.py` runs it) in a child process that audits itself.
+# The hook goes in before the kit is imported, and records every way Python can start a process.
+AUDIT_CHILD = r'''
+import json, sys
+SPAWN = tuple(json.loads(sys.argv[2]))
+spawned = []
+def hook(event, args):
+    if event.startswith(SPAWN):
+        spawned.append([event, repr(args)[:300]])
+sys.addaudithook(hook)
+
+import http.client, os, socket, threading, time
+from pathlib import Path
+p = json.loads(sys.argv[1])
+sys.path.insert(0, p["kit"])
+from console_kit import server as SV
+
+root = Path(p["root"])
+s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
+cfg = SV.Config(root=root, page=root / "page.html", state=root / "state", adapter=root / "adapter.py",
+                team_domain="team.example.cloudflareaccess.com", aud="a" * 64, hostname=p["host"], port=port,
+                project="audit")
+threading.Thread(target=SV.serve, args=(cfg, lambda _tok: {"email": "owner@example.com"}), daemon=True).start()
+for _ in range(200):
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=1).close()
+        if cfg.socket.exists():
+            break
+    except OSError:
+        pass
+    time.sleep(0.05)
+
+def owner(method, path, body=None):
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    h = {"Cf-Access-Jwt-Assertion": "x", "Origin": "https://" + p["host"]}
+    data = None if body is None else json.dumps(body).encode()
+    if data is not None:
+        h["Content-Type"] = "application/json"
+    c.request(method, path, body=data, headers=h)
+    r = c.getresponse(); raw = r.read(); c.close()
+    try:
+        return r.status, json.loads(raw)
+    except ValueError:
+        return r.status, None
+
+def agent(method, path, body=None):
+    return SV.agent_request(cfg.socket, method, path, body)
+
+codes, out = {}, {}
+def call(name, fn, *a):
+    code, body = fn(*a)
+    codes[name] = code
+    return body
+
+call("agent POST /question", agent, "POST", "/question", p["question"])
+a = call("owner POST /api/answer", owner, "POST", "/api/answer",
+         {"qid": "LANE.1/Q2", "picks": ["a"], "own_text": "", "nonce": "nogitanswer1"})
+call("owner POST /api/lock", owner, "POST", "/api/lock",
+     {"qid": "LANE.1/Q2", "answer": a["record"]["id"], "nonce": "nogitlock001"})
+for path in ("/", "/index.html", "/api/board", "/api/usage", "/api/feed", "/api/wait?since=0&timeout=0",
+             "/api/evidence?qid=LANE.1/Q2", "/api/visual?id=" + "0" * 24):
+    call("owner GET " + path, owner, "GET", path)
+out["view"] = call("owner GET /api/view", owner, "GET", "/api/view")
+out["check"] = call("owner GET /api/check", owner, "GET", "/api/check")
+for path in ("/view", "/check", "/health"):
+    call("agent GET " + path, agent, "GET", path)
+out["reanchor_dry"] = call("agent POST /reanchor dry", agent, "POST", "/reanchor", {"dry_run": True})
+out["reanchor"] = call("agent POST /reanchor", agent, "POST", "/reanchor", {"dry_run": False})
+call("agent POST /visual-export", agent, "POST", "/visual-export", {"ids": []})
+call("owner POST /api/message", owner, "POST", "/api/message",
+     {"item": "LANE.1", "text": "deliberate", "intent": "fork", "mode": "tighten", "nonce": "nogitfork001"})
+call("owner POST /api/lock-all", owner, "POST", "/api/lock-all", {})
+call("owner POST /api/relock", owner, "POST", "/api/relock", {"qid": "LANE.1/Q2", "nonce": "nogitrelock1"})
+sys.stdout.write(json.dumps({"spawned": spawned, "codes": codes, "out": out}) + "\n")
+sys.stdout.flush()
+os._exit(0)
+'''
+
+
+class NoServerGitTests(_Live, unittest.TestCase):
+    """CONSOLE-kit/Q23: the server spawns no git; each feature git fed says why it is missing.
+
+    Owner ruling, "Stop server git now, restore it agent-side next": git obeys
+    the repo's own .git/config, which an agent can write, and some keys make
+    git run a program, outside every agent's jail. Each test runs on a project
+    that IS a git work tree with the history the old code would have read, so a
+    feature that still reached git would find something.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.root = d
+        seam_closed(self)
+        self.v1 = git_project(d)
+        (d / "page.html").write_text(PAGE)
+        self.cfg = SV.Config(root=d, page=d / "page.html", state=d / "state", adapter=d / "unused.py",
+                             team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="test")
+        self.console = SV.Console(self.cfg, FakeAdapter())
+        self.console.seed()
+        verify = SV.access_verifier(TEAM, AUD, key_for=lambda _t: KEY.public_key())
+        self.owner = SV.owner_server(self.console, verify, 0)
+        self.port = self.owner.server_address[1]
+        threading.Thread(target=self.owner.serve_forever, daemon=True).start()
+        self.agent = SV.agent_server(self.console)
+        threading.Thread(target=self.agent.serve_forever, daemon=True).start()
+        code, out = self.agent_post("/question", spec_question(self.v1))
+        self.assertEqual(code, 200, out)
+        code, a = self.req("POST", "/api/answer", self.answer(qid="LANE.1/Q2", nonce="nogitanswer1"), tok=token())
+        self.assertEqual(code, 200, a)
+        code, lk = self.req("POST", "/api/lock", {"qid": "LANE.1/Q2", "answer": a["record"]["id"],
+                                                  "nonce": "nogitlock001"}, tok=token())
+        self.assertEqual(code, 200, lk)
+        self.lock = lk["record"]
+
+    # (a) ---------------------------------------------------------------------------------
+
+    def test_the_served_server_starts_no_process_on_any_route_that_reached_git(self):
+        # The real `server.serve` in a child with sys.addaudithook watching subprocess.Popen,
+        # os.posix_spawn, os.exec*, os.spawn*, os.system and os.fork*. Every route that used to
+        # reach git is exercised (the view's tags, /check from both doors, /reanchor dry and real),
+        # and the rest of the routes besides. MUTATIONS, run by hand on this commit, each red:
+        # delete `G.close()` from `serve` (12 spawns: `git rev-parse`/`status`/`log` from the
+        # view's tags, `git log` + `git cat-file --batch` from /check and /reanchor); and drop
+        # the closed-seam return in `gitseam.run` (the tags' `git rev-parse` and `git status`).
+        # Re-pointing only `History._git` at subprocess stays green, by design: with the seam
+        # closed, the check and reanchor paths return their label before any history lookup.
+        import subprocess
+        (self.root / "adapter.py").write_text(
+            "def items():\n    return {'LANE': {'title': 'a lane', 'parent': None, 'status': 'open'},\n"
+            "            'LANE.1': {'title': 'a phase', 'parent': 'LANE', 'status': 'open'}}\n"
+            "def seed_questions():\n    return []\n"
+            "def record(entries, dry_run):\n    return []\n")
+        root = Path(tempfile.mkdtemp(prefix="ck-audit-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        v1 = git_project(root)
+        (root / "page.html").write_text(PAGE)
+        (root / "adapter.py").write_text((self.root / "adapter.py").read_text())
+        params = {"kit": str(Path(SV.__file__).resolve().parent.parent), "root": str(root), "host": HOSTNAME,
+                  "question": spec_question(v1)}
+        r = subprocess.run([sys.executable, "-c", AUDIT_CHILD, json.dumps(params), json.dumps(SPAWN_EVENTS)],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual(got["spawned"], [], "the server started a process")
+        # The routes really ran, and reached the code git used to feed (else zero spawns proves nothing).
+        for name, code in got["codes"].items():
+            self.assertLess(code, 500, name)
+        out = got["out"]
+        self.assertEqual(out["check"]["history"], NOGIT)
+        [c] = out["check"]["stale"]["LANE.1/Q2"]["conditions"]
+        self.assertEqual((c["reason"], c["history"]), ("file_changed", NOGIT))
+        self.assertEqual(out["view"]["view"]["tags"]["git"], NOGIT)
+        self.assertEqual([t["step"] for t in out["view"]["view"]["tags"]["questions"]["LANE.1/Q2"]][:1], ["refine"])
+        for k in ("reanchor_dry", "reanchor"):
+            self.assertEqual(out[k]["history"], NOGIT)
+            self.assertIn(NOGIT, out[k]["plan"][0]["unresolved"][0]["why"])
+
+    def test_a_closed_seam_refuses_without_starting_anything(self):
+        # Catches: a fail-open seam (one that tries git and reports the failure), a typed result
+        # read as "not a git work tree", and a git call in the kit that goes around the seam.
+        import subprocess
+        from unittest import mock
+        from console_kit import gitseam as G
+        self.assertFalse(G.is_open())
+        with mock.patch.object(subprocess, "run", side_effect=AssertionError("git was started")):
+            self.assertIs(G.run(["status"], self.root, timeout=5), G.NO_GIT)
+            self.assertIsNone(SV.A.History(self.root).versions("specs/spec.md"))
+            self.assertIsNone(SV.T._Git(self.root).head())
+        self.assertEqual((G.NO_GIT.reason, G.UNAVAILABLE), (NOGIT, NOGIT))
+        with seam_open():
+            self.assertRegex(G.run(["rev-parse", "HEAD"], self.root, timeout=30), rb"^[0-9a-f]{40}\n$")
+        kit = Path(SV.__file__).resolve().parent
+        for f in sorted(kit.glob("*.py")) + [kit.parent / "agent.py"]:
+            if f.name != "gitseam.py":
+                with self.subTest(file=f.name):
+                    self.assertNotRegex(f.read_text(), r"subprocess\.(run|Popen|call|check_output)\(")
+
+    # (b) ---------------------------------------------------------------------------------
+
+    def test_check_history_names_the_cause_on_both_doors(self):
+        code, out = self.req("GET", "/api/check", tok=token())
+        self.assertEqual(code, 200, out)
+        self.assertEqual(out["history"], NOGIT)
+        [c] = out["stale"]["LANE.1/Q2"]["conditions"]
+        self.assertEqual((c["reason"], c["holds"], c["history"]), ("file_changed", False, NOGIT))
+        self.assertIn(f"Git history is {NOGIT}", c["words"])
+        self.assertNotIn("locked_version", c)
+        self.assertEqual(SV.agent_request(self.cfg.socket, "GET", "/check"), (200, out))
+        rc, printed, err = self.agent_cli("check")
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"Git history is {NOGIT}", printed)
+        self.assertIn(f"git history: {NOGIT}", err)
+
+    def test_reanchor_history_names_the_cause(self):
+        before = self.cfg.store.read_bytes()
+        for dry in (True, False):
+            code, out = SV.agent_request(self.cfg.socket, "POST", "/reanchor", {"dry_run": dry})
+            self.assertEqual((code, out["history"]), (200, NOGIT))
+            [p] = out["plan"]
+            self.assertEqual(p["changes"], [])
+            self.assertEqual(p["unresolved"][0]["why"], f"git history is {NOGIT}, so the version of specs/spec.md "
+                                                        f"it was locked against cannot be looked up")
+        self.assertEqual(self.cfg.store.read_bytes(), before)
+
+    def test_a_refine_tag_says_it_shows_the_file_time_and_why(self):
+        code, out = self.req("GET", "/api/view", tok=token())
+        self.assertEqual(code, 200, out)
+        tags = out["view"]["tags"]
+        self.assertEqual(tags["git"], NOGIT)
+        self.assertEqual(tags["basis"], ["mtime"])
+        [refine] = [t for t in tags["questions"]["LANE.1/Q2"] if t["step"] == "refine"]
+        self.assertIn(f"(file time 2020-09-13T12:26:40Z; the last-commit time is {NOGIT}, lock ", refine["reason"])
+
+    # (c) ---------------------------------------------------------------------------------
+
+    def test_agent_side_history_still_finds_what_the_server_cannot(self):
+        # The same store and tree, read the way an agent-side caller reads them (outside the
+        # server process): git history is there, and every feature the server labels has its data.
+        from console_kit import tags as T
+        self.enterContext(seam_open())
+        items = self.console.items()
+        status = {k: v.get("status") for k, v in items.items()}
+        [c] = SV.A.check(self.console.store, self.root, status)["LANE.1/Q2"]["conditions"]
+        self.assertEqual(c["cited_text"], "unchanged")
+        self.assertRegex(c["locked_version"], r"^[0-9a-f]{12}$")
+        self.assertNotIn("history", c)
+        [p] = SV.A.plan_reanchor(self.console.store, self.root, status)
+        self.assertEqual([ch["to"] for ch in p["changes"]],
+                         [{"kind": "excerpt", "path": "specs/spec.md",
+                           "text": "The cited claim, line one.\nThe cited claim, line two."}])
+        view = self.console.payload()["view"]
+        tags = T.compute(self.console.store, view, items, self.root, "specs")
+        self.assertNotIn("git", tags)
+        self.assertEqual(tags["basis"], ["git"])
+        [refine] = [t for t in tags["questions"]["LANE.1/Q2"] if t["step"] == "refine"]
+        self.assertIn("(last commit ", refine["reason"])
+        self.assertNotIn(NOGIT, refine["reason"])
 
 
 if __name__ == "__main__":

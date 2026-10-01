@@ -14,6 +14,10 @@ locked, and that spec file has NOT been edited since the lock. "Edited" is:
   uncommitted changes or is untracked;
 - outside git (or a repository with no commits): the file's mtime.
 
+In the console server, git is never asked (CONSOLE-kit/Q23, `gitseam`): the
+file's mtime is used, the reason says "file time ...; the last-commit time is
+unavailable (no git in the server)", and `compute` returns `git` saying so.
+
 A lock and an edit in the same second count as "not edited since". Every
 git call runs with `--no-optional-locks` and `GIT_OPTIONAL_LOCKS=0` (0.8.1),
 so `git status` never rewrites the index of the service checkout.
@@ -77,6 +81,7 @@ from pathlib import Path
 from typing import Mapping
 
 from . import anchors as A
+from . import gitseam as G
 from . import schema as S
 from . import view as V
 
@@ -221,12 +226,9 @@ class _Git:
         self._cache: dict[tuple, float] = {}
 
     def _run(self, args: list[str]) -> str | None:
-        try:
-            r = subprocess.run([*GIT, *args], cwd=self.root, capture_output=True, text=True,
-                               timeout=GIT_TIMEOUT, check=False, env=git_env())
-        except (OSError, subprocess.SubprocessError):
-            return None
-        return r.stdout if r.returncode == 0 else None
+        # Through gitseam (Q23): in the server (seam closed) no git is started, and edits read as file time.
+        out = G.run(args, self.root, timeout=GIT_TIMEOUT, text=True)
+        return None if isinstance(out, G.Unavailable) else out
 
     def head(self) -> str | None:
         out = self._run(["rev-parse", "--verify", "-q", "HEAD"])
@@ -323,9 +325,11 @@ def compute(store, view: dict, items: Mapping[str, dict], root: Path, specs_dir:
                 basis.add(how)
                 if edited <= locked_at:
                     when = "last commit" if how == "git" else "file time"
+                    shown = f"{when} {time.strftime(TS_FORMAT, time.gmtime(edited))}"
+                    if not G.is_open():  # Q23: say which time is shown, and why not the commit's
+                        shown += f"; the last-commit time is {G.UNAVAILABLE}"
                     tags.append({"step": "refine", "reason": f"cites {path}, not edited since you locked this "
-                                                             f"({when} {time.strftime(TS_FORMAT, time.gmtime(edited))}, "
-                                                             f"lock {lk['ts']})"})
+                                                             f"({shown}, lock {lk['ts']})"})
                     break
         # drill: new words with no spec, or a proposed item no spec names
         if idx is not None and idx.files:
@@ -362,5 +366,8 @@ def compute(store, view: dict, items: Mapping[str, dict], root: Path, specs_dir:
                 tags.append({"step": step, "reason": f"{qids}: {hit[0][1]['reason']}", "qids": [q for q, _ in hit]})
         if tags:
             out_f[fid] = tags
-    return {"questions": out_q, "forks": out_f, "specs_dir": specs_dir,
-            "basis": sorted(basis), "notes": list(idx.notes) if idx is not None else []}
+    out = {"questions": out_q, "forks": out_f, "specs_dir": specs_dir,
+           "basis": sorted(basis), "notes": list(idx.notes) if idx is not None else []}
+    if not G.is_open():
+        out["git"] = G.UNAVAILABLE   # Q23: named even when no tag needed git this time
+    return out
