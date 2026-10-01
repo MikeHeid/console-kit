@@ -4302,5 +4302,440 @@ class OneServerStewardGitTests(_OneServer, unittest.TestCase):
         self.assertEqual(len(dirfd_ops(ctl.read_text(), names)[1]), 4)   # each path-based call is caught
 
 
+# -- K4: project tokens and the agent door (spec §3.5, §3.8, §8.2) ---------------------------------------------
+
+# NEGATIVE CONTROL gates for AC4.1, spliced into ONE_SERVER before MS.start. Each must make the isolation check fail.
+ALWAYS_SERVES = "MS.authorize = lambda ms, project, headers: True\n"
+SERVES_BY_TOKENS_PROJECT = r"""
+import hashlib as _hl
+def _by_token(self):
+    m = MS.PROJECT_PATH.match(self.path)
+    auth = self.headers.get("Authorization") or ""
+    got = _hl.sha256(auth[len("Bearer "):].encode()).hexdigest() if auth.startswith("Bearer ") else None
+    for name, h in self.multi.projects.items():          # the TOKEN's project, whatever the path names
+        if m and got and self.multi.token_hash(name) == got and h.console is not None:
+            self.console, self.path = h.console, m.group(2)
+            return h
+    self._send(403, MS.FORBIDDEN)
+    return None
+MS.MultiAgentHandler._project = _by_token
+"""
+TOKEN_SHAPE = r"ck1_[A-Za-z0-9_-]{43}"
+
+
+class _RawAgent:
+    """Bytes off the agent socket, headers and all, so a test asserts on what the socket carried."""
+
+    def raw(self, method, path, body=None, headers=()):
+        """One request written in one send (so no refusal can race the body), the response read whole."""
+        import socket as so
+        data = b"" if body is None else json.dumps(body).encode()
+        lines = [f"{method} {path} HTTP/1.1", "Host: localhost", *(f"{k}: {v}" for k, v in headers)]
+        if body is not None:
+            lines += ["Content-Type: application/json", f"Content-Length: {len(data)}"]
+        sock = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+        sock.settimeout(30)
+        sock.connect(str(self.sock))
+        try:
+            sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode() + data)
+            r = http.client.HTTPResponse(sock)
+            r.begin()
+            out = (r.status, sorted((k, v) for k, v in r.getheaders() if k.lower() != "date"), r.read())
+        finally:
+            sock.close()
+        return out
+
+    @staticmethod
+    def bearer(tok):
+        return (("Authorization", f"Bearer {tok}"),)
+
+
+def state_files(d: Path) -> dict:
+    """Every file in a state dir, by sha256: the store, names, inbox, cursor, working, items and the rest."""
+    return {p.relative_to(d).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(d.rglob("*")) if p.is_file() and not p.is_symlink()}
+
+
+class ProjectTokenTests(_RawAgent, _OneServer, unittest.TestCase):
+    """K4: a token per project at the one server's agent door; the project chosen by where agent.py runs."""
+
+    def setUp(self):
+        super().setUp()
+        self.outputs: list[str] = []      # every byte agent.py printed, for AC4.2
+
+    def agent_py(self, cwd, *args, state=None, check=None):
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg), "PYTHONDONTWRITEBYTECODE": "1"}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        env.pop("CONSOLE_KIT_SESSION", None)
+        r = subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(state), *args],
+                           capture_output=True, text=True, env=env, timeout=120, cwd=cwd)
+        self.outputs += [r.stdout, r.stderr]
+        if check is not None:
+            self.assertEqual(r.returncode, check, (args, r.stdout, r.stderr))
+        return r
+
+    def seed_sentinels(self, tag=""):
+        for name, sentinel in (("alpha", "SENTINEL-K4-ALPHA"), ("beta", "SENTINEL-K4-BETA")):
+            self.assertEqual(self.push(name)[0], 200)
+            code, out = self.agent("POST", f"/p/{name}/message", {"item": "PUSHED", "text": sentinel,
+                                                                  "nonce": f"k4sent{name}{tag}01"})
+            self.assertEqual(code, 200, out)
+
+    # AC4.1 -------------------------------------------------------------------------------------------------
+
+    def isolation(self, tag):
+        """The AC4.1 check against whatever gate the running server has. Raises AssertionError on a leak."""
+        self.seed_sentinels(tag)
+        old_b = self.tokens["beta"]
+        self.SF.rotate("beta", self.sfile, self.reg)                       # a rotated B token
+        self.tokens["beta"] = self.SF.read_token("beta", self.sfile)
+        made_up = "ck1_" + "A" * 43
+        bad = {"A's token": self.bearer(self.tokens["alpha"]), "no token": (), "rotated B token": self.bearer(old_b),
+               "made-up token": self.bearer(made_up), "malformed": (("Authorization", "Bearer not-a-token"),),
+               "B's token sent twice": self.bearer(self.tokens["beta"]) * 2,
+               "B's token as Basic": (("Authorization", f"Basic {self.tokens['beta']}"),)}
+        routes = ([("GET", p) for p in OneServerTests.AGENT_GETS]
+                  + [("POST", p) for p in OneServerTests.AGENT_POSTS])
+        b_state = self.p["beta"]["state"]
+        before = state_files(b_state)
+        seen = []                                                         # (label, (status, headers, body))
+        # The first request of all is A's token on B's first route: the always-serving control fails right here.
+        for case, h in bad.items():
+            for method, path in routes:
+                seen.append((f"{case} {method} /p/beta{path}", self.raw(method, f"/p/beta{path}", {}
+                                                                         if method == "POST" else None, h)))
+        for case, h in {**bad, "B's token": self.bearer(self.tokens["beta"])}.items():   # a project not hosted
+            seen.append((f"{case} GET /p/gamma/view", self.raw("GET", "/p/gamma/view", None, h)))
+        for method, path in routes:                                       # B's own token on A's path
+            seen.append((f"B's token {method} /p/alpha{path}",
+                         self.raw(method, f"/p/alpha{path}", {} if method == "POST" else None,
+                                  self.bearer(self.tokens["beta"]))))
+        for label, (_st, _h, body) in seen:                               # no B record text, in any refusal
+            if b"SENTINEL-K4-BETA" in body:
+                raise AssertionError(f"sentinel leaked on {label}")
+        first = seen[0][1]
+        self.assertEqual(first[0], 403)
+        self.assertEqual(json.loads(first[2]), MS.FORBIDDEN)
+        for label, resp in seen:
+            self.assertEqual(resp, first, f"not the one refusal: {label}")  # status, headers and body bytes
+        self.assertEqual(state_files(b_state), before)                    # B's files untouched by any refusal
+        for method, path in routes:                                       # B's token serves every B route
+            code = self.raw(method, f"/p/beta{path}", {} if method == "POST" else None,
+                            self.bearer(self.tokens["beta"]))[0]
+            self.assertNotEqual(code, 403, path)
+        self.assertEqual(self.raw("GET", "/p/beta/view", None, self.bearer(self.tokens["beta"]))[0], 200)
+
+    def test_ac41_token_isolation_and_its_two_negative_controls(self):
+        # Catches: a gate that admits any well-formed token, and one that serves the TOKEN's project rather than
+        # the path's. Both ship here as stub gates, and the check must fail against each.
+        self.spawn()
+        self.isolation("r")
+        self.stop()
+        self.spawn(ONE_SERVER.replace("r = MS.start(", ALWAYS_SERVES + "r = MS.start("))
+        with self.assertRaises(AssertionError) as cm:
+            self.isolation("s")
+        self.assertIn("sentinel leaked on A's token GET /p/beta/view", str(cm.exception))   # its first A request
+        self.stop()
+        self.spawn(ONE_SERVER.replace("r = MS.start(", SERVES_BY_TOKENS_PROJECT + "r = MS.start("))
+        with self.assertRaises(AssertionError) as cm:
+            self.isolation("t")
+        self.assertIn("sentinel leaked on B's token", str(cm.exception))
+
+    def test_ac41_the_token_compare_is_hmac_compare_digest_on_the_paths_project(self):
+        # Pins the constant-time compare (a timing test is not practical): `==` in its place goes red here, and
+        # so does an `authorize` that admits anyone again. An unknown project still costs one compare.
+        import email.message
+        import hmac
+        from unittest import mock
+        from console_kit import serverfile as SF
+        tok, other = "ck1_" + "a" * 43, "ck1_" + "b" * 43
+
+        class FakeMS:
+            def token_hash(self, project):
+                return {"alpha": SF.token_hash(tok), "beta": SF.token_hash(other)}.get(project)
+
+        def headers(*values):
+            m = email.message.Message()
+            for v in values:
+                m["Authorization"] = v
+            return m
+        cases = [("alpha", (f"Bearer {tok}",), True), ("beta", (f"Bearer {tok}",), False),
+                 ("gamma", (f"Bearer {tok}",), False), ("alpha", (), False), ("alpha", ("Bearer nope",), False),
+                 ("alpha", (f"Bearer {tok}", f"Bearer {tok}"), False), ("alpha", (f"Basic {tok}",), False),
+                 ("alpha", (f"Bearer {tok} ",), False)]
+        for project, values, want in cases:
+            with mock.patch.object(MS.hmac, "compare_digest", wraps=hmac.compare_digest) as cd:
+                self.assertIs(MS.authorize(FakeMS(), project, headers(*values)), want, (project, values))
+            self.assertEqual(cd.call_count, 1, (project, values))
+            got, stored = cd.call_args.args
+            if want:
+                self.assertEqual(got, stored)
+                self.assertEqual(got, SF.token_hash(tok).encode())
+
+    # AC4.2 -------------------------------------------------------------------------------------------------
+
+    def test_ac42_a_token_is_never_in_a_repository_or_echoed(self):
+        # Catches: a check of server.json alone while an error message prints the token. Every byte the processes
+        # wrote is searched: both state dirs, server.json, the server's stderr and every agent.py output.
+        import shutil
+        A, B = self.p["alpha"], self.p["beta"]
+        tdir = self.cfg / "console-kit" / "tokens"
+        self.assertEqual(stat.S_IMODE(tdir.stat().st_mode), 0o700)
+        for name in ("alpha", "beta"):
+            self.assertEqual(stat.S_IMODE((tdir / name).lstat().st_mode), 0o600)
+        self.assertNotIn(self.tokens["alpha"], self.sfile.read_text())
+        self.assertEqual(json.loads(self.sfile.read_text())["projects"]["alpha"]["token_sha256"],
+                         self.SF.token_hash(self.tokens["alpha"]))
+        minted = set(self.tokens.values())
+        # A tokens directory that resolves inside a registered root is refused by `server add` and `rotate`.
+        cfg2 = self.t / "cfg2"
+        (cfg2 / "console-kit").mkdir(parents=True)
+        shutil.copy(self.reg, cfg2 / "console-kit" / "projects.json")
+        (A["root"] / "tok").mkdir()
+        (cfg2 / "console-kit" / "tokens").symlink_to(A["root"] / "tok")
+        env = {**os.environ, "XDG_CONFIG_HOME": str(cfg2)}
+        r = subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(A["state"]), "server", "add",
+                            "alpha", "--hostname", "alpha.example.com", "--aud", AUD, "--port", "4901",
+                            "--team-domain", TEAM], capture_output=True, text=True, env=env, timeout=60)
+        self.outputs += [r.stdout, r.stderr]
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("inside the registered project root", r.stderr)
+        self.assertFalse((cfg2 / "console-kit" / "server.json").exists())
+        shutil.copy(self.sfile, cfg2 / "console-kit" / "server.json")
+        held = (cfg2 / "console-kit" / "server.json").read_bytes()
+        r = subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(A["state"]), "server", "token",
+                            "rotate", "alpha"], capture_output=True, text=True, env=env, timeout=60)
+        self.outputs += [r.stdout, r.stderr]
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("inside the registered project root", r.stderr)
+        self.assertEqual(list((A["root"] / "tok").iterdir()), [])
+        self.assertEqual((cfg2 / "console-kit" / "server.json").read_bytes(), held)
+        # And a config dir that is itself a plain directory inside a registered root (no link to see through).
+        cfg3 = B["root"] / "cfg-in-repo"
+        (cfg3 / "console-kit").mkdir(parents=True)
+        shutil.copy(self.reg, cfg3 / "console-kit" / "projects.json")
+        r = subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(B["state"]), "server", "add",
+                            "beta", "--hostname", "beta.example.com", "--aud", AUD, "--port", "4902",
+                            "--team-domain", TEAM], capture_output=True, text=True,
+                           env={**os.environ, "XDG_CONFIG_HOME": str(cfg3)}, timeout=60)
+        self.outputs += [r.stdout, r.stderr]
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn(f"inside the registered project root {B['root']}", r.stderr)
+        self.assertFalse((cfg3 / "console-kit" / "tokens").exists())
+        self.assertFalse((cfg3 / "console-kit" / "server.json").exists())
+        # A full run: every agent route through agent.py, refusals and errors included, and a rotation.
+        self.spawn()
+        self.agent_py(A["root"], "items-push", "--adapter", "console_adapter.py", state=A["state"], check=0)
+        for args in (("view",), ("todo",), ("health",), ("check",), ("answers",), ("answers", "--json"),
+                     ("inbox", "--all"), ("reply", "PUSHED", "hello"), ("working", "PUSHED"), ("synced",),
+                     ("reanchor", "--dry-run"), ("reply", "NO-SUCH-ITEM", "refused"), ("fork-context", "nope")):
+            self.agent_py(A["root"], *args, state=A["state"])
+        self.agent_py(A["root"], "view", state=B["state"], check=1)        # the wrong console: refused
+        self.agent_py(self.t, "view", state=A["state"], check=1)           # outside every root: refused
+        made_up = "ck1_" + "Z" * 43
+        minted.add(made_up)
+        good = (tdir / "alpha").read_bytes()
+        (tdir / "alpha").write_text(made_up + "\n")                        # a token the server does not hold
+        self.agent_py(A["root"], "view", state=A["state"], check=1)
+        self.agent_py(A["root"], "reply", "PUSHED", "x", state=A["state"], check=1)
+        (tdir / "alpha").write_text("not a token at all\n")               # a broken file: named, never shown
+        r = self.agent_py(A["root"], "view", state=A["state"], check=1)
+        self.assertIn(str(tdir / "alpha"), r.stderr)
+        (tdir / "alpha").write_bytes(good)
+        self.agent_py(A["root"], "server", "token", "rotate", "alpha", state=A["state"], check=0)
+        minted.add(self.SF.read_token("alpha", self.sfile))
+        self.agent_py(A["root"], "view", state=A["state"], check=0)
+        self.stop()
+        written = list(self.outputs) + list(self.logs) + [self.sfile.read_text()]
+        for st in (A["state"], B["state"]):
+            written += [p.read_bytes().decode("utf-8", "replace") for p in st.rglob("*")
+                        if p.is_file() and not p.is_socket()]
+        blob = "\n".join(written)
+        for tok in minted:
+            self.assertNotIn(tok, blob)
+        self.assertIsNone(__import__("re").search(TOKEN_SHAPE, blob))     # no token of any kind, anywhere
+
+    # AC4.3 -------------------------------------------------------------------------------------------------
+
+    def test_ac43_rotation_refuses_the_old_token_at_once_with_no_restart(self):
+        # Catches: hashes cached at start-up (the old token works until a restart). One server process throughout.
+        B = self.p["beta"]
+        self.spawn()
+        pid = self.proc.pid
+        self.agent_py(B["root"], "view", state=B["state"], check=0)
+        old = self.tokens["beta"]
+        self.assertEqual(self.raw("GET", "/p/beta/view", None, self.bearer(old))[0], 200)
+        common = self.raw("GET", "/p/beta/view", None, self.bearer("ck1_" + "Q" * 43))
+        r = self.agent_py(self.t, "server", "token", "rotate", "beta", state=B["state"], check=0)
+        self.assertIn("tokens/beta", r.stdout)
+        new = self.SF.read_token("beta", self.sfile)
+        self.assertNotEqual(new, old)
+        self.assertEqual(self.raw("GET", "/p/beta/view", None, self.bearer(old)), common)   # the common 403
+        self.assertEqual(self.raw("GET", "/p/beta/view", None, self.bearer(new))[0], 200)
+        self.agent_py(B["root"], "view", state=B["state"], check=0)       # its next call, no restart anywhere
+        self.assertEqual((self.proc.pid, self.proc.poll()), (pid, None))
+
+    # AC4.4 -------------------------------------------------------------------------------------------------
+
+    def a_reads(self, fork):
+        """A's reads: the bytes off the socket for /view and /check, and agent.py's six read commands."""
+        A = self.p["alpha"]
+        h = self.bearer(self.tokens["alpha"])
+        out = {"socket /view": self.raw("GET", "/p/alpha/view", None, h)[2],
+               "socket /check": self.raw("GET", "/p/alpha/check", None, h)[2]}
+        for args in (("view", "--full"), ("answers", "--full"), ("answers", "--json", "--full"),
+                     ("inbox", "--all"), ("check",), ("fork-context", fork)):
+            r = self.agent_py(A["root"], *args, state=A["state"], check=0)
+            out[" ".join(args)] = r.stdout.encode()
+        return out
+
+    def test_ac44_each_read_is_the_bytes_a_one_project_server_gives(self):
+        # Catches: a server that sends both projects and lets agent.py filter (the socket carried B's records):
+        # the bytes compared are read off the socket, as well as agent.py's output.
+        import shutil
+        self.spawn()
+        self.seed_sentinels()
+        self.assertEqual(self.question("PUSHED", 1)[0], 200)
+        self.assertEqual(self.question("PUSHED", 1, "beta")[0], 200)
+        code, a = self.owner("alpha", "POST", "/api/answer", {"qid": "PUSHED/Q1", "picks": ["a"], "own_text": "",
+                                                              "nonce": "k4answer0001"})
+        self.assertEqual(code, 200, a)
+        code, lk = self.owner("alpha", "POST", "/api/lock", {"qid": "PUSHED/Q1", "answer": a["record"]["id"],
+                                                             "nonce": "k4lock000001"})
+        self.assertEqual(code, 200, lk)
+        code, fk = self.owner("alpha", "POST", "/api/message", {"item": "PUSHED", "text": "deliberate",
+                                                                "intent": "fork", "mode": "tighten",
+                                                                "nonce": "k4fork000001"})
+        self.assertEqual(code, 200, fk)
+        fork = fk["record"]["id"]
+        two = self.a_reads(fork)
+        for k, v in two.items():
+            self.assertNotIn(b"SENTINEL-K4-BETA", v, k)
+        self.assertIn(b"SENTINEL-K4-ALPHA", two["socket /view"])          # the reads are not empty
+        for n in range(100):                                              # B grows; A's reads do not move
+            code, out = self.agent("POST", "/p/beta/message", {"item": "PUSHED", "text": f"SENTINEL-K4-BETA {n}",
+                                                                "nonce": f"k4grow{n:06d}"})
+            self.assertEqual(code, 200, out)
+        self.assertEqual(self.a_reads(fork), two)
+        # A server that loaded the stores from disk orders a record's keys as stored, one that appended them in
+        # memory as sent: compare like with like, both freshly started on the same files.
+        self.stop()
+        self.spawn()
+        two = self.a_reads(fork)
+        self.assertNotIn(b"SENTINEL-K4-BETA", b"".join(two.values()))
+        self.stop()
+        # The one-project server, built on A's state alone: its own config dir holding A and nothing of B.
+        one = self.t / "cfg-one" / "console-kit"
+        (one / "tokens").mkdir(parents=True, mode=0o700)
+        os.chmod(one, 0o700)
+        shutil.copy(self.reg, one / "projects.json")
+        doc = json.loads(self.sfile.read_text())
+        doc["projects"] = {"alpha": doc["projects"]["alpha"]}
+        (one / "server.json").write_text(json.dumps(doc))
+        shutil.copy(self.cfg / "console-kit" / "tokens" / "alpha", one / "tokens" / "alpha")
+        os.chmod(one / "tokens" / "alpha", 0o600)
+        self.cfg, self.sfile, self.sock = one.parent, one / "server.json", one / "server.sock"
+        info = self.spawn()
+        self.assertEqual(list(info["ports"]), ["alpha"])
+        self.assertEqual(self.a_reads(fork), two)
+
+    # AC4.5 -------------------------------------------------------------------------------------------------
+
+    def test_ac45_the_working_directory_picks_the_project_and_a_mismatch_sends_nothing(self):
+        # Catches: honouring --state to choose the token (so `--state B` quietly becomes B's agent). No server
+        # runs: a listener on the one server's socket records every request that reaches it.
+        import socket as so
+        A, B = self.p["alpha"], self.p["beta"]
+        seen: list[bytes] = []
+        lsn = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+        lsn.bind(str(self.sock))
+        lsn.listen(16)
+        lsn.settimeout(0.2)
+        stop = threading.Event()
+
+        def serve():
+            while not stop.is_set():
+                try:
+                    c, _ = lsn.accept()
+                except OSError:
+                    continue
+                c.settimeout(5)
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = c.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                seen.append(data)
+                c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n"
+                          b"Connection: close\r\n\r\n{}")
+                c.close()
+        th = threading.Thread(target=serve, daemon=True)
+        th.start()
+        try:
+            for args in (("view",), ("health",), ("check",), ("reply", "PUSHED", "hi"), ("working", "PUSHED"),
+                         ("synced",), ("inbox", "--all"), ("watch", "--timeout", "0.2", "--poll", "0.1"),
+                         ("items-push", "--adapter", "console_adapter.py")):
+                r = self.agent_py(A["root"], *args, state=B["state"], check=1)   # in A's root, told B
+                self.assertIn(f"--state {B['state']}", r.stderr, args)
+                self.assertIn(str(A["state"]), r.stderr, args)
+                self.assertIn(str(A["root"]), r.stderr, args)
+                r = self.agent_py(self.t, *args, state=A["state"], check=1)      # outside every root
+                self.assertIn("inside no registered project root", r.stderr, args)
+            self.assertEqual(seen, [])                                    # not one request reached the socket
+            self.assertFalse((B["state"] / "watch.json").exists())         # and B's doorbell was never watched
+            # The control: from each project's own root, its own token on its own path.
+            for name in ("alpha", "beta"):
+                self.agent_py(self.p[name]["root"], "health", state=self.p[name]["state"], check=0)
+                head = seen[-1].decode()
+                self.assertTrue(head.startswith(f"GET /p/{name}/health "), head)
+                self.assertIn(f"Authorization: Bearer {self.tokens[name]}\r\n", head)
+        finally:
+            stop.set()
+            th.join()
+            lsn.close()
+
+    # AC4.6 -------------------------------------------------------------------------------------------------
+
+    def test_ac46_a_doorbell_on_b_wakes_only_bs_watch_and_a_cursor_moves_only_its_own(self):
+        # Catches: both stewards watching one shared inbox, each ignoring the other's lines once woken. Wake exits
+        # are counted per watcher.
+        A, B = self.p["alpha"], self.p["beta"]
+        self.spawn()
+        self.seed_sentinels()
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg)}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        watchers = {}
+        for name, timeout in (("alpha", "8"), ("beta", "60")):
+            v = self.p[name]
+            watchers[name] = subprocess.Popen([sys.executable, str(KIT / "agent.py"), "--state", str(v["state"]),
+                                               "watch", "--timeout", timeout, "--poll", "0.1"], cwd=v["root"],
+                                              env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.monotonic() + 30
+        while not all((v["state"] / "watch.json").exists() for v in (A, B)):   # both are polling
+            self.assertLess(time.monotonic(), deadline, "the watchers never started")
+            time.sleep(0.05)
+        code, out = self.owner("beta", "POST", "/api/message", {"item": "@chat", "text": "only for beta",
+                                                               "intent": "chat", "nonce": "k4chatbeta01"})
+        self.assertEqual(code, 200, out)
+        results = {n: p.communicate(timeout=90) + (p.returncode,) for n, p in watchers.items()}
+        wakes = {n: int(r[2] == 0) for n, r in results.items()}
+        self.assertEqual(wakes, {"alpha": 0, "beta": 1}, results)
+        self.assertEqual(results["alpha"][2], 3)                          # A timed out: nothing for it
+        self.assertIn('"intent": "chat"', results["beta"][0])
+        self.assertFalse((A["state"] / "inbox.jsonl").exists() and (A["state"] / "inbox.jsonl").read_text())
+        # POST /p/alpha/cursor moves A's cursor and working bucket, and nothing of B's.
+        self.agent_py(B["root"], "working", "PUSHED", state=B["state"], check=0)
+        self.agent_py(A["root"], "working", "PUSHED", state=A["state"], check=0)
+        b_before = {f: (B["state"] / f).read_bytes() if (B["state"] / f).exists() else None
+                    for f in ("cursor.json", "working.json", "inbox.jsonl")}
+        a_before = (A["state"] / "working.json").read_bytes()
+        self.agent_py(A["root"], "synced", state=A["state"], check=0)
+        self.assertIsNotNone(json.loads((A["state"] / "cursor.json").read_text())["last_synced_at"])
+        self.assertNotEqual((A["state"] / "working.json").read_bytes(), a_before)
+        self.assertEqual({f: (B["state"] / f).read_bytes() if (B["state"] / f).exists() else None
+                          for f in b_before}, b_before)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
