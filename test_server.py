@@ -2427,6 +2427,43 @@ class SlimReadCliTests(_Live, unittest.TestCase):
             self.assertEqual(AG.main(["--state", str(self.cfg.state), "todo"]), 0)
         self.assertIn('\n  "forks": []', tty.getvalue())
 
+    def test_a_server_one_kit_older(self):
+        # The fix for the defect measured on a live 0.8.8 server: `todo` raised KeyError on its view,
+        # which has no waiting_visuals. The server here builds its view exactly so. Catches: a crash,
+        # and a todo that drops the waiting visual; and, for a view missing what todo cannot derive,
+        # a traceback or a silently empty answer instead of one line naming the version.
+        from unittest import mock
+        req = self.owner_msg(item="LANE.1", intent="visual", text="draw it")
+        real = SV.V.build
+
+        def old_build(*a, **kw):
+            return {k: v for k, v in real(*a, **kw).items() if k != "waiting_visuals"}
+
+        with mock.patch.object(SV.V, "build", old_build):
+            rc, out, err = self.agent_cli("todo")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(json.loads(out)["visuals"], [{"id": req["id"], "item": "LANE.1"}])
+            rc, out, err = self.agent_cli("view", "--item", "LANE.1")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(json.loads(out)["view"]["waiting_visuals"], [{"id": req["id"], "item": "LANE.1"}])
+        self.fork()
+
+        def older_still(*a, **kw):
+            v = real(*a, **kw)
+            return {**v, "forks": {f: {k: x for k, x in d.items() if k != "done"} for f, d in v["forks"].items()}}
+
+        with mock.patch.object(SV.V, "build", older_still):
+            for args in (("todo",), ("view", "--item", "LANE.1"), ("view", "--since", "0")):
+                rc, out, err = self.agent_cli(*args)
+                self.assertEqual((rc, out), (1, ""), args)
+                self.assertNotIn("Traceback", err)
+                said = [ln for ln in err.splitlines() if not ln.startswith("console ")]  # the server's own log
+                self.assertEqual(len(said), 1, err)
+                self.assertTrue(said[0].startswith("refused: "), err)
+                self.assertIn(f"runs kit {SV.__version__}", err)
+                self.assertIn("forks.*.done", err)
+                self.assertIn("restart the console server", err)
+
     def test_view_item_and_answers_since_through_the_cli(self):
         # E2 and E5 at the door. Catches: --item that ignores an unknown item, --since on answers ignored.
         self.owner_msg(item="LANE", text="a note on the parent")

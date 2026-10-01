@@ -170,13 +170,6 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
     chat_owner = max((m["seq"] for m in chat if m["by"] == "owner"), default=0)
     chat_agent = max((m["seq"] for m in chat if m["by"] == "agent"), default=0)
 
-    # A visual request (0.8.0) waits while no stored visual names it as its `request`.
-    drawn = {v["request"] for vs in visuals.values() for v in vs}
-    waiting_visuals = sorted(({"id": m["id"], "item": m["item"], "seq": m["seq"]}
-                              for msgs in threads.values() for m in msgs
-                              if m["by"] == "owner" and m.get("intent") == "visual" and m["id"] not in drawn),
-                             key=lambda w: w["seq"])
-
     total = _roll_up(items, own)
     # A question whose item left the register (a rename with no alias yet, R7) is
     # named under `orphaned` rather than counted: the Inbox badge counts only
@@ -198,7 +191,7 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
         "transcripts": transcripts,
         "visuals": visuals,
         # Slim reads (K1): the visual requests nothing answers yet, oldest first; `todo` reads it from here.
-        "waiting_visuals": [{"id": w["id"], "item": w["item"]} for w in waiting_visuals],
+        "waiting_visuals": waiting_visuals(threads, visuals),
         # The store's sequence number this view was built at (0.7.0): the page's
         # live loop and unread count compare against it.
         "seq": recs[-1]["seq"] if recs else 0,
@@ -212,6 +205,51 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
 # from what the page and `view` say.
 
 FORK_KEYS = ("mode", "focus", "roles", "about_qid", "follow_up_of", "step")
+
+
+def waiting_visuals(threads: Mapping[str, list[dict]], visuals: Mapping[str, list[dict]]) -> list[dict]:
+    """The visual requests (0.8.0) no stored visual names as its `request`, oldest first, as {id, item}.
+
+    The one rule for "a visual request waits": `build` calls it, and so does
+    `todo` on a view from a server built before this field existed.
+    """
+    drawn = {v["request"] for vs in visuals.values() for v in vs}
+    reqs = [m for msgs in threads.values() for m in msgs
+            if m["by"] == "owner" and m.get("intent") == "visual" and m["id"] not in drawn]
+    return [{"id": m["id"], "item": m["item"]} for m in sorted(reqs, key=lambda m: m["seq"])]
+
+
+# What the slim reads need from a server's view. A field added in K1 (waiting_visuals)
+# is not listed: a server older than K1 does not send it, and it is derived from these.
+NEEDED = ("items", "questions", "threads", "forks", "inbox", "awaiting_agent", "orphaned", "chat",
+          "transcripts", "visuals", "seq")
+NEEDED_FORK = ("message", "questions", "kind", "result", "done")
+
+
+class ViewTooOld(ValueError):
+    """The server's view lacks something the slim reads need: it runs an older kit than this client."""
+
+
+def check_view(view: object) -> None:
+    """Raise ViewTooOld naming every field a slim read needs and this view lacks; return when it has them."""
+    if not isinstance(view, dict):
+        raise ViewTooOld("the view is not a JSON object")
+    missing = [k for k in NEEDED if k not in view]
+    if not missing:
+        forks = view["forks"] if isinstance(view["forks"], dict) else {}
+        missing = sorted({f"forks.*.{k}" for f in forks.values() for k in NEEDED_FORK
+                          if not isinstance(f, dict) or k not in f})
+        if not isinstance(view["chat"], dict) or not {"item", "awaiting_agent"} <= set(view["chat"]):
+            missing.append("chat.awaiting_agent")
+    if missing:
+        raise ViewTooOld(f"the view has no {', '.join(missing)}")
+
+
+def _waiting(view: dict) -> list[dict]:
+    """`view.waiting_visuals`, or the same rule run on the view's own records when an older server left it out."""
+    if "waiting_visuals" in view:
+        return view["waiting_visuals"]
+    return waiting_visuals(view["threads"], view["visuals"])
 
 
 def _fork_row(f: dict) -> dict:
@@ -237,7 +275,7 @@ def todo(view: dict) -> dict:
         "awaiting_agent": list(view["awaiting_agent"]),
         "chat": {"awaiting_agent": chat["awaiting_agent"],
                  "reply_to": owner_chat[-1]["id"] if chat["awaiting_agent"] and owner_chat else None},
-        "visuals": [dict(w) for w in view["waiting_visuals"]],
+        "visuals": [dict(w) for w in _waiting(view)],
         "inbox": list(view["inbox"]),
         "seq": view["seq"],
     }
@@ -279,7 +317,7 @@ def item_view(payload: dict, item: str) -> dict:
            "orphaned": [q for q in view["orphaned"] if q in questions],
            "transcripts": {f: t for f, t in view["transcripts"].items() if f in forks},
            "visuals": {i: v for i, v in view["visuals"].items() if i in keep},
-           "waiting_visuals": [w for w in view["waiting_visuals"] if w["item"] in keep],
+           "waiting_visuals": [w for w in _waiting(view) if w["item"] in keep],
            **_filter_tags(view, questions, forks)}
     return {**payload, "view": out, "items": {i: d for i, d in items.items() if i in scope}}
 

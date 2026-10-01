@@ -166,9 +166,40 @@ def _emit(text: str, full: bool, what: str, narrower: str) -> int:
     return 0
 
 
+def _slim_view(state: Path):
+    """The view for a slim read, or an exit code after saying why not.
+
+    The client upgrades with the plugin and the server only when restarted, so
+    the view can come from an older kit. What the slim reads need is checked
+    first; a view lacking it is refused in one line naming the server's version.
+    """
+    out, rc = _get_view(state)
+    if out is None:
+        return None, rc
+    try:
+        V.check_view(out.get("view") if isinstance(out, dict) else None)
+        if not isinstance(out.get("items"), dict):
+            raise V.ViewTooOld("the payload has no items")
+    except V.ViewTooOld as e:
+        try:
+            _code, health = agent_request(state / "agent.sock", "GET", "/health", None)
+            ver = health.get("version", "unknown") if isinstance(health, dict) else "unknown"
+        except OSError:
+            ver = "unknown"
+        print(f"refused: the console server runs kit {ver} and {e}, which this client (kit {_kit_version()}) "
+              f"needs; restart the console server so it runs this kit", file=sys.stderr)
+        return None, 1
+    return out, 0
+
+
+def _kit_version() -> str:
+    from console_kit import __version__
+    return __version__
+
+
 def _view(state: Path, item: str | None, since: int | None, full: bool) -> int:
     """The view, narrowed to an item (E2) and to what changed after a seq (E5), capped (E4)."""
-    out, rc = _get_view(state)
+    out, rc = _slim_view(state)
     if out is None:
         return rc
     if item is not None:
@@ -186,7 +217,7 @@ def _view(state: Path, item: str | None, since: int | None, full: bool) -> int:
 
 def _todo(state: Path, full: bool) -> int:
     """What is waiting on the agent, filtered from the same view the page shows (E1)."""
-    out, rc = _get_view(state)
+    out, rc = _slim_view(state)
     if out is None:
         return rc
     return _emit(_json(V.todo(out["view"])), full, "todo", "`view --item ID` for one item")

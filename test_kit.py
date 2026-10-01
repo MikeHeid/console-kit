@@ -4220,6 +4220,51 @@ class SlimReadTests(Tmp):
         self.assertEqual(v["since"], cut)
 
 
+class SlimReadOlderServerTests(Tmp):
+    """K1 against a server one kit older: the client upgrades with the plugin, the server only on restart.
+
+    A v0.8.8 server's view has no `waiting_visuals`. Catches: a `todo` that crashes on it, and one that
+    answers with an empty `visuals` list, so a waiting picture silently drops out of the session's work.
+    """
+
+    every_waiting_kind = SlimReadTests.every_waiting_kind
+
+    @staticmethod
+    def older(view):
+        return {k: v for k, v in view.items() if k != "waiting_visuals"}
+
+    def test_todo_and_view_item_derive_waiting_visuals_by_the_same_rule(self):
+        st, ids = self.every_waiting_kind()
+        new = V.build(st, ITEMS, lambda c: True)
+        old = self.older(new)
+        V.check_view(old)  # what the slim reads need is all there
+        self.assertEqual(V.todo(old), V.todo(new))
+        self.assertEqual(V.todo(old)["visuals"], [{"id": ids["visual"], "item": "LANE.1.a"}])
+        for item in ("LANE", "LANE.1.a", S.CHAT_ITEM):
+            payload = {"view": new, "items": ITEMS, "cursor": {}}
+            self.assertEqual(V.item_view({**payload, "view": old}, item)["view"]["waiting_visuals"],
+                             V.item_view(payload, item)["view"]["waiting_visuals"])
+        self.assertEqual(V.since(old, 0)["questions"], V.since(new, 0)["questions"])
+
+    def test_the_same_rule_drives_both(self):
+        # A change to the one waiting rule moves the new view and the old-server fallback together.
+        from unittest import mock
+        st, _ = self.every_waiting_kind()
+        with mock.patch.object(V, "waiting_visuals", lambda threads, visuals: [{"id": "x", "item": "LANE"}]):
+            new = V.build(st, ITEMS, lambda c: True)
+            self.assertEqual(V.todo(self.older(new))["visuals"], [{"id": "x", "item": "LANE"}])
+        self.assertEqual(new["waiting_visuals"], [{"id": "x", "item": "LANE"}])
+
+    def test_a_view_missing_what_todo_needs_is_refused_by_name(self):
+        st, _ = self.every_waiting_kind()
+        v = self.older(V.build(st, ITEMS, lambda c: True))
+        no_done = {**v, "forks": {f: {k: x for k, x in d.items() if k != "done"} for f, d in v["forks"].items()}}
+        with self.assertRaisesRegex(V.ViewTooOld, r"forks\.\*\.done"):
+            V.check_view(no_done)
+        with self.assertRaisesRegex(V.ViewTooOld, "visuals"):
+            V.check_view({k: x for k, x in v.items() if k != "visuals"})
+
+
 class SlimSkillTests(unittest.TestCase):
     """AC1.4: the four skills read `todo` or `view --item`, never the whole view."""
 
