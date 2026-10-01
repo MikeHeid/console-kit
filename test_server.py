@@ -3628,6 +3628,58 @@ def page_opens(trace: str, names: tuple[str, ...]) -> tuple[int, list[str]]:
     return safe, unsafe
 
 
+NO_STRACE = "CONSOLE_KIT_NO_STRACE"
+
+
+def need_strace(test: unittest.TestCase) -> None:
+    """Every syscall test starts here. Missing strace FAILS it, so the gap cannot hide as a quiet skip.
+
+    `CONSOLE_KIT_NO_STRACE=1` is the explicit opt-out: the test is then skipped, BY NAME, saying it did not run.
+    """
+    import shutil
+    if shutil.which("strace") is not None:
+        return
+    if os.environ.get(NO_STRACE) == "1":
+        test.skipTest(f"strace is not installed and {NO_STRACE}=1: this syscall test did not run")
+    test.fail(f"strace is not installed, so this syscall test cannot run: install strace, "
+              f"or set {NO_STRACE}=1 to skip it by name")
+
+
+class StraceGateTests(unittest.TestCase):
+    """The syscall tests fail without strace unless explicitly opted out (lane 4 review gap c)."""
+
+    def test_missing_strace_fails_and_the_opt_out_skips_by_name(self):
+        # Catches: the gate skipping where strace is missing, as the K3 and lane 4 syscall tests did, so a
+        # machine without strace reports OK and the dir-fd and AC3.8 assertions never ran.
+        # Every outcome is turned into a value FIRST: a SkipTest escaping assertRaises would skip THIS test,
+        # and a gate that skips would then pass its own test the same quiet way it hides the others.
+        from unittest import mock
+        probe = unittest.TestCase()
+
+        def outcome() -> tuple[str, str]:
+            try:
+                need_strace(probe)
+            except unittest.SkipTest as e:
+                return "skip", str(e)
+            except probe.failureException as e:
+                return "fail", str(e)
+            return "run", ""
+
+        env = {k: v for k, v in os.environ.items() if k != NO_STRACE}
+        with mock.patch("shutil.which", lambda name: None), mock.patch.dict(os.environ, env, clear=True):
+            kind, why = outcome()
+            self.assertEqual(kind, "fail", why)
+            self.assertIn(f"set {NO_STRACE}=1", why)
+            with mock.patch.dict(os.environ, {NO_STRACE: "1"}):
+                kind, why = outcome()
+            self.assertEqual(kind, "skip", why)
+            self.assertIn("did not run", why)
+            with mock.patch.dict(os.environ, {NO_STRACE: "yes"}):   # only the exact opt-out skips
+                self.assertEqual(outcome()[0], "fail")
+        with mock.patch("shutil.which", lambda name: "/usr/bin/strace"):
+            self.assertEqual(outcome(), ("run", ""))                 # present: the test runs
+
+
 AT_CALLS = {"openat": "open", "openat2": "open", "newfstatat": "stat", "statx": "stat", "fstatat64": "stat",
             "mkdirat": "", "unlinkat": "", "renameat": "", "renameat2": "", "readlinkat": ""}
 
@@ -3929,10 +3981,8 @@ class RootConfinementTests(_OneServer, unittest.TestCase):
         # path with a "/") and with O_NOFOLLOW. Catches: a reader that checks safely and then opens by path,
         # which the race above catches only when it happens to lose. NEGATIVE CONTROL: the same parser must
         # flag a plain open() of the same file, or a parser that sees nothing would pass anything.
-        import shutil
         import subprocess
-        if shutil.which("strace") is None:
-            self.skipTest("strace not installed: the syscall half of AC3.8 needs it (the race half runs anyway)")
+        need_strace(self)
         A = self.p["alpha"]
         self.SF.add("alpha", A["state"], "alpha.example.com", AUD, 4901, TEAM, page="race/page.html",
                     registry=self.reg, path=self.sfile)
@@ -4304,10 +4354,8 @@ class OneServerStewardGitTests(_OneServer, unittest.TestCase):
         # through a held folder descriptor, one component at a time, with no link followed. Catches: any one of
         # them done by path, which a symlink swapped in between two calls would redirect. NEGATIVE CONTROL: the
         # same parser must flag path-based calls on the same names, or a parser that sees nothing passes anything.
-        import shutil
         import subprocess
-        if shutil.which("strace") is None:
-            self.skipTest("strace not installed")
+        need_strace(self)
         alpha = self.p["alpha"]
         v1 = git_project(alpha["root"])
         trace = self.t / "steward.strace"

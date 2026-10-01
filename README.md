@@ -453,6 +453,11 @@ old token from the next request.
     .venv/bin/python test_build.py
     CONSOLE_KIT_BROWSER=1 .venv/bin/python test_browser.py   # needs playwright + browsers
 
+`test_server.py`'s syscall tests need `strace`, and FAIL when it is missing,
+so they cannot quietly not run. On a machine without it, set
+`CONSOLE_KIT_NO_STRACE=1` to skip them; each is then reported, by name, as
+not run.
+
 To build the release zip:
 
     python3 build_zip.py --deny-file ~/my-deployment-values.txt
