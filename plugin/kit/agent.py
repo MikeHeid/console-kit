@@ -450,7 +450,7 @@ def _costs(a) -> int:
         return 1
     if bad:
         print(f"note: {bad} malformed line(s) in {a.state / C.FILE} were dropped", file=sys.stderr)
-    print(json.dumps(out, indent=2 if a.action == "show" else None))
+    sys.stdout.write(_json(out))
     return 0
 
 
