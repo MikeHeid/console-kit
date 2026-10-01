@@ -555,24 +555,31 @@ def _costs(a) -> int:
 
 
 def _items_push(a) -> int:
-    """`items-push` (K3): the adapter runs in THIS process; the one server receives its three results as data."""
+    """`items-push` (K3, Q24): the adapter runs in THIS process; the server receives its three results as data.
+
+    Through the door the working directory chose (K4): the one server, with
+    this project's token, or a console's own single server (STATE/agent.sock).
+    Neither server ever runs the adapter itself.
+    """
     from console_kit import fold as FO
-    from console_kit import serverfile as SF
     state = os.path.realpath(a.state)
     door = _door(a.state)
+    found = R.enclosing(a.project)
+    if found is None or found[1].get("state") != state:
+        print(f"refused, nothing sent: {Path(a.project).resolve()} is not a project registered on the console at "
+              f"{state}", file=sys.stderr)
+        return 1
+    root = Path(found[0])
+    if door.project is None and not door.sock.is_socket():   # before the adapter runs: nothing for no server
+        print(f"no console server answers for {state}: no {door.sock}, and server.json hosts no project there; "
+              f"nothing was sent", file=sys.stderr)
+        return 2
     try:
-        found = R.enclosing(a.project)
-        if found is None or found[1].get("state") != state:
-            raise FO.FoldError(f"{Path(a.project).resolve()} is not a project registered on the console at {state}")
-        root = Path(found[0])
-        if door.project is None:
-            raise FO.FoldError(f"server.json hosts no project on the console at {state}; "
-                               f"run `agent.py --state {state} server add NAME …` first")
         adapter = FO.load_adapter(FO.inside(root, a.adapter, "--adapter"))
         board = getattr(adapter, "board", None)
         body = {"items": adapter.items(), "seed_questions": adapter.seed_questions(),
                 "board": board() if callable(board) else None}
-    except (FO.FoldError, SF.ServerFileError) as e:
+    except FO.FoldError as e:
         print(f"refused, nothing sent: {e}", file=sys.stderr)
         return 1
     try:
@@ -722,8 +729,9 @@ def main(argv=None) -> int:
     s.add_argument("action", choices=("collect", "show"))
     s.add_argument("--fork", help="show: the fork record id whose tagged subagents to total")
     s = sub.add_parser("items-push", description="Run this project's adapter HERE, in your own process, and send "
-                       "its items, seed questions and board to the one console server as data (K3, §3.6). The "
-                       "server never runs project code.")
+                       "its items, seed questions and board to the console server as data: the single server or "
+                       "the one server that hosts this console (K3 §3.6, Q24). Neither server ever runs project "
+                       "code. Run it after an upgrade, and whenever the register changes.")
     s.add_argument("--adapter", required=True, help="the adapter, a path inside the project")
     s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
     s = sub.add_parser("history-push", description="Read git HERE, in your own process, for what the console "

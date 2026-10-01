@@ -36,6 +36,7 @@ if not os.environ.get("CONSOLE_KIT_TEST_CONFIG"):
 os.environ.pop("CONSOLE_KIT_AGENT", None)
 from console_kit import server as SV  # noqa: E402
 from console_kit import multiserver as MS  # noqa: E402
+from console_kit import items as IT  # noqa: E402
 
 TEAM = "team.example.cloudflareaccess.com"
 AUD = "a" * 64
@@ -112,7 +113,7 @@ class EarlyRefusalDrainTests(unittest.TestCase):
         cfg.state.mkdir()
         (d / "unused.py").write_text("def items():\n    return {}\ndef seed_questions():\n    return []\n"
                                      "def record(entries, dry_run):\n    return []\n")
-        console = SV.Console(cfg, SV.load_adapter(cfg.adapter))
+        console = SV.Console(cfg, IT.SnapshotAdapter(cfg.state))
         srv = SV.UnixHTTPServer(str(d / "a.sock"), type("H", (SV.AgentHandler,), {"console": console}))
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.server_close)
@@ -146,7 +147,7 @@ class EarlyRefusalDrainTests(unittest.TestCase):
         cfg.state.mkdir()
         (d / "unused.py").write_text("def items():\n    return {}\ndef seed_questions():\n    return []\n"
                                      "def record(entries, dry_run):\n    return []\n")
-        console = SV.Console(cfg, SV.load_adapter(cfg.adapter))
+        console = SV.Console(cfg, IT.SnapshotAdapter(cfg.state))
         srv = SV.UnixHTTPServer(str(d / "a.sock"), type("H", (SV.AgentHandler,), {"console": console}))
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.server_close)
@@ -2864,10 +2865,13 @@ def spawn_scan(top: Path) -> dict[str, list[str]]:
 AUDIT_CHILD = r'''
 import json, sys
 SPAWN = tuple(json.loads(sys.argv[2]))
-spawned = []
+WATCH = json.loads(sys.argv[1]).get("watch")   # Q24: a path no event may name (the project's adapter)
+spawned, touched = [], []
 def hook(event, args):
     if event.startswith(SPAWN):
         spawned.append([event, repr(args)[:300]])
+    if WATCH and WATCH in repr(args):   # import, open, compile, exec, stat ... of the adapter: any at all
+        touched.append([event, repr(args)[:300]])
 sys.addaudithook(hook)
 
 import http.client, os, socket, threading, time
@@ -2913,6 +2917,12 @@ def call(name, fn, *a):
     codes[name] = code
     return body
 
+out["view_before_push"] = call("owner GET /api/view (before push)", owner, "GET", "/api/view")
+# Q24: the server never runs the adapter; the steward ran it and pushes its output, as data.
+call("agent POST /items", agent, "POST", "/items", p.get("items") or
+     {"items": {"LANE": {"title": "a lane", "parent": None, "status": "open"},
+                "LANE.1": {"title": "a phase", "parent": "LANE", "status": "open"}},
+      "seed_questions": [], "board": None})
 call("agent POST /question", agent, "POST", "/question", p["question"])
 a = call("owner POST /api/answer", owner, "POST", "/api/answer",
          {"qid": "LANE.1/Q2", "picks": ["a"], "own_text": "", "nonce": "nogitanswer1"})
@@ -2937,7 +2947,7 @@ call("owner POST /api/message", owner, "POST", "/api/message",
      {"item": "LANE.1", "text": "deliberate", "intent": "fork", "mode": "tighten", "nonce": "nogitfork001"})
 call("owner POST /api/lock-all", owner, "POST", "/api/lock-all", {})
 call("owner POST /api/relock", owner, "POST", "/api/relock", {"qid": "LANE.1/Q2", "nonce": "nogitrelock1"})
-sys.stdout.write(json.dumps({"spawned": spawned, "codes": codes, "out": out}) + "\n")
+sys.stdout.write(json.dumps({"spawned": spawned, "touched": touched, "codes": codes, "out": out}) + "\n")
 sys.stdout.flush()
 os._exit(0)
 '''
@@ -4974,7 +4984,7 @@ class TokenReviewTests(_RawAgent, _OneServer, unittest.TestCase):
                   if isinstance(n, ast.Compare) and isinstance(n.left, ast.Attribute) and n.left.attr == "path"
                   and isinstance(n.comparators[0], ast.Constant)}
         self.assertEqual(MS.POST_ROUTES, served | set(SV.AGENT_ROUTES))
-        self.assertEqual(set(OneServerTests.AGENT_POSTS) - {"/items", "/no-such-route"}, MS.POST_ROUTES)
+        self.assertEqual(set(OneServerTests.AGENT_POSTS) - {"/no-such-route"}, MS.POST_ROUTES)
 
     def test_a_refused_request_is_answered_at_once_and_its_body_drained_within_the_base_deadline(self):
         # Catches: a refusal that waits on the body before answering, and a drain bounded only by the per-read
@@ -5170,6 +5180,264 @@ class TokenReviewTests(_RawAgent, _OneServer, unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertIn("nested too deeply", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
+
+
+# -- Q24 ("items_push_now"): the single server never runs the adapter; items arrive by push only ------------
+
+LANE_ITEMS = {"items": {"LANE": {"title": "a lane", "parent": None, "status": "open"},
+                        "LANE.1": {"title": "a phase", "parent": "LANE", "status": "open"}},
+              "seed_questions": [], "board": None}
+BAD_PUSHES = [   # each refused by the one check, `items.snapshot_problem`, in the same words on both servers
+    [],
+    {"items": {}, "extra": 1},
+    {"seed_questions": []},
+    {"items": {"LANE": {"title": "t", "owner": "x"}}},
+    {"items": {"LANE": {"parent": None}}},
+    {"items": {"LANE": {"title": 5}}},
+    {"items": {"bad id!": {"title": "t"}}},
+    {"items": {}, "seed_questions": [{"text": "no qid"}]},
+    {"items": {}, "board": {"shape": "s", "values": {"k": 1}}},
+]
+MARKER_ADAPTER = ("open({marker!r}, 'w').write('ran')\n"
+                  "def items():\n    return {{'FROM_ADAPTER': {{'title': 'the adapter says', 'parent': None, "
+                  "'status': 'open'}}}}\n"
+                  "def seed_questions():\n    return []\n"
+                  "def record(entries, dry_run):\n    return []\n")
+
+
+def raw_agent(sock: Path, method: str, path: str, data: bytes | None = None,
+              token: str | None = None) -> tuple[int, bytes]:
+    """One agent-door request, answered as (status, raw body bytes): refusals are compared byte for byte.
+
+    `token`: the project's bearer token, which the one server's door requires (K4).
+    """
+    import socket as so
+
+    class Conn(http.client.HTTPConnection):
+        def connect(self):
+            self.sock = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+            self.sock.connect(str(sock))
+
+    c = Conn("localhost", timeout=10)
+    headers = {} if data is None else {"Content-Type": "application/json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    c.request(method, path, body=data, headers=headers)
+    r = c.getresponse()
+    raw = r.read()
+    c.close()
+    return r.status, raw
+
+
+class _SingleServer:
+    """One project's single server (`serve`'s Console and agent door), in this process, adapter configured."""
+
+    def single(self, base: Path) -> SV.Config:
+        root = base / "root"
+        root.mkdir(parents=True)
+        (root / "page.html").write_text(PAGE)
+        self.marker = base / "ADAPTER-RAN"
+        (root / "adapter.py").write_text(MARKER_ADAPTER.format(marker=str(self.marker)))
+        self.scfg = SV.Config(root=root, page=root / "page.html", state=base / "state", adapter=root / "adapter.py",
+                              team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="single")
+        self.start_single()
+        return self.scfg
+
+    def start_single(self):
+        self.sconsole = SV.Console(self.scfg, IT.SnapshotAdapter(self.scfg.state))   # what `serve` builds
+        self.sconsole.seed()
+        self.ssrv = SV.agent_server(self.sconsole)
+        threading.Thread(target=self.ssrv.serve_forever, daemon=True).start()
+        self.addCleanup(self.stop_single)
+
+    def stop_single(self):
+        if getattr(self, "ssrv", None) is not None:
+            self.ssrv.shutdown()
+            self.ssrv.server_close()
+            self.ssrv = None
+
+    def sview(self) -> dict:
+        code, out = SV.agent_request(self.scfg.socket, "GET", "/view")
+        self.assertEqual(code, 200, out)
+        return out
+
+
+class SingleServerItemsTests(_SingleServer, unittest.TestCase):
+    """Q24: the single server never imports or runs the project's adapter; items reach it by push only."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(os.path.realpath(tmp.name))
+        self.single(self.base)
+
+    def test_the_served_server_never_imports_or_runs_the_adapter(self):
+        # AC 1. The real `serve` in a child with an audit hook, an adapter CONFIGURED whose import leaves a marker,
+        # and every route exercised. Catches: `serve` loading the adapter again (at start or on any route), which
+        # runs project code an agent can write in the server's process, outside every jail. The audit records
+        # every event naming the adapter's path (import, open, compile, exec, stat), not only the marker.
+        root = Path(tempfile.mkdtemp(prefix="ck-audit-items-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        v1 = git_project(root)
+        (root / "page.html").write_text(PAGE)
+        marker = root.parent / f"{root.name}-ADAPTER-RAN"
+        self.addCleanup(lambda: marker.unlink(missing_ok=True))
+        (root / "adapter.py").write_text(MARKER_ADAPTER.format(marker=str(marker)))
+        params = {"kit": str(HERE / "plugin" / "kit"), "root": str(root), "host": HOSTNAME,
+                  "question": spec_question(v1), "watch": str(root / "adapter.py")}
+        r = subprocess.run([sys.executable, "-c", AUDIT_CHILD, json.dumps(params), json.dumps(SPAWN_EVENTS)],
+                           capture_output=True, text=True, timeout=120)
+        self.assertFalse(marker.exists(), "the server imported the adapter")   # first: it holds even if the child died
+        self.assertEqual(r.returncode, 0, r.stderr)
+        got = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual(got["touched"], [], "the server touched the adapter's file")
+        self.assertEqual(got["spawned"], [])
+        for name, code in got["codes"].items():   # the routes really ran
+            self.assertLess(code, 500, name)
+        self.assertEqual(got["codes"]["agent POST /items"], 200)
+        before, after = got["out"]["view_before_push"], got["out"]["view"]
+        self.assertEqual((before["items"], before["view"]["items_note"]), ({}, IT.NOT_PUSHED))
+        self.assertEqual((sorted(after["items"]), after["view"]["items_note"]), (["LANE", "LANE.1"], None))
+
+    def test_before_the_first_push_the_board_says_why_it_is_empty(self):
+        # AC 3. Catches: a silent blank (no note), fake items, and a note that outlives the first push. A push
+        # of NO items is a real answer: the board is empty and the note is gone, never shown as "not pushed".
+        out = self.sview()
+        self.assertEqual((out["items"], out["view"]["items_note"]), ({}, IT.NOT_PUSHED))
+        self.assertIn("agent.py items-push", IT.NOT_PUSHED)
+        self.assertIsNone(self.sconsole.board())   # no board pushed: the door's 404, never a 503 "malformed"
+        self.assertEqual(SV.agent_request(self.scfg.socket, "POST", "/items", LANE_ITEMS)[0], 200)
+        out = self.sview()
+        self.assertEqual((out["items"], out["view"]["items_note"]), (LANE_ITEMS["items"], None))
+        self.assertEqual(SV.agent_request(self.scfg.socket, "POST", "/items", {"items": {}})[0], 200)
+        out = self.sview()
+        self.assertEqual((out["items"], out["view"]["items_note"]), ({}, None))
+        self.assertFalse(self.marker.exists())
+
+    def test_items_reach_the_single_server_by_push_only_through_the_one_check(self):
+        # AC 2. The K3 route on the single server's own agent door, refusing as K3 does; unknown keys refused.
+        code, out = SV.agent_request(self.scfg.socket, "POST", "/items", LANE_ITEMS)
+        self.assertEqual((code, out), (200, {"items": 2, "seeds_added": []}))
+        for bad in BAD_PUSHES:
+            code, out = SV.agent_request(self.scfg.socket, "POST", "/items", bad)
+            self.assertEqual((code, out), (400, {"error": IT.snapshot_problem(bad)}), bad)
+        self.assertEqual(self.sview()["items"], LANE_ITEMS["items"])   # every refusal left the push standing
+        seed = {**LANE_ITEMS, "seed_questions": [{"qid": "LANE.1/Q1", "item": "LANE.1", "text": "Seeded?",
+                                                   "kind": "single",
+                                                   "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                                                   "star": None, "valid_if": [], "source": "specs/x.md:1",
+                                                   "by": "agent", "nonce": "itemsseed001"}]}
+        self.assertEqual(SV.agent_request(self.scfg.socket, "POST", "/items", seed), (200, {"items": 2,
+                                                                                        "seeds_added": ["LANE.1/Q1"]}))
+        self.assertFalse(self.marker.exists())
+
+    def test_a_push_survives_a_restart(self):
+        # AC 4. Catches: items held only in memory, so a restart shows the "not pushed" board until the next push.
+        self.assertEqual(SV.agent_request(self.scfg.socket, "POST", "/items", LANE_ITEMS)[0], 200)
+        self.stop_single()
+        self.start_single()
+        out = self.sview()
+        self.assertEqual((out["items"], out["view"]["items_note"]), (LANE_ITEMS["items"], None))
+        mode = os.stat(self.scfg.state / IT.ITEMS).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+
+    def test_a_symlink_planted_where_items_json_goes_is_never_followed(self):
+        # AC 4. Catches: items.json opened or written through a planted link. The link's target holds items the
+        # steward never pushed: they never reach the view, and a push replaces the link, not its target.
+        outside = self.base / "outside.json"
+        outside.write_text(json.dumps({"items": {"OUTSIDE": {"title": "not pushed"}}}))
+        (self.scfg.state / IT.ITEMS).symlink_to(outside)
+        with self.assertRaises(SV.StoreError):
+            IT.SnapshotAdapter(self.scfg.state).items()
+        try:   # refused: today the view's request ends without an answer (as on the one server), never with them
+            raw = raw_agent(self.scfg.socket, "GET", "/view")[1]
+        except http.client.RemoteDisconnected:
+            raw = b""
+        self.assertNotIn(b"OUTSIDE", raw)
+        self.assertEqual(SV.agent_request(self.scfg.socket, "POST", "/items", LANE_ITEMS)[0], 200)
+        self.assertIn("OUTSIDE", outside.read_text())                    # the target is untouched
+        self.assertFalse((self.scfg.state / IT.ITEMS).is_symlink())      # the link itself was replaced
+        self.assertEqual(self.sview()["items"], LANE_ITEMS["items"])
+
+    def test_every_items_file_operation_is_dir_relative_and_follows_no_link(self):
+        # AC 4, the syscall half: under strace, a push, a re-read and a view touch STATE/items.json only as one
+        # component relative to a held STATE descriptor, with no link followed. Catches: any one done by path.
+        need_strace(self)
+        child = self.base / "items_child.py"
+        child.write_text(ITEMS_CHILD)
+        root = self.base / "root2"
+        root.mkdir()
+        (root / "page.html").write_text(PAGE)
+        trace = self.base / "items.strace"
+        r = subprocess.run(["strace", "-f", "-qq", "-e", "trace=%file", "-o", str(trace), sys.executable, str(child),
+                            str(HERE / "plugin" / "kit"), str(root), json.dumps(LANE_ITEMS)],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), ["LANE", "LANE.1"])
+        safe, unsafe = dirfd_ops(trace.read_text(), (IT.ITEMS,))
+        self.assertEqual(unsafe, [])
+        self.assertGreaterEqual(safe, 3)          # a stat, a read and a rename at least
+
+    def test_the_cli_pushes_to_the_single_server_and_the_adapter_runs_in_the_steward(self):
+        # AC 3. The real `agent.py items-push`, a separate process, against the single server's own socket.
+        # The adapter runs THERE (its marker appears, and only after the CLI ran); the server gets its output.
+        from console_kit import registry as R
+        reg = self.base / "cfg" / "console-kit" / "projects.json"
+        R.register(self.scfg.root, self.scfg.state, HERE / "plugin" / "kit", path=reg)
+        env = {**os.environ, "XDG_CONFIG_HOME": str(reg.parent.parent)}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        self.assertFalse(self.marker.exists())
+        r = subprocess.run([sys.executable, str(HERE / "plugin" / "kit" / "agent.py"), "--state",
+                            str(self.scfg.state), "items-push", "--project", str(self.scfg.root),
+                            "--adapter", "adapter.py"], capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"items": 1, "seeds_added": []})
+        self.assertTrue(self.marker.exists())     # it ran, in the steward's process
+        out = self.sview()
+        self.assertEqual((sorted(out["items"]), out["view"]["items_note"]), (["FROM_ADAPTER"], None))
+
+
+ITEMS_CHILD = r'''
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from console_kit import items as IT
+from console_kit import server as SV
+root = Path(sys.argv[2])
+cfg = SV.Config(root=root, page=root / "page.html", state=root / "state", adapter=root / "none.py",
+                team_domain="t.example.com", aud="a" * 64, hostname="h.example.com", port=0)
+c = SV.Console(cfg, IT.SnapshotAdapter(cfg.state))
+c.seed()
+c.push_items(json.loads(sys.argv[3]))
+again = SV.Console(cfg, IT.SnapshotAdapter(cfg.state))   # a restart: read back from STATE
+print(json.dumps(sorted(again.payload()["items"])))
+'''
+
+
+class ItemsParityTests(_OneServer, _SingleServer, unittest.TestCase):
+    """Q24: the same push gives the same answer, byte for byte, on the single server and the one server."""
+
+    def test_the_same_push_gives_the_same_answers_and_the_same_view_on_both_servers(self):
+        # Catches: two validators drifting apart (a refusal worded, coded or decided differently on one server),
+        # and a /view that differs for the same pushed items.
+        self.single(self.t / "single")
+        self.spawn()
+        both = (lambda m, p, d=None: raw_agent(self.scfg.socket, m, p, d),
+                lambda m, p, d=None: raw_agent(self.sock, m, "/p/alpha" + p, d, token=self.tokens["alpha"]))
+        views = [json.loads(door("GET", "/view")[1]) for door in both]
+        self.assertEqual([(v["items"], v["view"]["items_note"]) for v in views], [({}, IT.NOT_PUSHED)] * 2)
+        for body in [*BAD_PUSHES, LANE_ITEMS, {"items": {}, "zzz": [1, 2]}]:
+            data = json.dumps(body).encode()
+            single, one = (door("POST", "/items", data) for door in both)
+            self.assertEqual(single, one, body)
+        self.assertEqual(single[0], 400)          # the last one, after the good push: refused on both
+        views = [json.loads(door("GET", "/view")[1]) for door in both]
+        self.assertEqual(views[0]["items"], LANE_ITEMS["items"])
+        self.assertEqual([(v["items"], v["view"]["items_note"]) for v in views],
+                         [(LANE_ITEMS["items"], None)] * 2)
+        self.stop()
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.p["alpha"]["marker"].exists())
 
 
 if __name__ == "__main__":

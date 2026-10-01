@@ -294,6 +294,7 @@
       const data = await resp.json();
       view = data.view;
       items = data.items;
+      if (liveVer === null && typeof data.ver === 'string') liveVer = data.ver;  // Q24: the first wait has a baseline
       checkPromise = null; // a new view: "why stale" is checked afresh
       cursor = data.cursor;
       noteArrivals();
@@ -762,6 +763,11 @@
 
   // The Inbox tab: rounds to answer as one form each, then loose questions, then what waits on an agent.
   function renderInboxList(body) {
+    // Q24: before the steward's first items-push the server has no items, and says why (F63): never a blank.
+    if (view.items_note) {
+      body.appendChild(el('p', { className: 'ck-items-note', role: 'status',
+        style: 'color: var(--c-fg-muted); padding: 12px 20px;' }, [view.items_note]));
+    }
     const rounds = new Map();
     const loose = [];
     for (const qid of view.inbox || []) {
@@ -3232,6 +3238,12 @@
           else await backoff();
         } else if (data.seq !== since) {
           cursor = data.cursor || cursor;
+        } else if (verChanged && view.items_note) {
+          // Q24: the first items-push moves no store record, only the version; while the page still says
+          // "no items yet", that is the change it is waiting for, so the view is fetched again.
+          cursor = data.cursor || cursor;
+          if (await fetchView()) onLive(false);
+          else await backoff();
         } else if (verChanged && data.cursor) {
           cursor = data.cursor;
           onLive(false);

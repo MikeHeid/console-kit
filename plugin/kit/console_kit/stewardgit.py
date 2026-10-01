@@ -44,11 +44,11 @@ import hashlib
 import json
 import os
 import re
-import stat
 import time
 from pathlib import Path
 
 from . import anchors as A
+from . import atfile as AF
 from . import gitseam as G
 
 DIR = "steward-git"
@@ -150,7 +150,6 @@ def collect(root: Path, want: dict) -> tuple[list[dict], list[dict]]:
 # -- the folders: every operation relative to a held descriptor ---------------------------------
 
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 class _Folders:
@@ -223,39 +222,11 @@ class _Folders:
 
     def read(self, folder: int, name: str, limit: int) -> bytes | None:
         """At most `limit` + 1 bytes of the REGULAR file `name` in `folder`; None when absent or not a plain file."""
-        try:
-            fd = os.open(name, FILE_FLAGS, dir_fd=folder)
-        except OSError as e:
-            if e.errno not in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
-                raise
-            return None   # absent, or a symlink planted in its place: never followed
-        with os.fdopen(fd, "rb") as fh:
-            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
-                return None
-            return fh.read(limit + 1)
+        return AF.read_at(folder, name, limit)
 
     def write(self, folder: int, name: str, data: bytes) -> None:
-        """`name` in `folder`, whole or not at all: a 0600 temporary created O_EXCL, then renamed over it."""
-        for _ in range(16):
-            tmp = ".tmp." + os.urandom(8).hex()
-            try:
-                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
-                             dir_fd=folder)
-                break
-            except FileExistsError:
-                continue
-        else:
-            raise PushError("no temporary name was free; nothing was stored")
-        try:
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(data)
-            os.rename(tmp, name, src_dir_fd=folder, dst_dir_fd=folder)
-        except BaseException:
-            try:
-                os.unlink(tmp, dir_fd=folder)
-            except OSError:
-                pass
-            raise
+        """`name` in `folder`, whole or not at all (`atfile.write_at`, the one writer for STATE's own files)."""
+        AF.write_at(folder, name, data)
 
 
 # -- writing ----------------------------------------------------------------------------------

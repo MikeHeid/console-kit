@@ -1,0 +1,56 @@
+"""Read and write one file relative to a held folder descriptor: never a path looked up again.
+
+The server's own files under STATE (steward-git's blobs and index, the pushed
+items) are read and written through these, so a symlink planted in place of
+the file is refused (O_NOFOLLOW), and nothing is resolved by path after the
+folder was opened.
+"""
+
+from __future__ import annotations
+
+import errno
+import os
+import stat
+
+FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def read_at(folder: int, name: str, limit: int) -> bytes | None:
+    """At most `limit` + 1 bytes of the REGULAR file `name` in `folder`; None when absent or not a plain file."""
+    try:
+        fd = os.open(name, FILE_FLAGS, dir_fd=folder)
+    except OSError as e:
+        if e.errno not in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
+            raise
+        return None   # absent, or a symlink planted in its place: never followed
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            return None
+        return fh.read(limit + 1)
+
+
+def write_at(folder: int, name: str, data: bytes) -> None:
+    """`name` in `folder`, whole or not at all: a 0600 temporary created O_EXCL, then renamed over it.
+
+    On any failure the temporary is removed, relative to the same descriptor.
+    """
+    for _ in range(16):
+        tmp = ".tmp." + os.urandom(8).hex()
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                         dir_fd=folder)
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise FileExistsError(errno.EEXIST, "no temporary name was free")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.rename(tmp, name, src_dir_fd=folder, dst_dir_fd=folder)
+    except BaseException:
+        try:
+            os.unlink(tmp, dir_fd=folder)
+        except OSError:
+            pass
+        raise
