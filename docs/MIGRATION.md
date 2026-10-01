@@ -171,10 +171,19 @@ or, to write it without an editor, put the same text in
     systemctl --user restart <name>-console.service
 
 `WorkingDirectory` can stay the project checkout. The server reads only the
-paths it is given (`--root`, `--page`, `--state`, `--adapter`, and the
-optional usage and account files, which must be absolute), and finds its own
-modules beside its `server.py`. Make sure each of those flags is an absolute
-path in your unit.
+paths it is given (`--root`, `--page`, `--state`, and the optional usage and
+account files, which must be absolute), and finds its own modules beside its
+`server.py`. Make sure each of those flags is an absolute path in your unit.
+
+The server never runs the project's adapter (owner ruling CONSOLE-kit/Q24).
+An `--adapter` flag still in the unit is accepted and ignored, so the unit
+keeps starting. The items come from the steward instead, which runs the
+adapter in its own process and pushes the result. Run this once the server
+is up, and again whenever the register changes:
+
+    python3 <current>/plugin/kit/agent.py --state <state> items-push --project <project> --adapter <adapter path>
+
+Until then the inbox says that items appear when the steward pushes them.
 
 Check it:
 
@@ -328,7 +337,14 @@ Two consequences for the cut-over:
     python3 <current>/plugin/kit/agent.py --state <state> register --project <project>   # each project
     systemctl --user restart <name>-console.service                                       # each project
     python3 <current>/plugin/kit/agent.py --state <state> health                          # the new version
+    python3 <current>/plugin/kit/agent.py --state <state> items-push --project <project> --adapter <adapter path>
     /reload-plugins            # the plugin loads in place from <current>
+
+**The steward pushes the items after an upgrade.** The server no longer runs
+the adapter (CONSOLE-kit/Q24). So after the first upgrade past that change,
+the board has no items until the `items-push` line above runs. The inbox says
+so instead of going blank. The push is kept in the state dir, so later
+restarts keep the items.
 
 Read the release's notes in `INSTALL.md` ("Upgrading to …") first. Some
 releases ask for a step of their own, such as `reanchor` or a
