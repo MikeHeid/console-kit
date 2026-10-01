@@ -95,6 +95,46 @@ def seam_open():
     return mock.patch.object(G, "_OPEN", True)
 
 
+class EarlyRefusalDrainTests(unittest.TestCase):
+    """A refusal sent before the body is read must not cut off a client still sending it (the BrokenPipe flake)."""
+
+    def test_a_body_sent_after_the_refusal_is_read_not_cut_off(self):
+        # Catches: closing the connection right after an early 403/404 with the declared body unread. Python's
+        # http.client sends headers and body in two writes; on a Unix socket the second then fails with EPIPE.
+        # Here the body is sent only AFTER the whole refusal arrived, which makes that race certain, not rare.
+        import socket as so
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = Path(tmp.name)
+        (d / "page.html").write_text(PAGE)
+        cfg = SV.Config(root=d, page=d / "page.html", state=d / "state", adapter=d / "unused.py",
+                        team_domain="t.example.com", aud=AUD, hostname=HOSTNAME, port=0)
+        cfg.state.mkdir()
+        (d / "unused.py").write_text("def items():\n    return {}\ndef seed_questions():\n    return []\n"
+                                     "def record(entries, dry_run):\n    return []\n")
+        console = SV.Console(cfg, SV.load_adapter(cfg.adapter))
+        srv = SV.UnixHTTPServer(str(d / "a.sock"), type("H", (SV.AgentHandler,), {"console": console}))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        body = b'{"x": 1}'
+        s = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+        s.settimeout(10)
+        s.connect(str(d / "a.sock"))
+        s.sendall(b"POST /no-such-route HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                  b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n")
+        got = b""
+        while b"\r\n\r\n" not in got or not got.endswith(b"}"):
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            got += chunk
+        self.assertTrue(got.startswith(b"HTTP/1.0 404") or got.startswith(b"HTTP/1.1 404"), got[:40])
+        time.sleep(0.2)                                   # the server has answered; is it still listening?
+        s.sendall(body)                                   # EPIPE here when it closed without reading
+        s.close()
+
+
 class ServerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

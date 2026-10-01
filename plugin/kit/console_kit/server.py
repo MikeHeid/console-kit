@@ -1049,6 +1049,25 @@ class _Handler(BaseHTTPRequestHandler):
     sys_version = ""
     timeout = 30  # seconds per socket read, so a stalled client cannot hold a thread for ever
     max_body = MAX_BODY
+    _body_taken = False
+
+    def finish(self) -> None:
+        """Read a body no route read (an early refusal: 403, 404, 415) before the connection closes.
+
+        A client may send its body after its headers, in a second write; closing
+        with that write still coming makes it fail with EPIPE instead of reading
+        the answer it was sent. Only a body within `max_body` is read: a larger
+        one is refused unread, as `_body` refuses it.
+        """
+        try:
+            raw = self.headers.get("Content-Length") if getattr(self, "headers", None) is not None else None
+            if not self._body_taken and raw and re.fullmatch(r"[0-9]{1,12}", raw.strip()) \
+                    and 0 < int(raw) <= self.max_body:
+                self.rfile.read(int(raw))
+        except OSError:
+            pass   # the client went away: nothing to protect
+        finally:
+            super().finish()
 
     def _send_raw(self, code: int, data: bytes, ctype: str, csp: str) -> None:
         """A body that is not JSON, under its own Content-Security-Policy (0.8.0, a stored visual)."""
@@ -1086,6 +1105,7 @@ class _Handler(BaseHTTPRequestHandler):
         n = int(raw)
         if n > self.max_body:
             raise RequestError(413, f"the body is over {self.max_body} bytes")
+        self._body_taken = True
         try:
             return json.loads(self.rfile.read(n) or b"null")
         except ValueError:
