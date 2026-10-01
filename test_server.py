@@ -10,11 +10,13 @@ so no test reaches the network.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import http.client
 import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -2902,6 +2904,289 @@ class NoServerGitTests(_Live, unittest.TestCase):
         [refine] = [t for t in tags["questions"]["LANE.1/Q2"] if t["step"] == "refine"]
         self.assertIn("(last commit ", refine["reason"])
         self.assertNotIn(NOGIT, refine["reason"])
+
+
+# -- K3: the one server, run as its own process (an audit hook cannot be removed, and a kill -9 needs one) ---
+
+ONE_SERVER = r'''
+import json, os, sys
+kit, server_file, sock, pem, audit_log, roots = sys.argv[1:7]
+roots = [r.rstrip("/") + "/" for r in roots.split(",") if r]
+log = open(audit_log, "a", buffering=1)
+armed = [False]
+SPAWN = {"subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "os.forkpty"}
+import sysconfig
+TRUSTED = tuple(os.path.realpath(sysconfig.get_paths()[k]) + "/" for k in ("stdlib", "platstdlib", "purelib",
+                                                                           "platlib")) + (os.path.realpath(kit) + "/",)
+
+def under(p):
+    try:
+        p = os.path.realpath(os.fsdecode(p))
+    except Exception:
+        return False
+    return any((p + "/").startswith(r) for r in roots)
+
+def hook(event, args):
+    why = None
+    if event in SPAWN:
+        why = f"{event} {args[:2]!r}"
+    elif event == "import" and len(args) > 1 and args[1] and under(args[1]):
+        why = f"import {args[0]} from {args[1]}"
+    elif event == "open" and isinstance(args[0], (str, bytes)) and os.fsdecode(args[0]).endswith(".py") \
+            and under(args[0]):
+        why = f"open {os.fsdecode(args[0])}"
+    elif event == "compile" and len(args) > 1 and isinstance(args[1], (str, bytes)) and under(args[1]):
+        why = f"compile {args[1]}"
+    elif event in ("compile", "exec") and armed[0]:
+        # While serving, code may come only from the interpreter's own library (a lazy stdlib import, e.g.
+        # _strptime on first use) or the kit. A string ("<string>") or any other file is flagged: that is
+        # how an importer that reads the adapter's source and execs it would show.
+        code = args[0]
+        name = getattr(code, "co_filename", None) or (args[1] if len(args) > 1 else None)
+        name = os.fsdecode(name) if isinstance(name, (str, bytes)) else "<unknown>"
+        if not any(name.startswith(p) for p in TRUSTED):
+            why = f"{event} while serving: {name} {getattr(code, 'co_name', '')}"
+    if why:
+        log.write(why + "\n")
+
+sys.addaudithook(hook)
+sys.path.insert(0, kit)
+from console_kit import multiserver as MS
+from console_kit import server as SV
+from cryptography.hazmat.primitives import serialization
+pub = serialization.load_pem_public_key(open(pem, "rb").read())
+r = MS.start(server_file, sock, verify_for=lambda aud: SV.access_verifier("team.example.cloudflareaccess.com", aud,
+             key_for=lambda t: pub), port_for=lambda h: 0)
+armed[0] = True
+print(json.dumps({"ports": r.ports(), "refused": r.ms.refused(), "stores": len(r.ms.stores())}), flush=True)
+sys.stdin.read()
+r.shutdown()
+'''
+
+
+class OneServerTests(unittest.TestCase):
+    """K3 step 3: the one server's doors, items-push, and its rules (AC3.3, AC3.5, AC3.6)."""
+
+    def setUp(self):
+        import test_kit as TK
+        from console_kit import serverfile as SF
+        from console_kit import registry as R
+        from cryptography.hazmat.primitives import serialization
+        self.TK, self.SF, self.R = TK, SF, R
+        self.tmp = tempfile.TemporaryDirectory()
+        self.t = Path(os.path.realpath(self.tmp.name))
+        self.cfg = self.t / "cfg"
+        self.reg = self.cfg / "console-kit" / "projects.json"
+        self.sfile = self.reg.parent / "server.json"
+        self.sock = self.sfile.parent / "server.sock"          # where agent.py looks for the one server
+        self.audit = self.t / "audit.log"
+        self.pem = self.t / "pub.pem"
+        self.pem.write_bytes(KEY.public_key().public_bytes(serialization.Encoding.PEM,
+                                                             serialization.PublicFormat.SubjectPublicKeyInfo))
+        self.p = {}
+        for i, name in enumerate(("alpha", "beta")):
+            root, state = self.t / f"root-{name}", self.t / f"state-{name}"
+            root.mkdir()
+            state.mkdir()
+            (root / "index.html").write_text(f"<!doctype html><html><body>{name} board</body></html>\n")
+            marker = self.t / f"ADAPTER-RAN-{name}"
+            # The project's adapter: if anything in the server imports or runs it, the marker appears.
+            (root / "console_adapter.py").write_text(
+                f"open({str(marker)!r}, 'w').write('ran')\n"
+                "def items():\n    return {'FROM_ADAPTER': {'title': 'the adapter says', 'parent': None, "
+                "'status': 'open'}}\n"
+                "def seed_questions():\n    return []\n"
+                "def record(entries, dry_run):\n    return []\n")
+            R.register(root, state, HERE / "plugin" / "kit", path=self.reg)
+            SF.add(name, state, f"{name}.example.com", AUD, 4901 + i, TEAM, registry=self.reg, path=self.sfile)
+            self.p[name] = {"root": root, "state": state, "marker": marker}
+        self.proc = None
+
+    def tearDown(self):
+        self.stop()
+        self.tmp.cleanup()
+
+    def spawn(self, script=ONE_SERVER):
+        roots = ",".join(str(v["root"]) for v in self.p.values())
+        self.proc = subprocess.Popen([sys.executable, "-c", script, str(HERE / "plugin" / "kit"),
+                                      str(self.sfile), str(self.sock), str(self.pem), str(self.audit), roots],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True, env={**os.environ, "XDG_CONFIG_HOME": str(self.cfg)})
+        line = self.proc.stdout.readline()
+        if not line:
+            raise AssertionError(f"the one server did not start: {self.proc.stderr.read()}")
+        self.info = json.loads(line)
+        return self.info
+
+    def stop(self, kill=False):
+        if self.proc is None:
+            return
+        if kill:
+            self.proc.kill()
+            self.proc.communicate(timeout=60)
+        else:
+            self.proc.communicate(input="", timeout=60)
+        self.proc = None
+
+    def agent(self, method, path, body=None):
+        return SV.agent_request(self.sock, method, path, body)
+
+    def owner(self, name, method, path, body=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.info["ports"][name], timeout=30)
+        h = {"Cf-Access-Jwt-Assertion": token()}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            h.update({"Content-Type": "application/json", "Origin": f"https://{name}.example.com"})
+        conn.request(method, path, body=data, headers=h)
+        r = conn.getresponse()
+        raw = r.read()
+        conn.close()
+        try:
+            return r.status, json.loads(raw)
+        except ValueError:
+            return r.status, raw.decode()
+
+    def push(self, name, items=None):
+        items = items if items is not None else {"PUSHED": {"title": "pushed", "parent": None, "status": "open"}}
+        return self.agent("POST", f"/p/{name}/items", {"items": items, "seed_questions": [], "board": None})
+
+    def question(self, item, n, name="alpha"):
+        return self.agent("POST", f"/p/{name}/question", {
+            "qid": f"{item}/Q{n}", "item": item, "text": "Which?", "kind": "single",
+            "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}], "star": "b", "valid_if": [],
+            "source": "index.html:1", "nonce": f"k3q{item.lower()}{name}{n:04d}"})
+
+    def violations(self):
+        return self.audit.read_text().splitlines() if self.audit.exists() else []
+
+    def test_ac35_no_project_code_and_items_only_from_the_push(self):
+        # Catches: importing the adapter (or reading its source and exec-ing a string), spawning git or anything
+        # else, and validating writes against the adapter rather than the pushed snapshot.
+        info = self.spawn()
+        self.assertEqual(info["refused"], {})
+        for name in ("alpha", "beta"):
+            self.assertEqual(self.push(name)[0], 200)
+            code, out = self.question("FROM_ADAPTER", 1, name)
+            self.assertEqual(code, 400, out)                       # the adapter's item is not the pushed one
+            self.assertEqual(self.question("PUSHED", 1, name)[0], 200)
+            for path in ("/view", "/check", "/health"):
+                self.assertIn(self.agent("GET", f"/p/{name}{path}")[0], (200, 503), path)
+            for path, body in (("/message", {"item": "PUSHED", "text": "hi", "nonce": f"k3msg{name}01"}),
+                               ("/cursor", {"last_synced_at": "2026-10-01T00:00:00Z", "last_error": None}),
+                               ("/working", {"items": ["PUSHED"]}), ("/reanchor", {"dry_run": True})):
+                self.assertEqual(self.agent("POST", f"/p/{name}{path}", body)[0], 200, path)
+            for path in ("/", "/api/view", "/api/check", "/api/board", "/api/usage", "/api/feed",
+                         "/api/wait?since=0&timeout=0", "/api/evidence?qid=PUSHED/Q1"):
+                self.assertIn(self.owner(name, "GET", path)[0], (200, 404), path)
+            self.assertEqual(self.owner(name, "POST", "/api/message", {"item": "PUSHED", "text": "owner",
+                                                                       "nonce": f"k3own{name}01"})[0], 200)
+            view = self.agent("GET", f"/p/{name}/view")[1]
+            self.assertEqual(view["view"]["tags"]["git"], NOGIT)   # labelled (F63), the key the page renders
+        self.assertEqual(self.agent("GET", "/p/alpha/check")[1]["history"], NOGIT)
+        health = self.agent("GET", "/health")
+        self.assertEqual(health[0], 200)
+        self.assertNotIn("alpha", json.dumps(health[1]))        # it names no project
+        self.stop()
+        self.assertEqual(self.violations(), [])
+        for v in self.p.values():
+            self.assertFalse(v["marker"].exists())
+        # The negative control: the same hook DOES see an adapter run and a git spawn in its process.
+        probe = self.t / "probe.py"
+        probe.write_text("import runpy, subprocess, sys\nrunpy.run_path(sys.argv[8])\n"
+                         "subprocess.run(['git', '--version'], capture_output=True)\n")
+        ctl = ONE_SERVER.split("sys.path.insert(0, kit)")[0] + "exec(open(sys.argv[7]).read())\n"
+        ctl_log = self.t / "audit-control.log"
+        r = subprocess.run([sys.executable, "-c", ctl, "k", "s", "x", "p", str(ctl_log), str(self.p["alpha"]["root"]),
+                            str(probe), str(self.p["alpha"]["root"] / "console_adapter.py")],
+                           capture_output=True, text=True, timeout=60)
+        seen = ctl_log.read_text()
+        self.assertIn("console_adapter.py", seen, r.stderr)
+        self.assertIn("subprocess.Popen", seen)
+
+    def test_the_seam_is_the_only_admission_point(self):
+        # K4 replaces `authorize` alone: refusing there must refuse every route of every project, and an
+        # unknown project must look exactly like a refused one.
+        self.spawn()
+        self.assertEqual(self.agent("GET", "/p/nobody/view"), (403, {"error": "forbidden"}))
+        self.assertEqual(self.agent("GET", "/p/alpha/view")[0], 200)
+        src = (HERE / "plugin" / "kit" / "console_kit" / "multiserver.py").read_text()
+        self.assertEqual(src.count("authorize("), 2)          # its definition and its one call
+        body = src.split("def _project(self)")[1].split("def do_GET")[0]
+        self.assertIn("authorize(name, self.headers)", body)
+        self.stop()
+        self.spawn(ONE_SERVER.replace("r = MS.start(", "MS.authorize = lambda project, headers: False\nr = MS.start("))
+        for name in ("alpha", "beta"):
+            for m, path in (("GET", "/view"), ("GET", "/check"), ("POST", "/items"), ("POST", "/message")):
+                self.assertEqual(self.agent(m, f"/p/{name}{path}", {} if m == "POST" else None),
+                                 (403, {"error": "forbidden"}), (name, path))
+        self.assertEqual(self.agent("GET", "/health")[0], 200)
+
+    def test_ac36_one_bad_store_is_503_there_and_a_kill_loses_nothing_acknowledged(self):
+        # Catches: a server that refuses to start for one project's fault, and a restart test that writes nothing.
+        (self.p["beta"]["state"] / "store.jsonl").write_text('{"not": "a record"}\n')
+        info = self.spawn()
+        self.assertEqual(list(info["refused"]), ["beta"])
+        for code, out in (self.agent("GET", "/p/beta/view"), self.owner("beta", "GET", "/api/view")):
+            self.assertEqual(code, 503)
+            self.assertIn("beta's console cannot open", out["error"])
+        self.assertEqual(self.owner("alpha", "GET", "/api/view")[0], 200)
+        self.assertEqual(self.push("alpha")[0], 200)
+        seqs = []
+        for n in (1, 2):
+            code, out = self.question("PUSHED", n)
+            self.assertEqual(code, 200, out)
+            seqs.append(out["record"]["seq"])
+        store = self.p["alpha"]["state"] / "store.jsonl"
+        held = store.read_bytes()
+        self.stop(kill=True)                                  # SIGKILL: no shutdown code runs
+        self.assertEqual(store.read_bytes(), held)            # both acknowledged writes are on disk
+        self.spawn()
+        code, out = self.question("PUSHED", 3)
+        self.assertEqual(code, 200, out)
+        self.assertEqual(out["record"]["seq"], seqs[-1] + 1)   # seq continues
+        self.assertTrue(store.read_bytes().startswith(held))  # append-only across the kill
+
+    def test_ac33_a_fixture_copy_keeps_its_bytes_and_every_released_kit_starts_on_it_after(self):
+        # Catches: hashing the live dir, and never starting the old kit afterwards (a new file it refuses
+        # would go unseen until a rollback was needed).
+        import shutil
+        made = self.t / "made-by-old"
+        kits = {tag: self.TK.old_kit(tag, self.t / f"kit-{tag}", ("plugin/kit",))
+                for tag in self.TK.released_single_store_tags()}
+        self.TK.start_old_server(kits[sorted(kits)[0]], self.t / "work-make", made, stay=False)
+        fixture = self.p["alpha"]["state"]
+        shutil.rmtree(fixture)
+        shutil.copytree(made, fixture)                        # a COPY: every command runs against it
+        files = ("store.jsonl", "names.jsonl", "inbox.jsonl")
+        before = {f: hashlib.sha256((fixture / f).read_bytes()).hexdigest() for f in files if (fixture / f).exists()}
+        self.assertIn("store.jsonl", before)
+        (self.p["alpha"]["root"] / "console_adapter.py").write_text(
+            "def items():\n    return {'LANE': {'title': 'a lane', 'parent': None, 'status': 'open'}}\n"
+            "def seed_questions():\n    return []\n"
+            "def record(entries, dry_run):\n    return []\n")
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg), "PYTHONDONTWRITEBYTECODE": "1"}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        agent_py = str(HERE / "plugin" / "kit" / "agent.py")
+        r = subprocess.run([sys.executable, agent_py, "--state", str(fixture), "server", "add", "alpha", "--hostname",
+                            "alpha.example.com", "--aud", AUD, "--port", "4901", "--team-domain", TEAM],
+                           capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.spawn()
+        r = subprocess.run([sys.executable, agent_py, "--state", str(fixture), "items-push", "--adapter",
+                            "console_adapter.py", "--project", str(self.p["alpha"]["root"])],
+                           capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for path in ("/view", "/check", "/health"):
+            self.assertEqual(self.agent("GET", f"/p/alpha{path}")[0], 200, path)
+        self.assertEqual(self.owner("alpha", "GET", "/api/view")[0], 200)
+        self.stop()
+        after = {f: hashlib.sha256((fixture / f).read_bytes()).hexdigest() for f in files if (fixture / f).exists()}
+        self.assertEqual(after, before)
+        self.assertTrue((fixture / "server.lock").exists())
+        self.assertTrue((fixture / "items.json").exists())
+        for tag, kit in kits.items():                          # the rollback: every released kit starts on it
+            self.TK.start_old_server(kit, self.t / f"work-{tag}", fixture, stay=False)
 
 
 if __name__ == "__main__":

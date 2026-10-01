@@ -27,24 +27,38 @@ What this process holds, and the rules it keeps:
 
 from __future__ import annotations
 
+import argparse
 import errno
 import fcntl
 import json
 import os
+import re
 import socket
+import stat
+import sys
+import tempfile
 import threading
 from dataclasses import dataclass, field
+from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import Callable
 
+from . import gitseam as G
 from . import projectcfg as PC
 from . import names as N
+from . import schema as S
 from . import serverfile as SF
+from . import server as SV
 from .store import StoreError
 
 LOCK = "server.lock"
 ITEMS = "items.json"
 OLD_SOCKET = "agent.sock"
+SOCKET = "server.sock"
 MAX_ITEMS = 4 << 20
+MAX_ITEM_COUNT = 10_000
+PROJECT_PATH = re.compile(r"^/p/([a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31})(/[^?#]*)\Z")
+FORBIDDEN = {"error": "forbidden"}   # one body for every refusal at the agent door: it names nothing (§3.5)
 
 
 class SnapshotAdapter:
@@ -139,9 +153,61 @@ def _take_lock(state: Path) -> int:
     return fd
 
 
+class ProjectConsole(SV.Console):
+    """One project's console on the one server: today's Console, items pushed as data.
+
+    What git would have given is labelled by Console itself once the seam is
+    closed (`tags.git`, `check.history`, `reanchor.history`, F63), the same keys
+    the page renders for a single-project server: nothing here adds a second label.
+    """
+
+    def board(self) -> dict | None:
+        """None (the door's 404) until a push carries a board; a pushed one is checked as the adapter's was."""
+        if self.adapter.board() is None:
+            return None
+        return super().board()
+
+    def push_items(self, body: object) -> dict:
+        """`items-push` (§3.6): the steward's adapter output, as data. Kept in STATE/items.json, then seeded."""
+        if not isinstance(body, dict) or set(body) - {"items", "seed_questions", "board"} or "items" not in body:
+            raise SV.RequestError(400, 'items-push sends {"items": {...}, "seed_questions": [...], "board": ...}')
+        items, seeds, board = body["items"], body.get("seed_questions", []), body.get("board")
+        if (not isinstance(items, dict) or len(items) > MAX_ITEM_COUNT
+                or not all(isinstance(k, str) and len(k) <= 128 and S.ITEM_ID.match(k) and isinstance(v, dict)
+                           for k, v in items.items())):
+            raise SV.RequestError(400, f"items is an object of at most {MAX_ITEM_COUNT} item ids, each an object")
+        if not isinstance(seeds, list) or not all(isinstance(q, dict) for q in seeds):
+            raise SV.RequestError(400, "seed_questions is a list of question objects")
+        if board is not None and not (isinstance(board, dict) and isinstance(board.get("shape"), str)
+                                      and isinstance(board.get("values"), dict)
+                                      and all(isinstance(k, str) and isinstance(v, str)
+                                              for k, v in board["values"].items())):
+            raise SV.RequestError(400, "board is null or {shape: str, values: {str: str}}")
+        data = json.dumps({"items": items, "seed_questions": seeds, "board": board}, sort_keys=True).encode()
+        if len(data) > MAX_ITEMS:
+            raise SV.RequestError(413, f"the pushed items are over {MAX_ITEMS} bytes")
+        state = self.cfg.state
+        fd, tmp = tempfile.mkstemp(dir=state, prefix=".items.", suffix=".tmp")   # 0600 from creation
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, state / ITEMS)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        try:
+            added = self.seed()
+        except StoreError as e:   # a pushed seed the store refuses: the items stand, the seed is named
+            raise SV.RequestError(400, f"items kept; a seed question was refused: {e}") from None
+        self._bump()
+        return {"items": len(items), "seeds_added": added}
+
+
 def open_project(name: str, entry: dict, team_domain: str) -> Hosted:
     """Open one project's console, or return it refused with the reason. Never raises for a project fault."""
-    from . import server as SV   # imported here: server.py imports nothing from this module
     h = Hosted(name, entry)
     problems = SF.entry_problems(name, entry)
     if problems:
@@ -166,7 +232,7 @@ def open_project(name: str, entry: dict, team_domain: str) -> Hosted:
                     team_domain=team_domain, aud=entry["aud"], hostname=entry["hostname"], port=entry["port"],
                     project=name)
     try:
-        h.console = SV.Console(cfg, SnapshotAdapter(state))
+        h.console = ProjectConsole(cfg, SnapshotAdapter(state))
         h.console.seed()
     except (StoreError, PC.ConfigError, N.NamesError, OSError, ValueError) as e:
         h.console = None
@@ -197,3 +263,165 @@ class MultiServer:
     def close(self) -> None:
         for h in self.projects.values():
             h.close()
+
+
+# -- the doors ---------------------------------------------------------------------------------
+
+def authorize(project: str, headers) -> bool:
+    """THE ONE ADMISSION POINT of the agent door: may this request act on `project`?
+
+    K3: yes for any caller on the user-only socket, which is the trust today's
+    per-project agent.sock has. K4 replaces this function, and only this
+    function, with the project token check (§3.5). Every /p/ route passes here
+    first; a test pins that refusing here refuses every route of every project.
+    """
+    return True
+
+
+class MultiAgentHandler(SV.AgentHandler):
+    """The one agent socket: `/p/<project>/<route>` reaches that project's console and nothing else."""
+
+    multi: "MultiServer"
+
+    def _project(self) -> Hosted | None:
+        m = PROJECT_PATH.match(self.path)
+        name = m.group(1) if m else None
+        h = self.multi.projects.get(name) if name else None
+        if name is None or not authorize(name, self.headers) or h is None:
+            self._send(403, FORBIDDEN)   # an unknown project and a refused one look the same
+            return None
+        if h.fault is not None:
+            self._send(503, {"error": f"{name}: {h.fault}"})
+            return None
+        self.console = h.console      # this request's project, for every route the handler already has
+        self.path = m.group(2)
+        return h
+
+    def do_GET(self) -> None:
+        if self.path == "/health":    # no token: the server's own liveness, naming no project (§3.5)
+            return self._send(200, {"ok": True, "server": "console-kit", "version": SV.__version__})
+        if self._project() is not None:
+            super().do_GET()
+
+    def do_POST(self) -> None:
+        if self._project() is None:
+            return
+        if self.path == "/items":
+            try:
+                return self._send(200, self.console.push_items(self._body()))
+            except SV.RequestError as e:
+                return self._send(e.code, {"error": str(e)})
+        super().do_POST()
+
+
+class FaultOwnerHandler(SV._Handler):
+    """A refused project's owner door: past the same Access gate, every request is 503 with the reason."""
+
+    verify: Callable[[str | None], dict]
+    fault: str
+
+    def _dispatch(self) -> None:
+        try:
+            self.verify(self.headers.get("Cf-Access-Jwt-Assertion"))
+        except SV.AuthError as e:
+            return self._send(403, {"error": str(e)})
+        self._send(503, {"error": self.fault})
+
+    do_GET = do_POST = do_HEAD = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _dispatch
+
+
+def socket_path(server_file: Path) -> Path:
+    return Path(server_file).parent / SOCKET
+
+
+def _agent_server(ms: "MultiServer", path: Path) -> SV.UnixHTTPServer:
+    if len(os.fsencode(path)) > SV.SOCKET_PATH_MAX:
+        raise SystemExit(f"the agent socket path {path} is over {SV.SOCKET_PATH_MAX} bytes")
+    if path.exists() or path.is_symlink():
+        if not stat.S_ISSOCK(path.lstat().st_mode):
+            raise SystemExit(f"{path} exists and is not a socket; refusing to replace it")
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.connect(str(path))
+            raise SystemExit(f"another console server answers on {path}")
+        except OSError:
+            pass
+        finally:
+            probe.close()
+        path.unlink()
+    old = os.umask(0o177)
+    try:
+        srv = SV.UnixHTTPServer(str(path), type("BoundMultiAgentHandler", (MultiAgentHandler,), {"multi": ms}))
+    finally:
+        os.umask(old)
+    os.chmod(path, 0o600)
+    return srv
+
+
+@dataclass
+class Running:
+    ms: MultiServer
+    agent: SV.UnixHTTPServer
+    socket: Path
+    owners: dict[str, ThreadingHTTPServer]
+
+    def ports(self) -> dict[str, int]:
+        return {n: s.server_address[1] for n, s in self.owners.items()}
+
+    def shutdown(self) -> None:
+        for s in (self.agent, *self.owners.values()):
+            s.shutdown()
+            s.server_close()
+        self.socket.unlink(missing_ok=True)
+        self.ms.close()
+
+
+def start(server_file: Path | None = None, sock: Path | None = None,
+          verify_for: Callable[[str], Callable[[str | None], dict]] | None = None,
+          port_for: Callable[[Hosted], int] | None = None) -> Running:
+    """Open every project and start every door, each serving in its own threads. Closes the git seam first."""
+    G.close()   # this process holds every project's store: no git, i.e. no project-controlled program, runs here
+    sf = Path(server_file or SF.location())
+    ms = MultiServer(sf)
+    verify_for = verify_for or (lambda aud: SV.access_verifier(ms.team_domain, aud))
+    port_for = port_for or (lambda h: h.entry["port"])
+    path = Path(sock or socket_path(sf))
+    agent = _agent_server(ms, path)
+    threading.Thread(target=agent.serve_forever, daemon=True).start()
+    owners = {}
+    for name, h in ms.projects.items():
+        if not isinstance(h.entry, dict) or not isinstance(h.entry.get("aud"), str):
+            continue   # no gate can be built for an entry this broken; its refusal is on the agent door
+        verify = verify_for(h.entry["aud"])
+        if h.console is not None:
+            srv = SV.owner_server(h.console, verify, port_for(h))
+        else:
+            handler = type("BoundFaultOwnerHandler", (FaultOwnerHandler,),
+                           {"verify": staticmethod(verify), "fault": f"{name}: {h.fault}"})
+            srv = ThreadingHTTPServer((SV.HOST, port_for(h)), handler)
+            srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        owners[name] = srv
+    return Running(ms, agent, path, owners)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="The one console server: every project in server.json (K3). "
+                                 "K3 alone must never be deployed; K4 adds the token check.")
+    ap.add_argument("--all", action="store_true", required=True, help="serve every project in server.json")
+    ap.add_argument("--server-file", type=Path, help="default: server.json beside your registry")
+    ap.add_argument("--socket", type=Path, help="the agent socket (default: server.sock beside server.json)")
+    a = ap.parse_args(argv)
+    r = start(a.server_file, a.socket)
+    for name, h in r.ms.projects.items():
+        line = f"serving on port {r.ports().get(name)}" if h.fault is None else f"REFUSED: {h.fault}"
+        sys.stderr.write(f"console-server: {name}: {line}\n")
+    sys.stderr.write(f"console-server: agent door {r.socket}\n")
+    sys.stderr.flush()
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        r.shutdown()
+    return 0

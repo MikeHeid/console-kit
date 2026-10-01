@@ -463,6 +463,41 @@ def _costs(a) -> int:
     return 0
 
 
+def _items_push(a) -> int:
+    """`items-push` (K3): the adapter runs in THIS process; the one server receives its three results as data."""
+    from console_kit import fold as FO
+    from console_kit import serverfile as SF
+    from console_kit.multiserver import socket_path
+    state = os.path.realpath(a.state)
+    try:
+        found = R.enclosing(a.project)
+        if found is None or found[1].get("state") != state:
+            raise FO.FoldError(f"{Path(a.project).resolve()} is not a project registered on the console at {state}")
+        root = Path(found[0])
+        names = [n for n, e in SF.load()["projects"].items() if isinstance(e, dict) and e.get("state") == state]
+        if len(names) != 1:
+            raise FO.FoldError(f"server.json hosts {len(names)} projects on the console at {state}; "
+                               f"run `agent.py --state {state} server add NAME …` first")
+        adapter = FO.load_adapter(FO.inside(root, a.adapter, "--adapter"))
+        board = getattr(adapter, "board", None)
+        body = {"items": adapter.items(), "seed_questions": adapter.seed_questions(),
+                "board": board() if callable(board) else None}
+    except (FO.FoldError, SF.ServerFileError) as e:
+        print(f"refused, nothing sent: {e}", file=sys.stderr)
+        return 1
+    sock = socket_path(SF.location())
+    try:
+        code, out = agent_request(sock, "POST", f"/p/{names[0]}/items", body, agent=a.agent)
+    except OSError as e:
+        print(f"the console server is not answering on {sock}: {e}; nothing was sent", file=sys.stderr)
+        return 2
+    if code != 200:
+        print(f"refused ({code}): {out.get('error')}", file=sys.stderr)
+        return 1
+    sys.stdout.write(_json(out))
+    return 0
+
+
 def _refused_note(files: list, n: int, why: str | None, rc: int = 1) -> int:
     """A batch ask stopped at files[n]: say what was posted and what was not, so a re-run sends only the rest."""
     if why:
@@ -559,6 +594,11 @@ def main(argv=None) -> int:
                        "transcripts into STATE/costs.jsonl; `show --fork ID` prints that fork's bill.")
     s.add_argument("action", choices=("collect", "show"))
     s.add_argument("--fork", help="show: the fork record id whose tagged subagents to total")
+    s = sub.add_parser("items-push", description="Run this project's adapter HERE, in your own process, and send "
+                       "its items, seed questions and board to the one console server as data (K3, §3.6). The "
+                       "server never runs project code.")
+    s.add_argument("--adapter", required=True, help="the adapter, a path inside the project")
+    s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
     s = sub.add_parser("server", description="Host this console on the one console server (K3): `add NAME` "
                        "writes the project to server.json beside your registry. You run this, never a session.")
     ss = s.add_subparsers(dest="server_cmd", required=True)
@@ -631,6 +671,8 @@ def _run(a, bell: Path) -> int:
         return 0
     if a.cmd == "costs":
         return _costs(a)
+    if a.cmd == "items-push":
+        return _items_push(a)
     if a.cmd == "server":
         from console_kit import serverfile as SF
         try:   # the name is the user's word on this command line, never a key of the repository's config
