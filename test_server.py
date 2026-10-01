@@ -3051,11 +3051,11 @@ class _OneServer:
         self.stop()
         self.tmp.cleanup()
 
-    def spawn(self, script=ONE_SERVER):
+    def spawn(self, script=ONE_SERVER, prefix=()):
         roots = ",".join(str(v["root"]) for v in self.p.values())
         # stderr to a file, not a pipe: an undrained pipe fills at 64 KiB of access lines and stalls the server.
         self.errlog = open(self.t / f"server-{len(self.logs)}.err", "w+")
-        self.proc = subprocess.Popen([sys.executable, "-c", script, str(HERE / "plugin" / "kit"),
+        self.proc = subprocess.Popen([*prefix, sys.executable, "-c", script, str(HERE / "plugin" / "kit"),
                                       str(self.sfile), str(self.sock), str(self.pem), str(self.audit), roots],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.errlog,
                                      text=True, env={**os.environ, "XDG_CONFIG_HOME": str(self.cfg)})
@@ -3400,6 +3400,31 @@ def prefix_read(root: Path, rel: str) -> bytes:
     return Path(p).read_bytes()
 
 
+def page_opens(trace: str, names: tuple[str, ...]) -> tuple[int, list[str]]:
+    """(safe count, unsafe lines) among the open syscalls in a strace log that name one of `names`.
+
+    Safe: openat/openat2 with a real dirfd (never AT_FDCWD), a path of ONE component (no "/"), and O_NOFOLLOW
+    (openat2 shows RESOLVE_NO_SYMLINKS instead). Anything else naming the file or its folder is unsafe.
+    """
+    import re
+    safe, unsafe = 0, []
+    call = re.compile(r'^\d+\s+(open|openat|openat2)\((?:(AT_FDCWD|\d+),\s*)?"([^"]*)",\s*(.*)$')
+    for line in trace.splitlines():
+        m = call.match(line)
+        if not m:
+            continue
+        sysc, dirfd, path, rest = m.groups()
+        if not any(path == n or path.endswith("/" + n) or ("/" + n + "/") in path for n in names):
+            continue
+        ok = (sysc in ("openat", "openat2") and dirfd not in (None, "AT_FDCWD") and "/" not in path
+              and ("O_NOFOLLOW" in rest or "RESOLVE_NO_SYMLINKS" in rest))
+        if ok:
+            safe += 1
+        else:
+            unsafe.append(line)
+    return safe, unsafe
+
+
 def check_then_open_read(root: Path, rel: str) -> bytes:
     """NEGATIVE CONTROL for the race: resolve, compare, then open the resolved path (two steps)."""
     p = os.path.realpath(os.path.join(root, rel))
@@ -3586,7 +3611,6 @@ class RootConfinementTests(_OneServer, unittest.TestCase):
 
     def test_ac38_a_swapped_parent_never_serves_the_other_side(self):
         # Catches: realpath-then-open (passes AC3.7, loses this race) and O_NOFOLLOW on the last component only.
-        import shutil
         from console_kit import rootfs as RF
         A, B = self.p["alpha"], self.p["beta"]
         (B["state"] / "page.html").write_text("SENTINEL-RACE-B-STATE\n")
@@ -3658,10 +3682,35 @@ class RootConfinementTests(_OneServer, unittest.TestCase):
         finally:
             stop.set()
             th.join()
+
+    def test_ac38_every_open_of_the_page_is_dir_relative_and_follows_no_link(self):
+        # The syscall half of AC3.8: the server, run under strace, opens the page's folder and the page itself
+        # only RELATIVE to a held descriptor (openat with a real dirfd, a single component, never AT_FDCWD or a
+        # path with a "/") and with O_NOFOLLOW. Catches: a reader that checks safely and then opens by path,
+        # which the race above catches only when it happens to lose. NEGATIVE CONTROL: the same parser must
+        # flag a plain open() of the same file, or a parser that sees nothing would pass anything.
+        import shutil
+        import subprocess
         if shutil.which("strace") is None:
-            self.skipTest("the strace half of AC3.8 needs strace, which is not installed (the race half ran: "
-                          f"{counts})")
-        self.fail("strace is installed: the syscall assertion of AC3.8 is not written yet (see the K3 report)")
+            self.skipTest("strace not installed: the syscall half of AC3.8 needs it (the race half runs anyway)")
+        A = self.p["alpha"]
+        self.SF.add("alpha", A["state"], "alpha.example.com", AUD, 4901, TEAM, page="race/page.html",
+                    registry=self.reg, path=self.sfile)
+        (A["root"] / "race").mkdir()
+        (A["root"] / "race" / "page.html").write_text("<html><body>ORDINARY-RACE</body></html>\n")
+        trace = self.t / "server.strace"
+        self.spawn(prefix=("strace", "-f", "-qq", "-e", "trace=open,openat,openat2", "-o", str(trace)))
+        for _ in range(20):
+            code, body = self.owner("alpha", "GET", "/")
+            self.assertEqual(code, 200, body)
+        self.stop()
+        safe, unsafe = page_opens(trace.read_text(), ("race", "page.html"))
+        self.assertEqual(unsafe, [])
+        self.assertGreaterEqual(safe, 40)                     # the folder and the page, each of the 20 times
+        ctl = self.t / "control.strace"
+        subprocess.run(["strace", "-f", "-qq", "-e", "trace=open,openat,openat2", "-o", str(ctl), sys.executable,
+                        "-c", f"open({str(A['root'] / 'race' / 'page.html')!r}).read()"], check=True, timeout=60)
+        self.assertEqual(len(page_opens(ctl.read_text(), ("race", "page.html"))[1]), 1)   # the control is caught
 
 
 if __name__ == "__main__":
