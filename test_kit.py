@@ -4746,6 +4746,51 @@ def released_single_store_tags() -> list[str]:
     return [t for t in want if t in have]
 
 
+OLD_BOOT = r'''
+import sys, threading
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from console_kit import server as SV
+d, state = Path(sys.argv[2]), Path(sys.argv[3])
+d.mkdir(parents=True, exist_ok=True)
+(d / "page.html").write_text("<!doctype html><html><body></body></html>\n")
+class A:
+    def items(self): return {"LANE": {"title": "a lane", "parent": None, "status": "open"}}
+    def seed_questions(self):
+        return [{"qid": "LANE/Q1", "item": "LANE", "text": "Which?", "kind": "single",
+                 "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}], "star": "b",
+                 "valid_if": [], "source": "spec.md:1", "by": "agent", "nonce": "seednonce0001"}]
+    def record(self, entries, dry_run): return []
+cfg = SV.Config(root=d, page=d / "page.html", state=state, adapter=d / "unused.py",
+                team_domain="team.example.cloudflareaccess.com", aud="a" * 64, hostname="console.example.com", port=0)
+c = SV.Console(cfg, A()); c.seed()
+srv = SV.agent_server(c); threading.Thread(target=srv.serve_forever, daemon=True).start()
+code, out = SV.agent_request(cfg.socket, "GET", "/view")
+print(code, flush=True)
+if len(sys.argv) > 4 and sys.argv[4] == "stay":
+    sys.stdin.read()          # serve until the test closes our stdin
+srv.shutdown(); srv.server_close(); cfg.socket.unlink(missing_ok=True)
+'''
+
+
+def start_old_server(kit: Path, work: Path, state: Path, stay: bool):
+    """Run a released single-store server on `state`; with `stay`, return it still answering on STATE/agent.sock."""
+    p = subprocess.Popen([sys.executable, "-c", OLD_BOOT, str(kit / "plugin" / "kit"), str(work), str(state),
+                          *(["stay"] if stay else [])], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True)
+    first = p.stdout.readline().strip()
+    if first != "200":
+        p.kill()
+        raise AssertionError(f"the old kit did not serve /view: {first!r} {p.stderr.read()}")
+    if not stay:
+        stop_old_server(p)
+    return p
+
+
+def stop_old_server(p) -> None:
+    p.communicate(timeout=60)   # closes stdin (the server's cue to stop), drains and closes both pipes
+
+
 class ServerAddTests(unittest.TestCase):
     """K3 step 1: `agent.py server add` and server.json (spec §3.3, §3.5; AC3.1, AC3.2)."""
 
@@ -4855,6 +4900,97 @@ class ServerAddTests(unittest.TestCase):
         kept = json.loads(self.sfile.read_text())["projects"]["alpha"]
         self.assertEqual((kept["token_sha256"], kept["slugs"]), ("f" * 64, ["lane-one", "lane-two"]))
         self.assertFalse(hasattr(C, "_listed_slugs"))                  # one reader, not two
+
+
+class MultiStoreTests(unittest.TestCase):
+    """K3 step 2: a Store per project, the locks, and one project's fault kept its own (AC3.4, AC3.6 part)."""
+
+    TEAM = "team.example.cloudflareaccess.com"
+
+    def setUp(self):
+        from console_kit import multiserver as MS
+        from console_kit import serverfile as SF
+        self.MS, self.SF = MS, SF
+        self.tmp = tempfile.TemporaryDirectory()
+        self.t = Path(os.path.realpath(self.tmp.name))
+        self.reg = self.t / "cfg" / "console-kit" / "projects.json"
+        self.sfile = self.reg.parent / "server.json"
+        self.p = {}
+        for i, name in enumerate(("alpha", "beta")):
+            root, state = self.t / f"root-{name}", self.t / f"state-{name}"
+            root.mkdir()
+            state.mkdir()
+            (root / "index.html").write_text(f"<html><body>{name}</body></html>\n")
+            R.register(root, state, KIT, path=self.reg)
+            SF.add(name, state, f"{name}.example.com", "a" * 64, 4801 + i, self.TEAM, page="index.html",
+                   registry=self.reg, path=self.sfile)
+            self.p[name] = {"root": root, "state": state}
+        self.open = []
+
+    def tearDown(self):
+        for ms in self.open:
+            ms.close()
+        self.tmp.cleanup()
+
+    def server(self, path=None):
+        ms = self.MS.MultiServer(path or self.sfile)
+        self.open.append(ms)
+        return ms
+
+    def test_ac34_a_store_object_per_project(self):
+        # Catches: one shared Store whose index holds both files (breaks store.py's one-writer rule).
+        from console_kit.store import Store
+        ms = self.server()
+        self.assertEqual(ms.served(), ["alpha", "beta"])
+        stores = ms.stores()
+        self.assertEqual(len(stores), 2)
+        self.assertEqual(len({id(s) for s in stores}), 2)
+        self.assertTrue(all(isinstance(s, Store) for s in stores))
+        self.assertEqual(sorted(str(s.path) for s in stores),
+                         sorted(str(self.p[n]["state"] / "store.jsonl") for n in ("alpha", "beta")))
+
+    def test_ac34_a_live_old_server_on_beta_refuses_beta_by_name_only(self):
+        # Catches: a lock check that only sees other new-kit servers. The competitor is the released kit.
+        for tag in released_single_store_tags():
+            kit = old_kit(tag, self.t / f"kit-{tag}", ("plugin/kit",))
+            old = start_old_server(kit, self.t / f"work-{tag}", self.p["beta"]["state"], stay=True)
+            try:
+                ms = self.server()
+                self.assertEqual(ms.served(), ["alpha"], tag)
+                self.assertIn("still answers", ms.refused()["beta"])
+                ms.close()
+            finally:
+                stop_old_server(old)
+            ms = self.server()                         # the old server gone: beta opens
+            self.assertEqual(ms.served(), ["alpha", "beta"], tag)
+            ms.close()
+
+    def test_ac34_a_second_one_server_holding_beta_refuses_it_here(self):
+        only_beta = self.t / "only-beta.json"
+        doc = json.loads(self.sfile.read_text())
+        only_beta.write_text(json.dumps({**doc, "projects": {"beta": doc["projects"]["beta"]}}))
+        first = self.server(only_beta)
+        self.assertEqual(first.served(), ["beta"])
+        ms = self.server()
+        self.assertEqual(ms.served(), ["alpha"])
+        self.assertIn("another console server holds", ms.refused()["beta"])
+        self.assertIn("server.lock", ms.refused()["beta"])
+
+    def test_a_stale_old_socket_file_does_not_refuse(self):
+        import socket
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(self.p["beta"]["state"] / "agent.sock"))      # bound, never listening: a server that died
+        s.close()
+        self.assertEqual(self.server().served(), ["alpha", "beta"])
+
+    def test_ac36_a_store_the_loader_refuses_is_that_project_s_fault_alone(self):
+        # Catches: a server that refuses to start at all when any one store is bad.
+        bad = self.p["beta"]["state"] / "store.jsonl"
+        bad.write_text('{"not": "a record"}\n')
+        ms = self.server()
+        self.assertEqual(ms.served(), ["alpha"])
+        self.assertIn("beta's console cannot open", ms.refused()["beta"])
+        self.assertEqual(bad.read_text(), '{"not": "a record"}\n')      # never repaired or rewritten
 
 
 if __name__ == "__main__":
