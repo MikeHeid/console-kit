@@ -846,6 +846,160 @@ class AnswerFollowUpTests(unittest.TestCase):
 
 
 
+def _open_view(reply: str | None = None, lock_q3: bool = False) -> dict:
+    """/view with LANE.1/Q1 locked, Q2 unanswered, and Q3 answered (not locked) with a deliberation waiting on it.
+
+    `reply` adds an agent reply to that deliberation; `lock_q3` locks Q3 after it was asked."""
+    import tempfile
+    from console_kit import view as V
+    from console_kit.store import Store
+    from test_kit import answer, fork, lock, message, question
+    items = {"LANE.1": {"title": "first lane", "parent": None}}
+    with tempfile.TemporaryDirectory() as td:
+        st = Store(Path(td) / "store.jsonl", known_items=items)
+        for n in (1, 2, 3):
+            st.append(question(f"LANE.1/Q{n}"))
+        st.append(lock(st.append(answer("LANE.1/Q1", own_text="B, for the small rig"))))
+        a3 = st.append(answer("LANE.1/Q3", picks=("a",)))
+        f = st.append(fork(about_qid="LANE.1/Q3", roles=["analyst"], mode="explore"))
+        if reply is not None:
+            st.append(message(item="LANE.1", by="agent", text=reply, reply_to=f["id"]))
+        if lock_q3:
+            st.append(lock(a3))
+        return {"view": V.build(st, items, lambda c: True), "items": items, "cursor": {}}
+
+
+class DeliberateOpenQuestionTests(unittest.TestCase):
+    """Owner ruling build_reply: "Deliberate before answering" on each OPEN question."""
+
+    @classmethod
+    def setUpClass(cls):
+        DockTests.setUpClass.__func__(cls)
+
+    @classmethod
+    def tearDownClass(cls):
+        DockTests.tearDownClass.__func__(cls)
+
+    def _open(self, kind: str, width: int, view: dict | None = None):
+        browser = getattr(self.pw, kind).launch()
+        self.addCleanup(browser.close)
+        page = browser.new_page(viewport={"width": width, "height": 900})
+        errors: list[str] = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        self.addCleanup(lambda: self.assertEqual(errors, [], f"{kind}: page errors"))
+        posted: list[dict] = []
+        view = json.dumps(view or _open_view())
+        page.route("**/api/view*", lambda r: r.fulfill(status=200, content_type="application/json", body=view))
+
+        def on_message(route):
+            posted.append(route.request.post_data_json)
+            route.fulfill(status=200, content_type="application/json", body=json.dumps({"record": {}}))
+        page.route("**/api/message", on_message)
+        page.goto(self.url)
+        page.click(".ck-item-btn")
+        page.wait_for_selector(".ck-question")
+        return page, posted
+
+    def card(self, page, n):
+        return page.locator(".ck-question", has_text=f"Which for LANE.1/Q{n}?")
+
+    def test_only_open_questions_offer_it_and_the_cost_tracks_the_seats(self):
+        # Catches: the button on a locked answer (which keeps "Follow up"), no button on an
+        # open question (the pre-change page), a cost line that does not move with the seats,
+        # and a request that is not one owner fork about that question.
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    page, posted = self._open(kind, width)
+                    sel = "button[aria-label^='Deliberate before answering:']"
+                    self.assertEqual(page.locator(sel).count(), 2)
+                    self.assertEqual(self.card(page, 1).locator(sel).count(), 0)
+                    self.assertEqual(self.card(page, 1).locator("button[aria-label^='Next step for']").count(), 1)
+                    # The waiting deliberation on Q3 is shown on its card.
+                    asked = self.card(page, 3).locator(".ck-asked")
+                    self.assertIn("Deliberation before answering with Analyst", asked.text_content())
+                    self.assertIn("waiting for the seats", asked.text_content())
+                    btn = self.card(page, 2).locator(sel)
+                    btn.focus()
+                    page.keyboard.press("Enter")
+                    self.assertEqual(btn.get_attribute("aria-expanded"), "true")
+                    form = page.locator(".ck-deliberate")
+                    self.assertEqual(form.count(), 1)
+                    self.assertTrue(form.locator("input[value='explore']").is_checked())
+                    cost = form.locator(".ck-cost")
+                    self.assertIn("100k tokens per seat", cost.text_content())
+                    form.get_by_role("button", name="Send deliberation before answering").click()
+                    self.assertIn("Pick 1 to 3 seats", form.locator(".ck-error-msg").text_content())
+                    self.assertEqual(posted, [])
+                    form.get_by_label("Analyst").focus()
+                    page.keyboard.press("Space")
+                    self.assertEqual(cost.text_content(), "Cost: ≈ 1 seat × ~100k tokens = ~100k tokens.")
+                    form.get_by_label("Security").check()
+                    form.get_by_label("Other seat (optional)").fill("Legal")
+                    self.assertEqual(cost.text_content(), "Cost: ≈ 3 seats × ~100k tokens = ~300k tokens.")
+                    form.get_by_label("Analyst").uncheck()
+                    self.assertEqual(cost.text_content(), "Cost: ≈ 2 seats × ~100k tokens = ~200k tokens.")
+                    form.get_by_label("Note for the seats (optional)").fill("Which survives a second site?")
+                    self.assertFalse(page.evaluate("document.documentElement.scrollWidth > innerWidth"))
+                    form.get_by_role("button", name="Send deliberation before answering").click()
+                    page.wait_for_function("document.querySelectorAll('.ck-deliberate').length === 0")
+                    self.assertEqual(len(posted), 1)
+                    body = dict(posted[0])
+                    self.assertTrue(body.pop("nonce"))
+                    self.assertEqual(body, {"item": "LANE.1", "intent": "fork", "mode": "explore",
+                                            "about_qid": "LANE.1/Q2", "roles": ["security", "other:Legal"],
+                                            "text": "Which survives a second site?"})
+
+    def test_an_early_reply_leaves_it_pending_and_only_the_result_returns_it(self):
+        # Review round 1. Catches: a card that calls the deliberation back on any reply to it.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                page, _ = self._open(kind, 1280, _open_view(reply="Working on it: one seat running."))
+                asked = self.card(page, 3).locator(".ck-asked")
+                self.assertEqual(asked.get_attribute("data-done"), "false")
+                self.assertIn("waiting for the seats", asked.text_content())
+                page, _ = self._open(kind, 1280, _open_view(reply="Result: ★ a\nbecause it holds"))
+                asked = self.card(page, 3).locator(".ck-asked")
+                self.assertEqual(asked.get_attribute("data-done"), "true")
+                self.assertIn("back: Result: ★ a", asked.text_content())
+                self.assertNotIn("because", asked.text_content())
+
+    def test_the_label_is_the_forks_own_kind_after_a_lock(self):
+        # Review round 1, LOW. Catches: a deliberation before answering relabelled
+        # "Follow-up" once the owner locks the question.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                page, _ = self._open(kind, 1280, _open_view(lock_q3=True))
+                card = self.card(page, 3)
+                self.assertEqual(card.locator("button[aria-label^='Deliberate before answering:']").count(), 0)
+                text = card.locator(".ck-asked").text_content()
+                self.assertIn("Deliberation before answering with Analyst", text)
+                self.assertNotIn("Follow-up", text)
+
+    def test_seats_and_mode_survive_a_rebuild_of_the_form(self):
+        # Review round 1, LOW. Catches: a re-render (Refresh, a live update) that drops the
+        # owner's seat ticks and mode while keeping only the note.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                page, _ = self._open(kind, 1280)
+                btn = self.card(page, 2).locator("button[aria-label^='Deliberate before answering:']")
+                btn.click()
+                form = page.locator(".ck-deliberate")
+                form.get_by_label("Analyst").check()
+                form.get_by_label("Other seat (optional)").fill("Legal")
+                form.locator("input[value='tighten']").check()
+                btn.click()  # closed: the form is gone
+                self.assertEqual(page.locator(".ck-deliberate").count(), 0)
+                btn.click()  # rebuilt from scratch
+                form = page.locator(".ck-deliberate")
+                self.assertTrue(form.get_by_label("Analyst").is_checked())
+                self.assertFalse(form.get_by_label("Security").is_checked())
+                self.assertEqual(form.get_by_label("Other seat (optional)").input_value(), "Legal")
+                self.assertTrue(form.locator("input[value='tighten']").is_checked())
+                self.assertEqual(form.locator(".ck-cost").text_content(),
+                                 "Cost: ≈ 2 seats × ~100k tokens = ~200k tokens.")
+
+
 def _stale_view() -> tuple[dict, dict]:
     """/view and /check with LANE.1/Q1 locked on an excerpt whose text then changed, both built by the kit."""
     import tempfile

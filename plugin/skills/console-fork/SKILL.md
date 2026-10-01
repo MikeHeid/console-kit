@@ -1,6 +1,6 @@
 ---
 name: console-fork
-description: Use to run one owner-console deliberation (a "fork", its follow-up round, a roar panel on one answer, or a refine or drill) - build the round's bundle, sit the committee or run the project's skill, and write back one to five lockable questions plus one summary message. Called by console-process for every waiting fork.
+description: Use to run one owner-console deliberation (a "fork", its follow-up round, a roar panel on one answer, a refine or drill, or a deliberation on an open question before the owner answers it) - build the round's bundle, sit the committee or run the project's skill, and write back one to five lockable questions plus one summary message (or, before an answer, one recommendation reply). Called by console-process for every waiting fork.
 ---
 
 # Run one deliberation round
@@ -18,9 +18,26 @@ user's registry only, and stop if this project is not registered there.
 
     A view
 
-`forks` maps each fork message's record id to `{message, questions}`. The fork
-to run is an owner message with `intent: "fork"` whose `questions` is empty,
-whether it was started on an item or beside one locked answer.
+`forks` maps each fork message's record id to `{message, questions, kind,
+result, done}`. The fork to run is an owner message with `intent: "fork"`
+whose `done` is false, whether it was started on an item, beside one locked
+answer, or beside an open question.
+
+**When a fork is done (one rule, the same in console-fork and console-process).**
+A fork is done when its result reply exists: an agent message on the fork's
+item, replying to the fork (`reply_to` its id), whose first line starts with
+`Result:`. **For a deliberation on an open question the `Result:` reply is
+required**: its first line is `Result: ★ <option id>` or `Result: replaced by
+<qid>`, and nothing else closes it. **Every other fork** is also done once its
+questions exist (the rule forks were finished under before `Result:`), but
+the `Result:` reply is the preferred close for them too: `Result: <n>
+questions (<qids>)`, or `Result: refused: <why>` for a fork that could not
+run. Post questions (and a replacement question) FIRST and the result reply
+LAST, so a crash in between never makes an open-question round look done. A
+progress note or any other message never sets `reply_to` to the fork. `A view`
+computes this for you: `view.forks[<id>].done` (with `.kind` and `.result`);
+the page uses the same.
+
 From its message read:
 
 - `item`: the scope is this item **and everything under it** (D14);
@@ -31,6 +48,9 @@ From its message read:
 - `about_qid` and `roles`, present only on a **follow-up on one answer**: the
   owner pressed "Follow up" beside that question's locked answer. Section 6
   below changes steps 3 to 5 for it.
+- `about_qid` and `roles` where that question is **open** (`questions[about_qid].state`
+  is `awaiting_you` or `unlocked`): the owner pressed "Deliberate before
+  answering". Section 9 replaces steps 4 and 5.
 - `roles: ["roar"]` (0.8.0): the owner picked **Roar** as the seat. Section 7
   replaces steps 3 to 5.
 - `step: "refine"` or `step: "drill"` (0.8.0), with `about_qid` (one locked
@@ -44,8 +64,8 @@ From its message read:
 It holds the request, the earlier rounds, the items in scope, every question
 with every answer it got, and the threads. It is capped at 64 KiB. **A bundle
 over the cap is refused, never trimmed**: reply to the fork with the refusal
-text (it names the largest parts) and ask the owner to deliberate on a narrower
-item. Do not cut it down yourself.
+text, its first line `Result: refused: bundle too large` (the rest names the
+largest parts), and ask the owner to deliberate on a narrower item. Do not cut it down yourself.
 
 The bundle is the console's record only. Each seat also reads, from the
 repository, the item's spec sections and the findings and rulings that name
@@ -146,9 +166,11 @@ retry it, never drop the question.
 
 ## 5. Reply once
 
-    A reply ITEM "summary" --reply-to FORK_ID
+    A reply ITEM "Result: 3 questions (ITEM/Q7, ITEM/Q8, ITEM/Q9)
+    ...summary..." --reply-to FORK_ID
 
-One message: the factors the committee found, which became questions, and what
+One message, posted after every question, its first line the `Result:` line
+(see "When a fork is done"): the factors the committee found, which became questions, and what
 was set aside and why. Then return to console-process.
 
 ## 6. A follow-up on one answer (`about_qid`)
@@ -247,7 +269,7 @@ or drills; it names the kind and the project names the skill.
   the same name could shadow it. If the command exits non-zero (no entry for
   the kind, not an installed user skill, or a user-level entry that resolves
   into the project), **refuse**: reply to the fork naming the skill and the
-  reason the command gave, post nothing else, and never fall back to a
+  reason the command gave (first line `Result: refused: <reason>`), post nothing else, and never fall back to a
   repository skill or guess another. Run the resolved skill **scoped to the
   target**: the locked answer (its question, its options, every answer and the
   owner's own words, all in the bundle, `A fork-context FORK_ID`) or the
@@ -269,3 +291,44 @@ or drills; it names the kind and the project names the skill.
 - **The same limits.** At most five questions, the tighten-mode options when
   the fork's mode is `tighten` (refine forks default to tighten, drill forks
   to explore), and one reply to the fork naming the target.
+
+## 9. Deliberate before answering (`about_qid` on an open question)
+
+The owner has not locked this question (it is unanswered, or answered and not
+locked) and asked chosen seats to weigh it first. The store has checked that
+the question exists and sits on the fork's item or under it, and that `roles`
+holds one to three valid seats; it refuses a roar, refine or drill on an open
+question. The bundle (`A fork-context FORK_ID`) leads with the question, its
+options and any answer so far, under a heading that says it is open.
+
+- **Seats: exactly the ones in `roles`** (step 3), each told the question is
+  open and that their job is to say which option should win and why, with
+  the file and line each reason rests on.
+- **The result is ONE reply, not a round of questions.** Post it on the fork's
+  item, replying to the fork, LAST:
+
+      A reply ITEM "Result: ★ b
+      ITEM/Q3, option b (label) ..." --reply-to FORK_ID
+
+  Its first line is exactly `Result: ★ <option id>`. Then, in this order: the
+  question (`ITEM/Q3`) and the option's label; the reasons for it, each with
+  its file:line; what the seats found against the other options; and where
+  the seats disagreed, if they did.
+  A `free` question has no option ids: the first line is
+  `Result: ★ free` and the recommended answer follows in a sentence.
+- **A replacement question only when the options themselves are wrong** (the
+  seats show none of them can be right, or the right one is missing, citing
+  why). Then post one new question with `A ask FILE` exactly as in step 4:
+  the next free `Q<n>` on the same item, `forked_from` this fork, a `star` and
+  `star_by`, and text that opens "Replaces ITEM/Q3, whose options ...". Only
+  then post the one reply, its first line `Result: replaced by <new qid>`,
+  saying why the old question's options are wrong, so the owner answers the
+  replacement instead. There
+  is no record that marks a question superseded: the old question stays as
+  it is, and the reply is the pointer. Never more than one replacement.
+- **Never answer, never lock.** Answers and locks are the owner's (the server
+  refuses either from the agent's door); the reply recommends, and the owner
+  decides on the question's own card.
+- If the question was locked after the owner asked (the bundle then reads as
+  a locked answer), run it as a follow-up on that answer (section 6) instead:
+  its questions first, then the reply `Result: <n> questions (<qids>)`.

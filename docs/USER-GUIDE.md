@@ -127,9 +127,14 @@ real items and folds land in your decision record:
      seats you pick look at that one answer), **Refine** or **Drill** (the
      project's own skills), and **Roar** (a three-round panel, once per
      lock). The locked answer stands unless you supersede it.
-   - Deliberating on a question that is still **open**, before you answer it,
-     is **proposed, not built** (CONSOLE-kit/Q18). Today you deliberate on a
-     whole item, or on an answer you have locked.
+   - **⑂ Deliberate before answering** under a question that is still
+     **open** (unanswered, or answered and not locked): pick one to three
+     seats, a mode (explore by default) and an optional note. The form shows
+     the cost before you send, about 100k tokens per seat. The seats reply on
+     that question with a ★ recommendation, its reasons and what they found;
+     only if they show the options themselves are wrong do they ask a
+     replacement question, and the reply names it. Answering and locking stay
+     yours (CONSOLE-kit/Q18).
 6. **Chat** for anything that is not a question. It wakes the listening
    session, which answers in the same thread. **Request a visual** on an item
    to get a diagram or a static mock back.

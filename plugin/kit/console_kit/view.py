@@ -33,6 +33,10 @@ from .names import named
 from .store import Store
 
 STATES = ("awaiting_you", "unlocked", "locked", "stale")
+# When a fork is done (owner ruling build_reply, review rounds 1-2): an agent message replying
+# to the fork whose first line starts with RESULT, or - for any fork but an open-question round -
+# its questions. Progress notes never reply to the fork, so they cannot hide a pending round.
+RESULT = "Result:"
 COUNTED = ("awaiting_you", "awaiting_agent", "unlocked", "stale")
 
 
@@ -53,6 +57,40 @@ def question_state(store: Store, q: dict, holds: Callable[[dict], bool]) -> str:
         return "unlocked"
     conds, _ = A.conditions_for(store, q)
     return "locked" if all(holds(c) for c in conds) else "stale"
+
+
+def fork_kind(store: Store, msg: dict) -> str:
+    """What a fork is, fixed when it was asked: open (seats on a question not locked THEN),
+    follow_up (seats on a locked answer), roar, refine, drill, round (a later round) or item."""
+    if msg.get("step"):
+        return msg["step"]
+    if "roar" in (msg.get("roles") or ()):
+        return "roar"
+    qid = msg.get("about_qid")
+    if qid:
+        before = [r for r in store.records() if r["seq"] < msg["seq"] and r.get("qid") == qid]
+        answers = [r for r in before if r["type"] == "answer"]
+        head = answers[-1]["id"] if answers else None
+        locked = any(r["type"] == "lock" and r["answer"] == head for r in before)
+        return "follow_up" if head is not None and locked else "open"
+    return "round" if msg.get("follow_up_of") else "item"
+
+
+def fork_result(msgs: list[dict], fid: str) -> dict | None:
+    """The agent's result reply to fork `fid` (first line starts with RESULT), the latest if several."""
+    hits = [m for m in msgs if m["by"] == "agent" and m.get("reply_to") == fid
+            and m["text"].lstrip().startswith(RESULT)]
+    return max(hits, key=lambda m: m["seq"]) if hits else None
+
+
+def fork_done(f: dict) -> bool:
+    """Done = a RESULT reply exists, OR the fork is not an open-question round and its questions exist.
+
+    Open-question rounds are new, so they always need the RESULT line. Every older kind keeps the
+    rule forks were finished under before it (questions back), so an upgrade re-runs nothing."""
+    if f["result"] is not None:
+        return True
+    return f["kind"] != "open" and bool(f["questions"])
 
 
 def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool],
@@ -106,6 +144,10 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
         fid = q["question"].get("forked_from")
         if fid in forks:
             forks[fid]["questions"].append(q["question"]["qid"])
+    for fid, f in forks.items():
+        f["kind"] = fork_kind(store, f["message"])
+        f["result"] = fork_result(threads.get(f["message"]["item"], []), fid)
+        f["done"] = fork_done(f)
 
     own: dict[str, dict[str, int]] = {i: dict.fromkeys(COUNTED, 0) for i in items}
     for q in questions.values():

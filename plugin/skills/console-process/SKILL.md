@@ -106,11 +106,29 @@ PR path. `@chat` is not an item: do not pass it to `A working`.
 
 ## 4. Run each waiting fork
 
-Every owner message with `intent: "fork"` that has no questions yet
-(`view.forks[<id>].questions` is empty) is a deliberation to run: use the
-**console-fork** skill for each. That includes a follow-up on one locked
-answer, a fork that carries `about_qid` (its doorbell line carries it too);
-console-fork's section 6 covers it. So does a **roar** (`roles: ["roar"]`,
+Every owner message with `intent: "fork"` that is not done
+(`view.forks[<id>].done` is false) is a deliberation to run: use the **console-fork** skill for
+each. That includes a follow-up on one locked answer, a fork that carries
+`about_qid` (its doorbell line carries it too); console-fork's section 6
+covers it. A fork whose `about_qid` names an OPEN question is a deliberation
+before answering: console-fork's section 9, whose result is one
+recommendation reply (and a replacement question only when the options are
+wrong), never an answer or a lock.
+
+**When a fork is done (one rule, the same in console-fork and console-process).**
+A fork is done when its result reply exists: an agent message on the fork's
+item, replying to the fork (`reply_to` its id), whose first line starts with
+`Result:`. **For a deliberation on an open question the `Result:` reply is
+required**: its first line is `Result: ★ <option id>` or `Result: replaced by
+<qid>`, and nothing else closes it. **Every other fork** is also done once its
+questions exist (the rule forks were finished under before `Result:`), but
+the `Result:` reply is the preferred close for them too: `Result: <n>
+questions (<qids>)`, or `Result: refused: <why>` for a fork that could not
+run. Post questions (and a replacement question) FIRST and the result reply
+LAST, so a crash in between never makes an open-question round look done. A
+progress note or any other message never sets `reply_to` to the fork. `A view`
+computes this for you: `view.forks[<id>].done` (with `.kind` and `.result`);
+the page uses the same. So does a **roar** (`roles: ["roar"]`,
 section 7: a three-round panel, whose transcript you store with
 `A transcript`) and a **refine** or **drill** (`step`, section 8: the
 skill `.console-kit.json`'s `next_step` names, resolved only among your

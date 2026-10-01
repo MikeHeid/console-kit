@@ -9,6 +9,10 @@ A follow-up on one locked answer (a fork with `about_qid`, 0.4.0) leads with
 that question: its text and options, every answer with the owner's own words,
 and which answer holds the lock. The item context follows.
 
+Seats called on an OPEN question (a deliberation before answering) lead the
+same way, under a heading that says the question is open and what the round
+returns: one reply with a recommendation, never an answer or a lock.
+
 A bundle over MAX_BUNDLE bytes (64 KiB, §6.6) is refused by name, listing its
 largest parts, never trimmed (D14): a trimmed bundle would hand the committee a
 partial picture that looks whole.
@@ -57,6 +61,22 @@ def about_qid(chain: list[dict]) -> str | None:
     return next((m["about_qid"] for m in reversed(chain) if m.get("about_qid")), None)
 
 
+OPEN_RESULT = ("The question is not locked, so the seats deliberate BEFORE the owner answers. The round "
+               "returns ONE reply on this question's item, replying to the fork and posted LAST, its first line "
+               "`Result: ★ <option id>`: a recommendation with its reasons and what the seats found. Only if the "
+               "seats show the options themselves are wrong does it first ask a replacement question (the next "
+               "free qid, forked from this fork), and the reply's first line is then `Result: replaced by <qid>`. "
+               "Progress notes never reply to the fork. The round never answers or locks: those are the owner's.")
+
+
+def _is_open(view: dict, qid: str, fork: dict) -> bool:
+    """Whether a fork about `qid` is a deliberation before answering: seats, no step, no roar, and no lock now."""
+    if fork.get("step") or "roar" in (fork.get("roles") or ()):
+        return False
+    q = view["questions"].get(qid)
+    return q is not None and q["state"] in ("awaiting_you", "unlocked")
+
+
 def _about_section(view: dict, qid: str) -> str:
     """The question, every answer it got (oldest first, the owner's own words in full) and which one is locked."""
     q = view["questions"].get(qid)
@@ -76,7 +96,7 @@ def _about_section(view: dict, qid: str) -> str:
         out.append("")
     for c in q["failing"]:
         out.append(f"Stale because this no longer holds: {V.condition_words(c)}")
-    out.append("Every answer, oldest first:")
+    out.append("Every answer, oldest first:" if q["answers"] else "No answer yet.")
     for n, a in enumerate(q["answers"], 1):
         tag = "current" if n == len(q["answers"]) else "earlier"
         lock = ", LOCKED" if a.get("locked") else ""
@@ -106,8 +126,14 @@ def fork_context(view: dict, items: Mapping[str, dict], fork_id: str, max_bytes:
         # A follow-up on one answer (0.4.0) leads with that answer: the seats
         # read what was decided before they read the item around it.
         what = {"refine": "Refine", "drill": "Drill"}.get(fork.get("step"), "Follow-up")
-        parts.append((f"the question `{about}`",
-                      f"# {what} bundle: the locked answer to `{about}`\n\n" + _about_section(view, about)))
+        if _is_open(view, about, fork):
+            # Seats called on an OPEN question: a deliberation before answering. Its result is
+            # one reply on the question (a recommendation), never an answer or a lock.
+            lead = (f"# Deliberation bundle: the open question `{about}`, before the owner answers it\n\n"
+                    f"{OPEN_RESULT}\n\n")
+        else:
+            lead = f"# {what} bundle: the locked answer to `{about}`\n\n"
+        parts.append((f"the question `{about}`", lead + _about_section(view, about)))
         title = f"## The request, then the item context: `{item}` and all under it"
     else:
         title = f"# Deliberation bundle: `{item}` and all under it"

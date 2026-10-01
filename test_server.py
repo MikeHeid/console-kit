@@ -262,12 +262,14 @@ class ServerTests(unittest.TestCase):
 
     def test_a_follow_up_on_one_answer_rings_as_a_fork_and_is_checked_at_the_door(self):
         # 0.4.0: the "Follow up" button on a locked answer. Catches: a server that trusts
-        # the page (an unlocked or unknown question accepted), and a doorbell line the
-        # agent's watch does not wake on, so the follow-up would sit unrun.
+        # the page (an unknown question, or a roar on an unlocked one, accepted), and a
+        # doorbell line the agent's watch does not wake on, so the follow-up would sit unrun.
+        # Seats on an OPEN question are a deliberation before answering (ruling build_reply).
         from console_kit import doorbell as D
         body = {"item": "LANE.1", "text": "follow up", "intent": "fork", "mode": "tighten",
                 "about_qid": "LANE.1/Q1", "roles": ["devops", "other:Legal"], "nonce": "ownerabout01"}
-        code, got = self.req("POST", "/api/message", body, tok=token())
+        code, got = self.req("POST", "/api/message", dict(body, roles=["roar"], nonce="ownerabout00"),
+                             tok=token())
         self.assertEqual(code, 400, got)
         self.assertIn("no locked answer", got["error"])
         code, a = self.req("POST", "/api/answer", self.answer(), tok=token())
@@ -909,6 +911,76 @@ class _Live:
 
     def get(self, path, tok=True):
         return self.req("GET", path, tok=token() if tok else None)
+
+
+class DeliberateOpenQuestionTests(_Live, unittest.TestCase):
+    """Owner ruling build_reply: "Deliberate before answering" on an OPEN question."""
+
+    BODY = {"item": "LANE.1", "text": "weigh it first", "intent": "fork", "mode": "explore",
+            "about_qid": "LANE.1/Q1", "roles": ["analyst", "security"]}
+
+    def state(self):
+        v = self.console.payload()["view"]["questions"]["LANE.1/Q1"]
+        return v["state"], [(a["id"], a["locked"]) for a in v["answers"]]
+
+    def test_the_owner_door_accepts_seats_on_an_unanswered_or_unlocked_question(self):
+        # Catches: the pre-change server, which refused about_qid until the answer was locked;
+        # and a fork that moves the question (answers it, locks it, or changes its state).
+        from console_kit import doorbell as D
+        before = self.state()
+        self.assertEqual(before[0], "awaiting_you")
+        f = self.owner_msg(**self.BODY)
+        self.assertEqual((f["by"], f["about_qid"], f["roles"]), ("owner", "LANE.1/Q1", ["analyst", "security"]))
+        self.assertEqual(self.state(), before)
+        line = self.doorbell()[-1]
+        self.assertEqual((line["intent"], line["about_qid"]), ("fork", "LANE.1/Q1"))
+        self.assertEqual(D.pending(self.cfg.inbox, 0)[-1]["seq"], f["seq"])
+        code, a = self.req("POST", "/api/answer", self.answer(), tok=token())
+        self.assertEqual(code, 200, a)
+        before = self.state()
+        self.assertEqual(before[0], "unlocked")
+        self.owner_msg(**dict(self.BODY, roles=["ux"]))
+        self.assertEqual(self.state(), before)
+
+    def test_every_other_check_still_holds_on_an_open_question(self):
+        # Counter-check: the relaxation is the lock rule only.
+        code, got = self.agent_post("/question", self.seed_q(qid="LANE/Q1", item="LANE", nonce="parentq00001"))
+        self.assertEqual(code, 200, got)
+        for over, want in (({"about_qid": "LANE.1/Q77"}, "names no question"),
+                           ({"about_qid": "LANE/Q1"}, "outside this fork's scope"),
+                           ({"roles": ["chaos"]}, "role"),
+                           ({"roles": ["ux", "devops", "security", "analyst"]}, "1 to 3"),
+                           ({"roles": ["roar"]}, "no locked answer"),
+                           ({"roles": None, "step": "refine"}, "no locked answer")):
+            body = {k: v for k, v in dict(self.BODY, **over).items() if v is not None}
+            body["nonce"] = "own" + os.urandom(6).hex()
+            code, got = self.req("POST", "/api/message", body, tok=token())
+            self.assertEqual(code, 400, (over, got))
+            self.assertIn(want, got["error"], over)
+        self.assertFalse(any(r.get("about_qid") for r in self.console.store.records()))
+
+    def test_the_agent_door_can_neither_start_one_nor_answer_or_lock(self):
+        # Catches: an agent that deliberates on its own account, or turns the round's
+        # recommendation into the owner's answer or lock.
+        f = self.owner_msg(**self.BODY)
+        before = self.state()
+        code, got = self.agent_post("/message", dict(self.BODY, nonce="agentdelib01"))
+        self.assertEqual(code, 400, got)
+        self.assertIn("only the owner writes it", got["error"])
+        code, got = self.agent_post("/message", {"item": "LANE.1", "text": "★ a", "reply_to": f["id"],
+                                                 "about_qid": "LANE.1/Q1", "nonce": "agentdelib02"})
+        self.assertEqual(code, 400, got)
+        self.assertIn("belong(s) to a fork", got["error"])
+        for path, body in (("/answer", {"qid": "LANE.1/Q1", "picks": ["a"], "own_text": "", "nonce": "agentans001"}),
+                           ("/lock", {"qid": "LANE.1/Q1", "answer": "a" * 24, "nonce": "agentlock01"})):
+            code, got = self.agent_post(path, body)
+            self.assertEqual(code, 404, (path, got))
+        self.assertEqual(self.state(), before)
+        # The round's one result: a reply on the question's item, to the fork.
+        code, got = self.agent_post("/message", {"item": "LANE.1", "reply_to": f["id"], "nonce": "agentdelib03",
+                                                 "text": "LANE.1/Q1: ★ a (Option A), because ..."})
+        self.assertEqual(code, 200, got)
+        self.assertEqual(self.state(), before)
 
 
 class LiveWaitTests(_Live, unittest.TestCase):

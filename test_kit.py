@@ -1089,20 +1089,125 @@ class AnswerFollowUpStoreTests(Tmp):
             flat.append(about(qid="LANE.1.a/Q1", item="LANE"))
         flat.append(about(qid="LANE.1.a/Q1", item="LANE.1.a"))
 
-    def test_only_a_locked_answer_is_followed_up(self):
+    def test_seats_deliberate_on_an_open_question_and_change_nothing_about_it(self):
+        # Owner ruling build_reply: "Deliberate before answering". Seats may be called on a
+        # question that is unanswered, answered and not locked, or re-answered after a lock and
+        # not yet re-locked. Catches: a store that still requires a lock (the pre-change rule),
+        # and a fork that moves the question's state, answer or lock.
         st = self.store()
         st.append(question())
-        with self.assertRaisesRegex(StoreError, "no locked answer"):
-            st.append(about())
+
+        def state():
+            v = V.build(st, ITEMS, V.make_evaluator(self.dir, {}))
+            return v["questions"]["LANE.1/Q1"]["state"], st.head("LANE.1/Q1"), st.locks("LANE.1/Q1")
+
+        before = state()
+        f = st.append(about(roles=("analyst",), mode="explore"))
+        self.assertEqual(f["about_qid"], "LANE.1/Q1")
+        self.assertEqual(state(), before)
+        self.assertEqual(before[0], "awaiting_you")
         a = st.append(answer())
-        with self.assertRaisesRegex(StoreError, "no locked answer"):
-            st.append(about())
+        before = state()
+        st.append(about(roles=("ux", "other:Legal")))
+        self.assertEqual(state(), before)
+        self.assertEqual(before[0], "unlocked")
         st.append(lock(a))
-        st.append(about())
-        # A superseding answer leaves the question answered but not locked until it is locked again.
+        st.append(about())  # a locked answer: the 0.4.0 follow-up, unchanged
         st.append(answer(supersedes=a["id"], reason="changed my mind"))
-        with self.assertRaisesRegex(StoreError, "no locked answer"):
-            st.append(about(roles=("ux",)))
+        st.append(about(roles=("ux",)))
+        # Counter-check: the other checks still hold on an open question.
+        st.append(question(qid="LANE/Q1", item="LANE"))
+        with self.assertRaisesRegex(StoreError, "names no question"):
+            st.append(about(qid="LANE.1/Q9"))
+        with self.assertRaisesRegex(StoreError, "outside this fork's scope"):
+            st.append(about(qid="LANE/Q1"))
+
+    def test_a_fork_is_done_only_when_its_final_result_is_back(self):
+        # Review round 1 of build_reply. Catches: any agent reply to the fork counting as done
+        # (a progress note would hide a deliberation still to run), a replacement question with
+        # no result reply yet counting as done, and a follow-up done on its reply alone.
+        st = self.store()
+        st.append(question())
+
+        def fk(fid):
+            return V.build(st, ITEMS, V.make_evaluator(self.dir, {}))["forks"][fid]
+
+        f = st.append(about(roles=("analyst",)))
+        self.assertEqual((fk(f["id"])["kind"], fk(f["id"])["done"]), ("open", False))
+        st.append(message(by="agent", text="Working on it: two seats running.", reply_to=f["id"]))
+        self.assertFalse(fk(f["id"])["done"])
+        st.append(question(qid="LANE.1/Q2", forked_from=f["id"], star_by="analyst"))  # a replacement, first
+        self.assertFalse(fk(f["id"])["done"])
+        st.append(message(by="agent", text="  Result: replaced by LANE.1/Q2\nbecause ...", reply_to=f["id"]))
+        self.assertTrue(fk(f["id"])["done"])
+        self.assertTrue(fk(f["id"])["result"]["text"].lstrip().startswith("Result: replaced by LANE.1/Q2"))
+        # A Result: line that does not START the reply is not a result.
+        g = st.append(about(roles=("ux",)))
+        st.append(message(by="agent", text="note\nResult: ★ a", reply_to=g["id"]))
+        self.assertFalse(fk(g["id"])["done"])
+        st.append(message(by="agent", text="Result: ★ a\nreasons", reply_to=g["id"]))
+        self.assertTrue(fk(g["id"])["done"])
+        # The kind is the fork's own, fixed when asked: locking later does not relabel it.
+        a = st.append(answer())
+        st.append(lock(a))
+        self.assertEqual(fk(f["id"])["kind"], "open")
+        # Any other fork: a progress note does not close it; its questions or a Result: reply do.
+        h = st.append(about(roles=("devops",)))
+        self.assertEqual(fk(h["id"])["kind"], "follow_up")
+        st.append(message(by="agent", text="Seats are reading.", reply_to=h["id"]))
+        self.assertFalse(fk(h["id"])["done"])
+        st.append(question(qid="LANE.1/Q3", forked_from=h["id"], star_by="devops"))
+        self.assertTrue(fk(h["id"])["done"])
+        i = st.append(fork())
+        self.assertEqual(fk(i["id"])["kind"], "item")
+        st.append(message(by="agent", text="Result: refused: bundle too large", reply_to=i["id"]))
+        self.assertTrue(fk(i["id"])["done"])
+        # An owner message starting "Result:" is not the agent's result.
+        j = st.append(fork())
+        st.append(message(text="Result: ★ a", reply_to=j["id"]))
+        self.assertFalse(fk(j["id"])["done"])
+
+    def test_forks_finished_before_the_result_line_stay_done(self):
+        # Review round 2, HIGH (measured on a real store: 7 done before, 0 after). The shape a
+        # pre-Result: store holds: item, round and follow-up forks with their questions and a plain
+        # summary reply. Catches: a done rule that needs Result: from them, so an upgrade would
+        # re-run every past deliberation; and the fallback leaking to open-question rounds.
+        st = self.store()
+        st.append(question())
+        st.append(lock(st.append(answer())))
+
+        def done():
+            return {fid: f["done"] for fid, f in V.build(st, ITEMS, V.make_evaluator(self.dir, {}))["forks"].items()}
+
+        old = []
+        item = st.append(fork())
+        rnd = st.append(follow_up(item["id"]))
+        fu = st.append(about(roles=("devops",)))
+        for n, f in enumerate((item, rnd, fu), 2):
+            st.append(question(qid=f"LANE.1/Q{n}", forked_from=f["id"], star_by="panel"))
+            st.append(message(by="agent", text="Summary: the committee found ...", reply_to=f["id"]))
+            old.append(f["id"])
+        self.assertEqual([done()[f] for f in old], [True, True, True])
+        # Open-question rounds (new) need the Result: line, whatever else exists.
+        st.append(question(qid="LANE.1/Q9"))
+        prog = st.append(about(qid="LANE.1/Q9", roles=("ux",)))
+        st.append(message(by="agent", text="Working: one seat running.", reply_to=prog["id"]))
+        repl = st.append(about(qid="LANE.1/Q9", roles=("analyst",)))
+        st.append(question(qid="LANE.1/Q10", forked_from=repl["id"], star_by="analyst"))
+        self.assertEqual((done()[prog["id"]], done()[repl["id"]]), (False, False))
+        st.append(message(by="agent", text="Result: replaced by LANE.1/Q10", reply_to=repl["id"]))
+        self.assertTrue(done()[repl["id"]])
+
+    def test_a_roar_refine_or_drill_still_needs_a_locked_answer(self):
+        # Counter-check on the relaxation: only seats deliberate before an answer.
+        st = self.store()
+        st.append(question())
+        st.append(answer())
+        for rec in (about(roles=("roar",)), fork(about_qid="LANE.1/Q1", step="refine"),
+                    fork(about_qid="LANE.1/Q1", step="drill")):
+            with self.assertRaisesRegex(StoreError, "no locked answer"):
+                st.append(rec)
+        self.assertFalse(any(r.get("about_qid") for r in st.records()))
 
 
 class DoorbellTests(Tmp):
@@ -2098,6 +2203,27 @@ class BundleTests(Tmp):
         # Counter-check: an item fork's bundle is unchanged, with no follow-up lead.
         g = st.append(fork())
         self.assertTrue(B.fork_context(self._view(st), ITEMS, g["id"]).startswith("# Deliberation bundle"))
+
+    def test_a_deliberation_on_an_open_question_says_it_is_open_and_what_it_returns(self):
+        # Owner ruling build_reply. Catches: a bundle that calls an open question a locked
+        # answer (so the seats review a decision nobody made), and one that never tells the
+        # session the round ends in one reply, not an answer or a lock.
+        from console_kit import bundle as B
+        st = self.store()
+        st.append(question(qid="LANE.1/Q1"))
+        f = st.append(about(qid="LANE.1/Q1", roles=("analyst",), text="Which survives?"))
+        text = B.fork_context(self._view(st), ITEMS, f["id"])
+        self.assertTrue(text.startswith("# Deliberation bundle: the open question `LANE.1/Q1`"), text[:120])
+        lead = text.split("## The request")[0]
+        for want in ("Which for LANE.1/Q1?", "(★ recommended)", "No answer yet.", "ONE reply",
+                     "never answers or locks", "The current answer is not locked."):
+            self.assertIn(want, lead)
+        self.assertNotIn("locked answer to", lead)
+        # Answered but not locked: still open, and the answer so far is shown.
+        st.append(answer(qid="LANE.1/Q1", picks=("a",), own_text="leaning A"))
+        text = B.fork_context(self._view(st), ITEMS, f["id"])
+        self.assertTrue(text.startswith("# Deliberation bundle: the open question"), text[:120])
+        self.assertIn("leaning A", text)
 
     def test_a_bundle_over_the_cap_is_refused_never_trimmed(self):
         # D14. Catches: a silent truncation that hands the committee a partial picture.
