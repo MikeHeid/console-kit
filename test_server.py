@@ -1708,7 +1708,7 @@ class Phase4Tests(_Live, unittest.TestCase):
                             "--format", "mermaid", "--file", str(work / "v.mmd"), "--doc", str(work / "v.md"),
                             "--title", "A to B"], capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn('"format": "mermaid"', r.stdout)
+        self.assertEqual(json.loads(r.stdout)["record"]["format"], "mermaid")  # compact off a terminal (K1, E3)
         self.lock_seed()
         f = self.owner_msg(item="LANE.1", intent="fork", mode="tighten", about_qid="LANE.1/Q1", roles=["roar"],
                            text="roar")
@@ -2375,6 +2375,125 @@ class UsageTests(_Live, unittest.TestCase):
                 with contextlib.redirect_stderr(io.StringIO()):
                     SV.main(["--root", ".", "--page", "p", "--state", "s", "--adapter", "a", "--team-domain", "t",
                              "--aud", "x", "--hostname", "h", flag, "relative.json"])
+
+
+class SlimReadCliTests(_Live, unittest.TestCase):
+    """K1 through `agent.py` against the real server: the 64 KiB cap (AC1.3), compact JSON (E3),
+    `todo` (E1), `view --item` (E2) and `--since` (E5)."""
+
+    def big_thread(self, n=4):
+        for k in range(n):  # four agent replies of 19 000 characters: a view of ~76 KB
+            code, out = self.agent_post("/message", {"item": "LANE.1", "text": f"{k} " + "x" * 19_000,
+                                                     "nonce": f"bigreply{k:04d}"})
+            self.assertEqual(code, 200, out)
+        return out["record"]["seq"]
+
+    def test_a_read_over_64_kib_is_refused_whole_and_names_the_narrower_command(self):
+        # AC1.3. Catches: a cap that truncates and exits 0, or prints the first 64 KiB of JSON.
+        last = self.big_thread()
+        for args in (("view",), ("view", "--item", "LANE"), ("view", "--since", "0")):
+            rc, out, err = self.agent_cli(*args)
+            self.assertEqual(rc, 4, (args, err))
+            self.assertEqual(out, "", args)          # no partial JSON, not even an opening brace
+            self.assertIn("todo", err)
+            self.assertIn("view --item ID", err)
+            self.assertIn("--full", err)
+        rc, out, err = self.agent_cli("view", "--full")
+        self.assertEqual(rc, 0, err)
+        self.assertGreater(len(out.encode()), 64 * 1024)
+        self.assertEqual(json.loads(out)["view"]["seq"], last)
+        # The narrower reads answer: todo, and only what came after the big replies.
+        rc, out, err = self.agent_cli("todo")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["inbox"], ["LANE.1/Q1"])
+        rc, out, err = self.agent_cli("view", "--since", str(last))
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["view"]["threads"], {})
+
+    def test_json_is_compact_off_a_terminal_and_indented_on_one(self):
+        # E3. Catches: compact output a person at a terminal has to read, or indented output piped to an agent.
+        rc, out, _ = self.agent_cli("view")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.count("\n"), 1)
+        self.assertNotIn(": ", out.split('"text"')[0])
+
+        class Tty(io.StringIO):
+            def isatty(self):
+                return True
+
+        import agent as AG
+        tty = Tty()
+        with contextlib.redirect_stdout(tty):
+            self.assertEqual(AG.main(["--state", str(self.cfg.state), "todo"]), 0)
+        self.assertIn('\n  "forks": []', tty.getvalue())
+
+    def test_a_server_one_kit_older(self):
+        # The fix for the defect measured on a live 0.8.8 server: `todo` raised KeyError on its view,
+        # which has no waiting_visuals. The server here builds its view exactly so. Catches: a crash,
+        # and a todo that drops the waiting visual; and, for a view missing what todo cannot derive,
+        # a traceback or a silently empty answer instead of one line naming the version.
+        from unittest import mock
+        req = self.owner_msg(item="LANE.1", intent="visual", text="draw it")
+        real = SV.V.build
+
+        def old_build(*a, **kw):  # a 0.8.8 view: none of the three fields K1 added
+            v = {k: x for k, x in real(*a, **kw).items() if k != "waiting_visuals"}
+            v["questions"] = {q: {k: x for k, x in d.items() if k != "last_seq"} for q, d in v["questions"].items()}
+            v["transcripts"] = {f: {k: x for k, x in t.items() if k != "seq"} for f, t in v["transcripts"].items()}
+            return v
+
+        with mock.patch.object(SV.V, "build", old_build):
+            rc, out, err = self.agent_cli("todo")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(json.loads(out)["visuals"], [{"id": req["id"], "item": "LANE.1"}])
+            rc, out, err = self.agent_cli("view", "--item", "LANE.1")
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(json.loads(out)["view"]["waiting_visuals"], [{"id": req["id"], "item": "LANE.1"}])
+            rc, out, err = self.agent_cli("answers", "--json")  # answers without --since needs nothing new
+            self.assertEqual(rc, 0, err)
+            # --since cannot see a 0.8.8 view's locks, so it refuses rather than drop them (review LOW c).
+            for args in (("answers", "--since", "0"), ("answers", "--json", "--since", "0"), ("view", "--since", "0")):
+                rc, out, err = self.agent_cli(*args)
+                self.assertEqual((rc, out), (1, ""), args)
+                said = [ln for ln in err.splitlines() if not ln.startswith("console ")]
+                self.assertEqual(len(said), 1, err)
+                self.assertNotIn("Traceback", err)
+                self.assertIn("questions.*.last_seq", said[0])
+                self.assertIn("restart the console server", said[0])
+        self.fork()
+
+        def older_still(*a, **kw):
+            v = real(*a, **kw)
+            return {**v, "forks": {f: {k: x for k, x in d.items() if k != "done"} for f, d in v["forks"].items()}}
+
+        with mock.patch.object(SV.V, "build", older_still):
+            for args in (("todo",), ("view", "--item", "LANE.1"), ("view", "--since", "0")):
+                rc, out, err = self.agent_cli(*args)
+                self.assertEqual((rc, out), (1, ""), args)
+                self.assertNotIn("Traceback", err)
+                said = [ln for ln in err.splitlines() if not ln.startswith("console ")]  # the server's own log
+                self.assertEqual(len(said), 1, err)
+                self.assertTrue(said[0].startswith("refused: "), err)
+                self.assertIn(f"runs kit {SV.__version__}", err)
+                self.assertIn("forks.*.done", err)
+                self.assertIn("restart the console server", err)
+
+    def test_view_item_and_answers_since_through_the_cli(self):
+        # E2 and E5 at the door. Catches: --item that ignores an unknown item, --since on answers ignored.
+        self.owner_msg(item="LANE", text="a note on the parent")
+        rc, out, err = self.agent_cli("view", "--item", "LANE.1")
+        self.assertEqual(rc, 0, err)
+        got = json.loads(out)
+        self.assertEqual((set(got["items"]), set(got["view"]["threads"])), ({"LANE.1"}, set()))
+        self.assertEqual(json.loads(self.agent_cli("todo")[1])["awaiting_agent"], ["LANE"])
+        rc, _, err = self.agent_cli("view", "--item", "NOPE")
+        self.assertEqual(rc, 1)
+        self.assertIn("no item 'NOPE'", err)
+        seq = json.loads(self.agent_cli("todo")[1])["seq"]
+        rc, out, _ = self.agent_cli("answers", "--json", "--since", str(seq))
+        self.assertEqual((rc, json.loads(out)["rows"]), (0, []))
+        rc, out, _ = self.agent_cli("answers", "--json", "--since", "0")
+        self.assertEqual([r["qid"] for r in json.loads(out)["rows"]], ["LANE.1/Q1"])
 
 
 if __name__ == "__main__":

@@ -16,12 +16,19 @@ user's registry only, and stop if this project is not registered there.
 
 ## 1. Find the fork
 
-    A view
+    A todo
 
-`forks` maps each fork message's record id to `{message, questions, kind,
-result, done}`. The fork to run is an owner message with `intent: "fork"`
-whose `done` is false, whether it was started on an item, beside one locked
-answer, or beside an open question.
+`todo.forks` lists every fork not done, oldest first: its `id`, `item`,
+`kind`, `mode`, `focus` and `roles` (and `about_qid`, `follow_up_of` or
+`step` when it has one). The fork to run is one of them, whether it was
+started on an item, beside one locked answer, or beside an open question.
+Then read its item, and only that:
+
+    A view --item ITEM
+
+There `forks` maps each fork message's record id on that item to `{message,
+questions, kind, result, done}`. Never read the whole view: a read over
+64 KiB is refused, naming the narrower command. If a read exits 4, run the narrower command named on stderr; do not retry the same command and do not add --full.
 
 **When a fork is done (one rule, the same in console-fork and console-process).**
 A fork is done when its result reply exists: an agent message on the fork's
@@ -34,9 +41,10 @@ the `Result:` reply is the preferred close for them too: `Result: <n>
 questions (<qids>)`, or `Result: refused: <why>` for a fork that could not
 run. Post questions (and a replacement question) FIRST and the result reply
 LAST, so a crash in between never makes an open-question round look done. A
-progress note or any other message never sets `reply_to` to the fork. `A view`
-computes this for you: `view.forks[<id>].done` (with `.kind` and `.result`);
-the page uses the same.
+progress note or any other message never sets `reply_to` to the fork. The
+console computes this for you: `A todo` lists only the forks not done, and
+`A view --item ITEM` shows `view.forks[<id>].done` (with `.kind` and
+`.result`); the page uses the same.
 
 From its message read:
 
@@ -106,7 +114,7 @@ agent. Each question is a JSON file for `A ask FILE`:
 ```
 
 - `qid` is `<item>/Q<n>` on an item inside the scope, with `n` the next number
-  unused on that item (`A view` shows the existing ones).
+  unused on that item (`A view --item ITEM` shows the existing ones).
 - `kind` is `single`, `multi` or `free` (free has no options).
 - `star` is the option recommended, and `star_by` whose recommendation it is:
   `panel` when the committee agreed, otherwise the seat (`architect`, `ux`,

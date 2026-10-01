@@ -78,10 +78,21 @@ the **console-fold** skill. If its export writes nothing new, go on to step 3.
 
 ## 3. Reply to every thread awaiting the agent
 
-    A view
+    A todo
+
+`todo` is everything this skill needs, filtered from the console's view and
+small (a few KB, where the whole view runs to hundreds): `forks` not done
+(id, item, kind, mode, roles), `awaiting_agent`, `chat`, waiting `visuals`
+(id, item), the owner's `inbox` qids and the store `seq`. Never read the whole
+view to find work: a read over 64 KiB is refused anyway, naming the narrower
+command. If a read exits 4, run the narrower command named on stderr; do not retry the same command and do not add --full.
 
 `awaiting_agent` lists the items whose latest owner message is newer than the
-agent's. Answer each one on its item:
+agent's. Read each one's thread, and only that:
+
+    A view --item ITEM
+
+then answer it on its item:
 
     A reply ITEM "text" [--reply-to RECORD_ID]
 
@@ -89,10 +100,15 @@ Answer what was asked, in plain words. If a message needs a decision rather
 than an answer, ask it as a question (the console-fork skill's format) instead
 of deciding it yourself.
 
-**The chat** (0.7.0). `view.chat.awaiting_agent` is true when the owner's
-latest chat message has no reply yet; `view.threads["@chat"]` holds the
-thread. A chat line on the doorbell (`"intent": "chat"`, `"item": "@chat"`)
-is what woke you. Answer the newest owner message there, in the same thread:
+**The chat** (0.7.0). `todo.chat.awaiting_agent` is true when the owner's
+latest chat message has no reply yet, and `todo.chat.reply_to` is that
+message's id. Read the thread with
+
+    A view --item @chat
+
+(`view.threads["@chat"]`). A chat line on the doorbell (`"intent": "chat"`,
+`"item": "@chat"`) is what woke you. Answer the newest owner message there,
+in the same thread:
 
     A reply @chat "text" --reply-to RECORD_ID
 
@@ -106,8 +122,8 @@ PR path. `@chat` is not an item: do not pass it to `A working`.
 
 ## 4. Run each waiting fork
 
-Every owner message with `intent: "fork"` that is not done
-(`view.forks[<id>].done` is false) is a deliberation to run: use the **console-fork** skill for
+Every fork in `todo.forks` (an owner message with `intent: "fork"` whose
+`view.forks[<id>].done` is false) is a deliberation to run: use the **console-fork** skill for
 each. That includes a follow-up on one locked answer, a fork that carries
 `about_qid` (its doorbell line carries it too); console-fork's section 6
 covers it. A fork whose `about_qid` names an OPEN question is a deliberation
@@ -126,9 +142,10 @@ the `Result:` reply is the preferred close for them too: `Result: <n>
 questions (<qids>)`, or `Result: refused: <why>` for a fork that could not
 run. Post questions (and a replacement question) FIRST and the result reply
 LAST, so a crash in between never makes an open-question round look done. A
-progress note or any other message never sets `reply_to` to the fork. `A view`
-computes this for you: `view.forks[<id>].done` (with `.kind` and `.result`);
-the page uses the same. So does a **roar** (`roles: ["roar"]`,
+progress note or any other message never sets `reply_to` to the fork. The
+console computes this for you: `A todo` lists only the forks not done, and
+`A view --item ITEM` shows `view.forks[<id>].done` (with `.kind` and
+`.result`); the page uses the same. So does a **roar** (`roles: ["roar"]`,
 section 7: a three-round panel, whose transcript you store with
 `A transcript`) and a **refine** or **drill** (`step`, section 8: the
 skill `.console-kit.json`'s `next_step` names, resolved only among your
@@ -138,8 +155,9 @@ At most three forks in one session (§6.6);
 past that, reply on the item that the rest wait for the next session, and
 leave them after the cursor.
 
-**Visual requests** (0.8.0). An owner message with `intent: "visual"` that
-nothing in `view.visuals[ITEM]` answers yet is a picture to draw: use the
+**Visual requests** (0.8.0). Each entry of `todo.visuals` (an owner message
+with `intent: "visual"` that nothing in `view.visuals[ITEM]` answers yet) is
+a picture to draw: use the
 **console-visual** skill for each. A visual line on the doorbell
 (`"intent": "visual"`) is what woke you.
 

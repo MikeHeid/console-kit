@@ -17,11 +17,16 @@ user's registry only, and stop if this project is not registered there.
 
 ## 1. Find the request
 
-    A view
+    A todo
 
-A visual request is an owner message with `"intent": "visual"` in
-`view.threads[ITEM]`; one is waiting when `view.visuals[ITEM]` holds nothing
-whose `request` is that message's id. Its `text` says what to draw.
+`todo.visuals` lists every waiting request as its `id` and `item`. A visual
+request is an owner message with `"intent": "visual"`; one is waiting when
+nothing in `view.visuals[ITEM]` names it as its `request`. Read its item:
+
+    A view --item ITEM
+
+The request is the message with that id in `view.threads[ITEM]`, and its
+`text` says what to draw. If a read exits 4, run the narrower command named on stderr; do not retry the same command and do not add --full.
 
 ## 2. Choose the form
 

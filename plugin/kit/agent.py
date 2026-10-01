@@ -6,9 +6,16 @@
     agent.py --state DIR watch [--since SEQ] [--timeout SECONDS]
                                                 block until the owner sends 'process', 'fork', 'chat' or
                                                 'visual', print it, exit
-    agent.py --state DIR view                   print the current view as JSON
+    agent.py --state DIR todo [--full]          what is waiting on the agent, as JSON: forks not done (id,
+                                                item, kind, mode, roles), awaiting_agent, chat, visual
+                                                requests, inbox qids, seq; filtered from `view`, never
+                                                worked out a second way
+    agent.py --state DIR view [--item ID] [--since SEQ] [--full]
+                                                the current view as JSON; --item narrows to that item and
+                                                everything under it (@chat: the chat), --since to what
+                                                changed after a store seq
     agent.py --state DIR health                 the server's health as JSON; exit 0 healthy, 1 not, 2 unreachable
-    agent.py --state DIR answers [--item ID] [--fork RECORD_ID] [--json]
+    agent.py --state DIR answers [--item ID] [--fork RECORD_ID] [--since SEQ] [--json] [--full]
                                                 every question in a scope with every answer it got (§7.6)
     agent.py --state DIR fork-context FORK_ID   the round's bundle for its committee (§6.3, D14)
     agent.py --state DIR check [--json]         why each stale answer is stale, condition by condition (0.5.0)
@@ -52,6 +59,11 @@
     agent.py --state DIR steward [NAME | --clear]
                                                 show, set or clear the console's steward in your registry (0.8.3;
                                                 you run this, never a session)
+
+**Slim reads (K1).** JSON goes out compact when stdout is not a terminal.
+`todo`, `view` and `answers` refuse a read over 64 KiB unless given --full:
+they print nothing on stdout, name the narrower command on stderr and exit 4,
+since a cut read would look whole.
 
 `register` records, in your own registry (~/.config/console-kit/projects.json),
 the project, this state dir, and the kit this agent.py lives in. The plugin
@@ -123,14 +135,100 @@ def _get_view(state: Path):
         print(f"cannot reach the console server at {state / 'agent.sock'}: {e}", file=sys.stderr)
         return None, 2
     if code != 200:
-        print(json.dumps(out, indent=2, ensure_ascii=False))
+        sys.stdout.write(_json(out))
         return None, 1
     return out, 0
 
 
-def _answers(state: Path, item: str | None, fork: str | None, as_json: bool) -> int:
-    """Print the answers sheet the page shows, from the same view (§7.6)."""
+MAX_READ = 64 * 1024  # bytes of UTF-8 a read prints without --full (K1, E4)
+TOO_LARGE = 4         # the exit code of a read refused for its size: nothing was printed
+
+
+def _json(obj) -> str:
+    """JSON for stdout: indented for a person at a terminal, compact for anything else (K1, E3)."""
+    if sys.stdout.isatty():
+        return json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
+    return json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n"
+
+
+def _emit(text: str, full: bool, what: str, narrower: str) -> int:
+    """Print `text` whole, or refuse it whole when it is over MAX_READ and --full was not given (K1, E4).
+
+    A cut read would look complete when it is not, so nothing is printed on a
+    refusal; the message names the size and the narrower command that answers it.
+    """
+    size = len(text.encode("utf-8"))
+    if size > MAX_READ and not full:
+        print(f"refused: `{what}` would print {size} bytes, over the {MAX_READ}-byte (64 KiB) cap; nothing was "
+              f"printed. Read less with {narrower}, or pass --full to print all of it.", file=sys.stderr)
+        return TOO_LARGE
+    sys.stdout.write(text)
+    return 0
+
+
+def _slim_view(state: Path, since: bool = False):
+    """The view for a slim read, or an exit code after saying why not.
+
+    The client upgrades with the plugin and the server only when restarted, so
+    the view can come from an older kit. What the slim reads need is checked
+    first; a view lacking it is refused in one line naming the server's version.
+    """
     out, rc = _get_view(state)
+    if out is None:
+        return None, rc
+    try:
+        V.check_view(out.get("view") if isinstance(out, dict) else None)
+        if not isinstance(out.get("items"), dict):
+            raise V.ViewTooOld("the payload has no items")
+        if since:
+            V.check_since(out["view"])
+    except V.ViewTooOld as e:
+        try:
+            _code, health = agent_request(state / "agent.sock", "GET", "/health", None)
+            ver = health.get("version", "unknown") if isinstance(health, dict) else "unknown"
+        except OSError:
+            ver = "unknown"
+        print(f"refused: the console server runs kit {ver} and {e}, which this client (kit {_kit_version()}) "
+              f"needs; restart the console server so it runs this kit", file=sys.stderr)
+        return None, 1
+    return out, 0
+
+
+def _kit_version() -> str:
+    from console_kit import __version__
+    return __version__
+
+
+def _view(state: Path, item: str | None, since: int | None, full: bool) -> int:
+    """The view, narrowed to an item (E2) and to what changed after a seq (E5), capped (E4)."""
+    out, rc = _slim_view(state, since=since is not None)
+    if out is None:
+        return rc
+    if item is not None:
+        try:
+            out = V.item_view(out, item)
+        except KeyError as e:
+            print(e.args[0], file=sys.stderr)
+            return 1
+    if since is not None:
+        out = {**out, "view": V.since(out["view"], since)}
+    what = "view" + (f" --item {item}" if item is not None else "") + (f" --since {since}" if since is not None else "")
+    return _emit(_json(out), full, what, "`todo` (what is waiting), `view --item ID` (one item and everything "
+                                          "under it) or `view --since SEQ` (only what changed after a store seq)")
+
+
+def _todo(state: Path, full: bool) -> int:
+    """What is waiting on the agent, filtered from the same view the page shows (E1)."""
+    out, rc = _slim_view(state)
+    if out is None:
+        return rc
+    return _emit(_json(V.todo(out["view"])), full, "todo", "`view --item ID` for one item")
+
+
+def _answers(state: Path, item: str | None, fork: str | None, as_json: bool, since: int | None = None,
+             full: bool = False) -> int:
+    """Print the answers sheet the page shows, from the same view (§7.6)."""
+    out, rc = _slim_view(state, since=since is not None)
     if out is None:
         return rc
     if item is not None and item not in out["items"]:
@@ -139,9 +237,12 @@ def _answers(state: Path, item: str | None, fork: str | None, as_json: bool) -> 
     if fork is not None and fork not in out["view"]["forks"]:
         print(f"no fork {fork!r}", file=sys.stderr)
         return 1
-    sheet = V.answers_sheet(out["view"], out["items"], item=item, fork=fork)
-    print(json.dumps(sheet, indent=2, ensure_ascii=False) if as_json else V.sheet_markdown(sheet), end="")
-    return 0
+    view = out["view"]
+    if since is not None:  # only the questions changed after SEQ (E5); the forks stay for --fork
+        view = {**view, "questions": V.since(view, since)["questions"]}
+    sheet = V.answers_sheet(view, out["items"], item=item, fork=fork)
+    return _emit(_json(sheet) if as_json else V.sheet_markdown(sheet), full, "answers",
+                 "`answers --item ID`, `answers --fork RECORD_ID` or `answers --since SEQ`")
 
 
 def _fork_context(state: Path, fork: str) -> int:
@@ -166,7 +267,7 @@ def _check(state: Path, as_json: bool) -> int:
         print(f"cannot reach the console server at {state / 'agent.sock'}: {e}", file=sys.stderr)
         return 2
     if code != 200 or as_json:
-        print(json.dumps(out, indent=2, ensure_ascii=False))
+        sys.stdout.write(_json(out))
         return 0 if code == 200 else 1
     stale = out["stale"]
     if not stale:
@@ -188,7 +289,7 @@ def _reanchor(state: Path, dry_run: bool, as_json: bool) -> int:
         print(f"cannot reach the console server at {state / 'agent.sock'}: {e}", file=sys.stderr)
         return 2
     if code != 200 or as_json:
-        print(json.dumps(out, indent=2, ensure_ascii=False))
+        sys.stdout.write(_json(out))
         return 0 if code == 200 else 1
     verb = "would re-anchor" if dry_run else "re-anchored"
     not_done = {p["lock"] for p in out["plan"] if p.get("skipped") or p.get("error")}
@@ -214,7 +315,7 @@ def _call(state: Path, method: str, path: str, body=None, agent: str | None = No
     except OSError as e:
         print(f"cannot reach the console server at {state / 'agent.sock'}: {e}", file=sys.stderr)
         return 2
-    print(json.dumps(out, indent=2, ensure_ascii=False))
+    sys.stdout.write(_json(out))
     return 0 if code == 200 else 1
 
 
@@ -313,8 +414,7 @@ def _visual_export(state: Path, project: Path, ids: list[str]) -> int:
     except (PC.ConfigError, VIS.VisualError, OSError) as e:
         print(f"refused, nothing overwritten: {e}", file=sys.stderr)
         return 1
-    print(json.dumps({"project": str(dest), "visuals_dir": vdir, **done, "refused": out["refused"]},
-                     indent=2, ensure_ascii=False))
+    sys.stdout.write(_json({"project": str(dest), "visuals_dir": vdir, **done, "refused": out["refused"]}))
     if not out["refused"]:
         return 0
     # 3: a partial export, told apart from 1 ("nothing was written") so a caller knows files landed.
@@ -345,12 +445,25 @@ def main(argv=None) -> int:
     s.add_argument("--since", type=int)
     s.add_argument("--timeout", type=float)
     s.add_argument("--poll", type=float, default=2.0)
-    sub.add_parser("view")
+    s = sub.add_parser("todo", description="What is waiting on the agent: forks not done, threads and the chat "
+                       "awaiting it, visual requests, the owner's inbox and the store seq (K1).")
+    s.add_argument("--full", action="store_true", help=f"print it even when over {MAX_READ} bytes")
+    s = sub.add_parser("view")
+    s.add_argument("--item", metavar="ID", help="only this item and everything under it (@chat: the chat)")
+    s.add_argument("--since", type=int, metavar="SEQ",
+                   help="only what changed after this store seq: a question when any record on it (asked, "
+                        "answered, locked, re-anchored) is newer, and every stale one, since staleness has no "
+                        "seq; a question that became valid again with no new record is not shown")
+    s.add_argument("--full", action="store_true", help=f"print it even when over {MAX_READ} bytes")
     sub.add_parser("health")
     s = sub.add_parser("answers")
     s.add_argument("--item")
     s.add_argument("--fork")
     s.add_argument("--json", action="store_true")
+    s.add_argument("--since", type=int, metavar="SEQ",
+                   help="only questions with a record (asked, answered, locked, re-anchored) after this store "
+                        "seq, and every stale one; one that became valid again with no new record is not shown")
+    s.add_argument("--full", action="store_true", help=f"print it even when over {MAX_READ} bytes")
     s = sub.add_parser("fork-context")
     s.add_argument("fork")
     s = sub.add_parser("check")
@@ -487,12 +600,14 @@ def _run(a, bell: Path) -> int:
         for line in found:
             print(json.dumps(line, sort_keys=True))
         return 0
+    if a.cmd == "todo":
+        return _todo(a.state, a.full)
     if a.cmd == "view":
-        return _call(a.state, "GET", "/view")
+        return _view(a.state, a.item, a.since, a.full)
     if a.cmd == "health":
         return _call(a.state, "GET", "/health")
     if a.cmd == "answers":
-        return _answers(a.state, a.item, a.fork, a.json)
+        return _answers(a.state, a.item, a.fork, a.json, a.since, a.full)
     if a.cmd == "fork-context":
         return _fork_context(a.state, a.fork)
     if a.cmd == "check":
