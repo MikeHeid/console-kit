@@ -200,6 +200,44 @@ class EarlyRefusalDrainTests(unittest.TestCase):
             self.assertEqual((r.status, json.loads(r.read()).get("error")), (400, "the body is not JSON"), route)
             c.close()
 
+    def test_a_trickled_body_is_refused_at_one_total_deadline(self):
+        # Catches (lane 4 review, LOW): a body read under the 30 s socket timeout alone, which is per read and
+        # restarts with every byte, so a client sending a byte every 0.2 s holds a handler thread for as long as
+        # it likes. Here 100 declared bytes at that pace would take 20 s; the deadline (patched to 1 s) ends it.
+        import socket as so
+        from unittest import mock
+        sock = self.server()
+        s = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+        s.settimeout(15)
+        s.connect(str(sock))
+        self.addCleanup(s.close)
+        stop = threading.Event()
+
+        def trickle():
+            try:
+                while not stop.wait(0.2):
+                    s.sendall(b" ")
+            except OSError:
+                pass
+
+        with mock.patch.object(SV, "BODY_SECONDS", 1.0):
+            t0 = time.monotonic()
+            s.sendall(b"POST /cursor HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n")
+            threading.Thread(target=trickle, daemon=True).start()
+            got = b""
+            try:
+                while not got.endswith(b"}"):
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    got += chunk
+            finally:
+                stop.set()
+            took = time.monotonic() - t0
+        self.assertIn(b" 408 ", got.split(b"\r\n", 1)[0], got[:80])
+        self.assertIn(b"the body did not arrive within 1 seconds", got)
+        self.assertLess(took, 3.0)
+
     def test_a_body_larger_than_max_body_is_not_read_or_waited_for(self):
         # Catches: draining whatever length is declared (an 8 MiB claim must not be read, nor waited on).
         took = self.refused_then_eof(self.server(), SV.AGENT_MAX_BODY * 4)

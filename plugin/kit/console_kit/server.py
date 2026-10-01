@@ -91,6 +91,7 @@ from .store import Store, StoreError
 
 HOST = "127.0.0.1"          # never configurable: the tunnel is the only way in
 DRAIN_SECONDS = 2.0         # at most this long, in all, reading a body an early refusal left unread
+BODY_SECONDS = 30.0         # at most this long, in all, receiving one request body (the per-read timeout restarts)
 MAX_BODY = 64 * 1024        # far above any real answer (MAX_TEXT is 20 000 characters)
 OWNER_ROUTES = {"/api/message": "message", "/api/answer": "answer", "/api/lock": "lock"}
 # The live console (0.7.0). A long poll: the page asks "has anything changed
@@ -1112,23 +1113,36 @@ class _Handler(BaseHTTPRequestHandler):
             super().finish()
 
     def _drain(self, left: int) -> None:
-        """Read and drop up to `left` bytes within DRAIN_SECONDS IN ALL, then stop.
+        """Read and drop up to `left` bytes within DRAIN_SECONDS IN ALL, then stop."""
+        self._read_within(left, DRAIN_SECONDS, keep=False)
+
+    def _read_within(self, left: int, seconds: float, keep: bool = True) -> bytes | None:
+        """Up to `left` bytes, read within `seconds` IN ALL: what arrived before EOF, or None past the deadline.
 
         The socket timeout alone is per read and restarts with every byte, so a
         client trickling one byte at a time could hold this thread for hours,
         and ThreadingMixIn caps nothing. Each read gets only the time that is
-        left of one total deadline.
+        left of one total deadline. `keep=False` drops what it reads.
         """
-        deadline = time.monotonic() + DRAIN_SECONDS
-        while left > 0:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return
-            self.connection.settimeout(remaining)
-            got = self.rfile.read1(min(left, 64 * 1024))
-            if not got:
-                return
-            left -= len(got)
+        deadline = time.monotonic() + seconds
+        chunks: list[bytes] = []
+        try:
+            while left > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self.connection.settimeout(remaining)
+                got = self.rfile.read1(min(left, 64 * 1024))
+                if not got:
+                    break
+                if keep:
+                    chunks.append(got)
+                left -= len(got)
+        except TimeoutError:
+            return None
+        finally:
+            self.connection.settimeout(self.timeout)   # the answer is written under the usual per-write timeout
+        return b"".join(chunks)
 
     def _send_raw(self, code: int, data: bytes, ctype: str, csp: str) -> None:
         """A body that is not JSON, under its own Content-Security-Policy (0.8.0, a stored visual)."""
@@ -1167,8 +1181,11 @@ class _Handler(BaseHTTPRequestHandler):
         if n > self.max_body:
             raise RequestError(413, f"the body is over {self.max_body} bytes")
         self._body_taken = True
+        data = self._read_within(n, BODY_SECONDS)
+        if data is None:   # the connection is closed after this answer, so the unread rest never matters
+            raise RequestError(408, f"the body did not arrive within {BODY_SECONDS:g} seconds")
         try:
-            return json.loads(self.rfile.read(n) or b"null")
+            return json.loads(data or b"null")
         except (ValueError, RecursionError):   # bad JSON, bad UTF-8, or nesting deeper than the decoder recurses
             raise RequestError(400, "the body is not JSON") from None
 
