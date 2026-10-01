@@ -4425,7 +4425,9 @@ class CostSidecarTests(unittest.TestCase):
             (self.claude / f).write_text(json.dumps({"secret": self.SENTINEL}))
         self.want = {}
         A, B = self.FORK_A, self.FORK_B
-        self.seat("S1", "a1", f"ck-fork:{A} ux seat", "console-kit:ux", [(100, 50, 1000, 10), (200, 0, 2000, 20)])
+        # M1: the description beyond its leading tag carries the sentinel; it must never be kept or returned.
+        self.seat("S1", "a1", f"ck-fork:{A} ux seat " + "x" * 40 + self.SENTINEL, "console-kit:ux",
+                  [(100, 50, 1000, 10), (200, 0, 2000, 20)])
         self.seat("S1", "a2", f"ck-fork:{A} architect seat", "console-kit:architect", [(300, 0, 500, 30)])
         self.seat("S1", "b1", f"ck-fork:{B} ux seat", "console-kit:ux", [(7000, 0, 7000, 70)])
         self.seat("S1", "gp", "review the diff", "general-purpose", [(900, 0, 900, 90)])
@@ -4578,7 +4580,7 @@ print(code)
             return real_os_open(p, *a, **k)
 
         with mock.patch.object(builtins, "open", spy_open), mock.patch.object(os, "open", spy_os_open):
-            got = self.C.collect(self.state, registry=self.reg, projects_dir=self.projects)
+            got, _stats = self.C.collect(self.state, registry=self.reg, projects_dir=self.projects)
         self.assertTrue(opened)
         allowed = [str(self.projects / self.main) + "/", str(self.projects / self.lane) + "/"]
         for p in opened:
@@ -4610,6 +4612,113 @@ print(code)
         other.mkdir()
         with self.assertRaises(self.C.CostError):
             self.C.project_slugs(other, self.reg)
+
+    # -- review round 1 (M1, M2, L1–L5) -------------------------------------------
+
+    def test_m1_only_the_leading_fork_tag_of_a_description_is_kept(self):
+        # Catches: a collector that keeps or returns the whole description (AC2.4 names only its leading tag).
+        meta = self.projects / self.main / "S1" / "subagents" / "agent-a1.meta.json"
+        got = self.C.meta_of(meta)
+        self.assertEqual(got, ("console-kit:ux", self.FORK_A))
+        self.assertNotIn(self.SENTINEL, repr(got))
+        # A tag past the first TAG_SPAN characters is not a leading tag.
+        self.assertIsNone(self.C.fork_of(" " * self.C.TAG_SPAN + f"ck-fork:{self.FORK_A}"))
+        self.assertEqual(self.C.fork_of(f"ck-fork:{self.FORK_A}"), self.FORK_A)
+        r = self.run_cli("costs", "collect")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn(self.SENTINEL, r.stdout + r.stderr + (self.state / "costs.jsonl").read_text())
+        self.assertEqual(self.lines()["a1"]["fork"], self.FORK_A)
+
+    def test_m2_a_symlinked_sidecar_is_not_followed(self):
+        # Catches: read() following STATE/costs.jsonl to any JSON-lines file the link names.
+        elsewhere = Path(self.tmp.name) / "elsewhere.jsonl"
+        elsewhere.write_text(json.dumps({"key": "x", "fork": self.FORK_A, "fresh": 1, "secret": self.SENTINEL}) + "\n")
+        before = elsewhere.read_bytes()
+        (self.state / "costs.jsonl").symlink_to(elsewhere)
+        for args in (("costs", "collect"), ("costs", "show", "--fork", self.FORK_A)):
+            r = self.run_cli(*args)
+            self.assertEqual(r.returncode, 1, args)
+            self.assertIn("symlink", r.stderr)
+            self.assertNotIn(self.SENTINEL, r.stdout + r.stderr)
+        self.assertEqual(elsewhere.read_bytes(), before)
+        self.assertTrue((self.state / "costs.jsonl").is_symlink())
+        self.assertEqual(list(self.state.glob(".costs.*.tmp")), [])
+
+    def test_m2_only_known_fields_survive_and_malformed_lines_are_counted(self):
+        # Catches: a sidecar line carrying any field through to the card, and silent drops.
+        rows = [{"key": "k1", "fork": self.FORK_A, "session": "S", "fresh": 5, "cache_read": 0, "output": 1,
+                 "turns": 1, "secret": self.SENTINEL},
+                {"key": "k2", "fork": self.FORK_A, "fresh": "lots"}]
+        (self.state / "costs.jsonl").write_text("\n".join(json.dumps(x) for x in rows) + "\nnot json\n")
+        got, bad = self.C.read_counted(self.state)
+        self.assertEqual(bad, 2)
+        self.assertEqual([r["key"] for r in got], ["k1"])
+        self.assertNotIn("secret", got[0])
+        r = self.run_cli("costs", "show", "--fork", self.FORK_A)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("2 malformed line(s)", r.stderr)
+        self.assertNotIn(self.SENTINEL, r.stdout + r.stderr)
+        self.assertEqual(json.loads(r.stdout)["fresh"], 5)
+
+    def test_m2_an_oversized_sidecar_is_refused(self):
+        from unittest import mock
+        (self.state / "costs.jsonl").write_text(json.dumps({"key": "k", "fresh": 1}) + "\n" * 64)
+        with mock.patch.object(self.C, "MAX_COSTS", 16):
+            with self.assertRaises(self.C.CostError):
+                self.C.read_counted(self.state)
+
+    def test_l1_symlinked_dirs_and_leaves_are_not_followed(self):
+        # Catches: following a symlinked session dir or transcript out to the sibling project's seats.
+        own = self.projects / self.main
+        (own / "S7").symlink_to(self.projects / self.sibling / "S9")
+        sub = own / "S1" / "subagents"
+        (sub / "agent-lnk.meta.json").write_text(json.dumps({"agentType": "console-kit:ux",
+                                                             "description": f"ck-fork:{self.FORK_A} ux"}))
+        (sub / "agent-lnk.jsonl").symlink_to(self.projects / self.sibling / "S9" / "subagents" / "agent-x1.jsonl")
+        got, stats = self.C.collect(self.state, registry=self.reg, projects_dir=self.projects)
+        keys = [r["key"] for r in got]
+        self.assertFalse(any("/S7/" in k or "agent-lnk" in k for k in keys), keys)
+        self.assertGreaterEqual(stats["skipped"], 2)
+        self.assertEqual(sum(r["fresh"] for r in got if r["fork"] == self.FORK_A),
+                         sum(self.want[n]["fresh"] for n in ("a1", "a2", "a3")))
+
+    def test_l2_an_over_long_line_is_skipped_and_counted(self):
+        from unittest import mock
+        sub = self.projects / self.main / "S1" / "subagents"
+        long = json.dumps({"message": {"id": "m_long", "usage": {"input_tokens": 777},
+                                       "content": "y" * 4096}})
+        with open(sub / "agent-a2.jsonl", "a") as fh:
+            fh.write(long + "\n")
+        with mock.patch.object(self.C, "MAX_LINE", 2048):
+            got, stats = self.C.collect(self.state, registry=self.reg, projects_dir=self.projects)
+        self.assertEqual(stats["long_lines"], 1)
+        a2 = next(r for r in got if r["key"].endswith("agent-a2.jsonl"))
+        self.assertEqual(a2["fresh"], self.want["a2"]["fresh"])          # the long line was never decoded
+
+    def test_l3_only_the_steward_collects(self):
+        # Catches: any session writing the sidecar when the console has a steward (§8.5: the steward runs it).
+        R.set_steward(self.state, "agent-5", path=self.reg)
+        r = self.run_cli("costs", "collect")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("steward", r.stderr)
+        self.assertFalse((self.state / "costs.jsonl").exists())
+        r = self.run_cli("--as", "agent-5", "costs", "collect")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual({x["agent"] for x in self.C.read(self.state)}, {"agent-5"})
+        self.assertEqual(self.run_cli("costs", "show", "--fork", self.FORK_A).returncode, 0)  # reading is open
+
+    def test_l5_agent_type_is_bounded_and_no_temp_file_is_left(self):
+        from unittest import mock
+        sub = self.projects / self.main / "S1" / "subagents"
+        (sub / "agent-gp.meta.json").write_text(json.dumps({"agentType": "t" * 65, "description": "x"}))
+        got, _ = self.C.collect(self.state, registry=self.reg, projects_dir=self.projects)
+        gp = next(r for r in got if r["key"].endswith("agent-gp.jsonl"))
+        self.assertEqual((gp["agent_type"], gp["role"]), (None, None))
+        with mock.patch.object(self.C.json, "dumps", side_effect=RuntimeError("disk full")):
+            with self.assertRaises(RuntimeError):
+                self.C.write(self.state, got)
+        self.assertEqual(list(self.state.glob(".costs.*.tmp")), [])
+        self.assertFalse((self.state / "costs.jsonl").exists())
 
 
 def stat_mode(p: Path) -> int:

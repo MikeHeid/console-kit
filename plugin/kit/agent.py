@@ -429,18 +429,28 @@ def _visual_export(state: Path, project: Path, ids: list[str]) -> int:
 def _costs(a) -> int:
     """`costs collect` / `costs show --fork ID` (K2). Reads transcripts here, in the session; the server never does."""
     from console_kit import costs as C
-    if a.action == "show":
-        if not a.fork:
-            print("costs show needs --fork RECORD_ID", file=sys.stderr)
+    if a.action == "show" and not a.fork:
+        print("costs show needs --fork RECORD_ID", file=sys.stderr)
+        return 1
+    if a.action == "collect":
+        why = steward_refusal(a.state, a.agent, "`costs collect`")   # §8.5: the steward runs it
+        if why:
+            print(why, file=sys.stderr)
             return 1
-        print(json.dumps(C.fork_card(C.read(a.state), a.fork), indent=2))
-        return 0
     try:
-        out = C.write(a.state, C.collect(a.state, agent=a.agent))
-    except C.CostError as e:
+        if a.action == "show":
+            rows, bad = C.read_counted(a.state)
+            out = C.fork_card(rows, a.fork)
+        else:
+            lines, stats = C.collect(a.state, agent=a.agent)
+            out = {**C.write(a.state, lines), **stats}
+            bad = out["dropped_malformed"]
+    except (C.CostError, R.RegistryError, OSError) as e:
         print(f"refused: {e}", file=sys.stderr)
         return 1
-    print(json.dumps(out))
+    if bad:
+        print(f"note: {bad} malformed line(s) in {a.state / C.FILE} were dropped", file=sys.stderr)
+    print(json.dumps(out, indent=2 if a.action == "show" else None))
     return 0
 
 
