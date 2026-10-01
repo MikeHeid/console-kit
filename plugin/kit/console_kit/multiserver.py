@@ -44,6 +44,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -69,6 +70,7 @@ MAX_ITEM_COUNT = 10_000
 MAX_PAGE = 4 << 20
 PROJECT_PATH = re.compile(r"^/p/([a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31})(/[^?#]*)\Z")
 FORBIDDEN = {"error": "forbidden"}   # one body for every refusal at the agent door: it names nothing (§3.5)
+DRAIN_SECONDS = 3.0   # the most a refused request's unread body may hold a thread, however it trickles
 POST_ROUTES = {"/cursor", "/working", "/reanchor", "/visual", "/visual-export", *SV.AGENT_ROUTES}
 BEARER = re.compile(r"^Bearer (ck1_[A-Za-z0-9_-]{43})\Z")
 NO_HASH = "0" * 64   # compared against when a project has no hash, so an unknown project costs the same compare
@@ -363,7 +365,7 @@ class MultiServer:
                             h = e.get(SF.TOKEN_KEY) if isinstance(e, dict) else None
                             if isinstance(name, str) and isinstance(h, str) and SF.TOKEN_HASH.match(h):
                                 hashes[name] = h
-                    except (SF.ServerFileError, R.RegistryError, OSError) as err:
+                    except (SF.ServerFileError, R.RegistryError, OSError, RecursionError) as err:
                         sys.stderr.write(f"console-server: {self.path} cannot be read, so every agent token is "
                                          f"refused until it is fixed: {err}\n")
                 self._hashes, self._hash_seen = hashes, key
@@ -411,13 +413,40 @@ class MultiAgentHandler(SV.AgentHandler):
 
     def _drain(self) -> None:
         """Read a refused request's body before answering, so the caller reads the refusal rather than a broken
-        pipe (a client still writing its body to a socket the server closed gets EPIPE, not the 403)."""
+        pipe (a client still writing its body to a socket the server closed gets EPIPE, not the 403).
+
+        This runs BEFORE the token is checked, so it has a TOTAL deadline
+        (DRAIN_SECONDS), not just the per-read timeout a trickling client resets
+        with every byte: past it the rest is left unread and the connection is
+        closed after the answer.
+
+        TODO(517f15b): goes once the `_Handler.finish` drain lands, which covers
+        every early exit; until then `_body_taken` is set here so that finish
+        never reads the same body a second time.
+        """
+        self._body_taken = True
         raw = self.headers.get("Content-Length") or ""
-        if raw.isascii() and raw.isdigit() and int(raw) <= self.max_body:
-            try:
-                self.rfile.read(int(raw))
-            except OSError:
-                pass
+        if not (raw.isascii() and raw.isdigit() and int(raw) <= self.max_body):
+            self.close_connection = True
+            return
+        left = int(raw)
+        deadline = time.monotonic() + DRAIN_SECONDS
+        try:
+            while left > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self.connection.settimeout(remaining)
+                chunk = self.rfile.read1(min(left, 65536))
+                if not chunk:
+                    break
+                left -= len(chunk)
+        except OSError:
+            pass
+        finally:
+            self.connection.settimeout(self.timeout)
+        if left:
+            self.close_connection = True
 
     def _project(self) -> Hosted | None:
         m = PROJECT_PATH.match(self.path)

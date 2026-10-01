@@ -35,6 +35,8 @@ so there is nothing to guess and no table to precompute.
 from __future__ import annotations
 
 import base64
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -61,6 +63,8 @@ TOKEN_KEY = "token_sha256"
 TOKEN = re.compile(r"^ck1_[A-Za-z0-9_-]{43}\Z")      # 32 bytes, unpadded base64url
 TOKEN_HASH = re.compile(r"^[0-9a-f]{64}\Z")
 MAX_TOKEN_FILE = 256
+WRITE_LOCK = "server.json.lock"   # beside server.json: every writer of it, and of tokens/, holds this
+TOKEN_TMP = re.compile(r"^\.token\..*\.tmp\Z")
 
 
 class ServerFileError(ValueError):
@@ -157,6 +161,41 @@ def _write_token(name: str, path: Path | None, registry: Path | None) -> str:
     return token_hash(tok)
 
 
+@contextlib.contextmanager
+def _writing(p: Path):
+    """Serialise every load-modify-write of server.json (and of tokens/) with an exclusive flock beside it.
+
+    Without it, a `rotate` racing an `add` could have the add, which loaded the
+    file before the rotation, write the revoked hash back. The lock also makes
+    the stale-temp sweep safe: no other writer can be mid-write while it runs.
+    """
+    p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(p.parent / WRITE_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)   # releases the lock
+
+
+def _sweep(p: Path) -> None:
+    """Remove `tokens/.token.*.tmp` left by a writer that died between mkstemp and rename (plaintext tokens).
+
+    Called under `_writing`, so no live writer's temp file can be among them.
+    """
+    d = tokens_dir(p)
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return
+    for n in names:
+        if TOKEN_TMP.match(n):
+            try:
+                os.unlink(d / n)
+            except OSError:
+                pass
+
+
 def rotate(name: str, path: Path | None = None, registry: Path | None = None) -> Path:
     """`server token rotate NAME`: a new token file and hash; the old token is refused from the next request.
 
@@ -165,7 +204,13 @@ def rotate(name: str, path: Path | None = None, registry: Path | None = None) ->
     while the file holds the NEW token, and a call made then is refused (and
     succeeds when retried). Returns the token file's path; never the token.
     """
-    p = path or location()
+    p = Path(path or location())
+    with _writing(p):
+        _sweep(p)
+        return _rotate(name, p, registry)
+
+
+def _rotate(name: str, p: Path, registry: Path | None) -> Path:
     doc = load(p)
     e = doc["projects"].get(name)
     if not isinstance(e, dict):
@@ -222,6 +267,8 @@ def load(path: Path | None = None) -> dict:
         doc = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as e:
         raise ServerFileError(f"{p} is not JSON: {e}") from None
+    except RecursionError:   # nesting deeper than the parser's stack: unreadable like any other bad file
+        raise ServerFileError(f"{p} is not JSON: nested too deeply") from None
     projects = doc.get("projects") if isinstance(doc, dict) else None
     if not isinstance(projects, dict):
         raise ServerFileError(f"{p} needs a \"projects\" object")
@@ -283,6 +330,13 @@ def add(name: str, state: Path, hostname: str, aud: str, port: int, team_domain:
     cuts off a running agent. The tokens directory inside a registered root
     is refused before anything is written.
     """
+    p = Path(path or location())
+    with _writing(p):
+        _sweep(p)
+        return _add(name, state, hostname, aud, port, team_domain, root, page, slugs, registry, p)
+
+
+def _add(name, state, hostname, aud, port, team_domain, root, page, slugs, registry, p: Path) -> dict:
     problems = []
     if N.problem(name):
         problems.append(f"project name: {N.problem(name)}")
@@ -303,7 +357,6 @@ def add(name: str, state: Path, hostname: str, aud: str, port: int, team_domain:
         r = roots[0]
     if not (isinstance(team_domain, str) and TEAM.match(team_domain)):
         problems.append(f"team domain {team_domain!r} is not a bare DNS name")
-    p = path or location()
     doc = load(p)
     old = doc["projects"].get(name) if isinstance(doc["projects"].get(name), dict) else {}
     e = {**old, "state": s, "root": r, "page": page, "hostname": hostname, "aud": aud, "port": port,

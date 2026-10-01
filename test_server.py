@@ -4737,5 +4737,219 @@ class ProjectTokenTests(_RawAgent, _OneServer, unittest.TestCase):
                           for f in b_before}, b_before)
 
 
+
+class TokenReviewTests(_RawAgent, _OneServer, unittest.TestCase):
+    """K4 review round 1: the token file's mode, the drain's deadline, the writers' lock, stale temp files, and a
+    server.json too deeply nested to parse."""
+
+    @contextlib.contextmanager
+    def fake_door(self):
+        """A listener on the one server's socket that records every request reaching it, and answers 200 {}."""
+        import socket as so
+        seen: list[bytes] = []
+        lsn = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+        lsn.bind(str(self.sock))
+        lsn.listen(16)
+        lsn.settimeout(0.2)
+        stop = threading.Event()
+
+        def serve():
+            while not stop.is_set():
+                try:
+                    c, _ = lsn.accept()
+                except OSError:
+                    continue
+                c.settimeout(5)
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = c.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                seen.append(data)
+                c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n"
+                          b"Connection: close\r\n\r\n{}")
+                c.close()
+        th = threading.Thread(target=serve, daemon=True)
+        th.start()
+        try:
+            yield seen
+        finally:
+            stop.set()
+            th.join()
+            lsn.close()
+
+    def agent_py(self, cwd, *args, state):
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg), "PYTHONDONTWRITEBYTECODE": "1"}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        env.pop("CONSOLE_KIT_SESSION", None)
+        return subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(state), *args],
+                              capture_output=True, text=True, env=env, timeout=120, cwd=cwd)
+
+    def test_a_token_file_others_can_read_is_refused_and_nothing_is_sent(self):
+        # Catches: dropping the mode (or owner) check on the token file. A token another user could read is
+        # treated as no token: read_token and agent.py both refuse, naming the FILE, and no request is made.
+        from unittest import mock
+        A = self.p["alpha"]
+        f = self.cfg / "console-kit" / "tokens" / "alpha"
+        with self.fake_door() as seen:
+            r = self.agent_py(A["root"], "health", state=A["state"])
+            self.assertEqual(r.returncode, 0, r.stderr)                   # the control: 0600 is sent
+            self.assertEqual(len(seen), 1)
+            os.chmod(f, 0o644)
+            with self.assertRaises(self.SF.ServerFileError) as cm:
+                self.SF.read_token("alpha", self.sfile)
+            self.assertIn(str(f), str(cm.exception))
+            self.assertNotIn(self.tokens["alpha"], str(cm.exception))
+            for args in (("health",), ("view",), ("reply", "PUSHED", "hi")):
+                r = self.agent_py(A["root"], *args, state=A["state"])
+                self.assertEqual(r.returncode, 1, (args, r.stderr))
+                self.assertIn(str(f), r.stderr)
+                self.assertIn("mode 0600", r.stderr)
+                self.assertNotIn(self.tokens["alpha"], r.stdout + r.stderr)
+            self.assertEqual(len(seen), 1)                                # nothing more reached the socket
+        # Owned by another uid: chown needs root, so the owner half is checked by making this process another
+        # user as far as read_token can tell.
+        os.chmod(f, 0o600)
+        with mock.patch.object(self.SF.os, "getuid", return_value=os.getuid() + 1):
+            with self.assertRaises(self.SF.ServerFileError) as cm:
+                self.SF.read_token("alpha", self.sfile)
+        self.assertIn("you own", str(cm.exception))
+        self.assertEqual(self.SF.read_token("alpha", self.sfile), self.tokens["alpha"])
+
+    def test_the_drain_marks_the_body_taken(self):
+        # Catches: a drain that leaves `_body_taken` unset, so a `_Handler.finish` drain (517f15b) would read the
+        # same body again and stall a thread for its read timeout.
+        import email.message
+        import io
+        from unittest import mock
+        h = object.__new__(MS.MultiAgentHandler)
+        h.headers = email.message.Message()
+        h.headers["Content-Length"] = "2"
+        h.rfile = io.BufferedReader(io.BytesIO(b"{}"))
+        h.connection, h.timeout, h.max_body, h.close_connection = mock.Mock(), 30, MS.SV.AGENT_MAX_BODY, False
+        h._drain()
+        self.assertIs(h._body_taken, True)
+        self.assertEqual(h.rfile.read(), b"")                             # the body was read, once
+        self.assertFalse(h.close_connection)
+
+    def test_a_refused_request_cannot_hold_a_thread_past_the_drain_deadline(self):
+        # Catches: a drain bounded only by the per-read timeout, which a client resets with every byte it trickles
+        # (or holds for 30 s by sending nothing). The refusal must come within DRAIN_SECONDS.
+        import socket as so
+        self.spawn()
+        head = ("POST /p/alpha/question HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+                "Content-Length: 1000000\r\n\r\n").encode()
+        for mode in ("silent", "trickle"):
+            sock = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+            sock.settimeout(MS.DRAIN_SECONDS + 5)
+            sock.connect(str(self.sock))
+            stop = threading.Event()
+            t0 = time.monotonic()
+            sock.sendall(head)
+
+            def trickle():
+                while not stop.wait(0.2):
+                    try:
+                        sock.sendall(b" ")
+                    except OSError:
+                        return
+            th = threading.Thread(target=trickle, daemon=True)
+            if mode == "trickle":
+                th.start()
+            try:
+                data = sock.recv(4096)
+            except so.timeout:
+                data = b""
+            elapsed = time.monotonic() - t0
+            stop.set()
+            if th.is_alive():
+                th.join()
+            sock.close()
+            self.assertLess(elapsed, MS.DRAIN_SECONDS + 2, mode)
+            self.assertTrue(data.startswith(b"HTTP/1.0 403"), (mode, data[:60]))
+        self.assertEqual(self.agent("GET", "/p/alpha/view")[0], 200)     # and the server still serves
+
+    def test_two_interleaved_writers_cannot_resurrect_a_revoked_hash(self):
+        # Catches: load-modify-write with no lock. An add that loaded server.json before a rotation would write
+        # the revoked hash back; the add is held between its load and its write while the rotation runs.
+        from unittest import mock
+        A, SF = self.p["alpha"], self.SF
+        old_hash = json.loads(self.sfile.read_text())["projects"]["alpha"]["token_sha256"]
+        loaded, go = threading.Event(), threading.Event()
+        real_load = SF.load
+
+        def slow_load(path=None):
+            doc = real_load(path)
+            if threading.current_thread().name == "adder" and not loaded.is_set():
+                loaded.set()
+                go.wait(10)
+            return doc
+        errs = []
+
+        def run(fn):
+            try:
+                fn()
+            except Exception as e:   # noqa: BLE001 - reported below
+                errs.append(e)
+        with mock.patch.object(SF, "load", slow_load):
+            adder = threading.Thread(name="adder", target=run, args=(lambda: SF.add(
+                "alpha", A["state"], "alpha.example.com", AUD, 4901, TEAM, registry=self.reg, path=self.sfile),))
+            rotator = threading.Thread(name="rotator", target=run,
+                                       args=(lambda: SF.rotate("alpha", self.sfile, self.reg),))
+            adder.start()
+            self.assertTrue(loaded.wait(10))
+            rotator.start()
+            time.sleep(0.5)                                               # the rotation runs now, if it can
+            go.set()
+            adder.join(30)
+            rotator.join(30)
+        self.assertEqual(errs, [])
+        stored = json.loads(self.sfile.read_text())["projects"]["alpha"]["token_sha256"]
+        self.assertNotEqual(stored, old_hash)
+        self.assertEqual(stored, SF.token_hash(SF.read_token("alpha", self.sfile)))
+
+    def test_add_and_rotate_sweep_stale_plaintext_temp_files(self):
+        # Catches: a crash between mkstemp and rename leaving a plaintext token in tokens/.token.*.tmp for ever.
+        A, SF = self.p["alpha"], self.SF
+        tdir = self.cfg / "console-kit" / "tokens"
+        stale = "ck1_" + "S" * 43
+        for run in (lambda: SF.rotate("alpha", self.sfile, self.reg),
+                    lambda: SF.add("alpha", A["state"], "alpha.example.com", AUD, 4901, TEAM, registry=self.reg,
+                                   path=self.sfile)):
+            (tdir / ".token.dead1234.tmp").write_text(stale + "\n")
+            (tdir / "keep-me.txt").write_text("not a temp file\n")
+            run()
+            self.assertEqual(sorted(p.name for p in tdir.iterdir()), ["alpha", "beta", "keep-me.txt"])
+            self.assertNotIn(stale, "".join(p.read_text() for p in tdir.iterdir()))
+
+    def test_a_server_json_nested_too_deeply_refuses_every_token_and_says_so_once(self):
+        # Catches: RecursionError escaping the loader (it is not a ValueError), which would 500 every request or
+        # crash agent.py instead of refusing alike.
+        SF = self.SF
+        ms = MS.MultiServer(self.sfile)
+        try:
+            self.assertIsNotNone(ms.token_hash("alpha"))
+            self.sfile.write_text("[" * 200_000)
+            with self.assertRaises(SF.ServerFileError):
+                SF.load(self.sfile)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                got = [ms.token_hash(n) for n in ("alpha", "beta", "alpha")]
+            self.assertEqual(got, [None, None, None])
+            lines = err.getvalue().splitlines()
+            self.assertEqual(len(lines), 1, lines)
+            self.assertIn("every agent token is refused", lines[0])
+            self.assertNotRegex(lines[0], TOKEN_SHAPE)
+            for tok in self.tokens.values():
+                self.assertNotIn(tok, lines[0])
+        finally:
+            ms.close()
+        r = self.agent_py(self.p["alpha"]["root"], "view", state=self.p["alpha"]["state"])
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("nested too deeply", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
