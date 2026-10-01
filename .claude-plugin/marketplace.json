@@ -11,7 +11,7 @@
       "name": "console-kit",
       "source": "./plugin",
       "description": "Answer your agents' questions from a web page behind Cloudflare Access; onboarding, server kit and skills included.",
-      "version": "0.8.7"
+      "version": "0.8.8"
     }
   ]
 }
