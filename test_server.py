@@ -3931,6 +3931,20 @@ class StewardGitTests(_Live, unittest.TestCase):
         st = (self.root / "specs/spec.md").stat()
         self.assertEqual(want["specs"], [{"path": "specs/spec.md", "mtime_ns": st.st_mtime_ns, "size": st.st_size}])
 
+    def test_a_malformed_condition_is_skipped_not_a_500(self):
+        # Catches (lane 4 review, LOW): wants() indexing c["sha256"] and calling .get on every condition with
+        # none of named_shas' isinstance guards, so one malformed condition turned /history-wants into a 500.
+        from unittest import mock
+        from console_kit import anchors as A
+        real = A.conditions_for
+        junk = ["not a dict", None, {"kind": "file_sha256"}, {"kind": "file_sha256", "sha256": 5, "path": "x"},
+                {"kind": "file_sha256", "sha256": "a" * 64, "path": ["specs/spec.md"]}]
+        with mock.patch.object(A, "conditions_for", lambda store, q: (junk + list(real(store, q)[0]),
+                                                                       real(store, q)[1])):
+            code, want = SV.agent_request(self.cfg.socket, "GET", "/history-wants")
+        self.assertEqual(code, 200, want)
+        self.assertEqual(want["blobs"], [{"path": "specs/spec.md", "sha256": self.v1}])
+
     # -- 1. check history ----------------------------------------------------------------------
 
     def test_check_history_returns_from_the_steward_and_the_label_without_it(self):

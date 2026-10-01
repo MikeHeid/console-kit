@@ -75,9 +75,15 @@ def named_shas(store) -> dict[str, str]:
         if head is None or store.lock_of(head["id"]) is None:
             continue
         for c in A.conditions_for(store, q)[0]:
-            if isinstance(c, dict) and c.get("kind") == "file_sha256" and isinstance(c.get("sha256"), str):
+            if _file_condition(c):
                 out.setdefault(c["sha256"], c["path"])
     return out
+
+
+def _file_condition(c: object) -> bool:
+    """A `file_sha256` condition in the shape the code below indexes; any other is skipped, never raised on."""
+    return (isinstance(c, dict) and c.get("kind") == "file_sha256" and isinstance(c.get("sha256"), str)
+            and isinstance(c.get("path"), str))
 
 
 def wants(store, root: Path, item_status, spec_stats: dict[str, tuple[int, int]]) -> dict:
@@ -94,7 +100,7 @@ def wants(store, root: Path, item_status, spec_stats: dict[str, tuple[int, int]]
         if head is None or store.lock_of(head["id"]) is None:
             continue
         for c in A.conditions_for(store, q)[0]:
-            if c.get("kind") == "file_sha256" and c["sha256"] not in seen and not tree.holds(c):
+            if _file_condition(c) and c["sha256"] not in seen and not tree.holds(c):
                 seen.add(c["sha256"])
                 blobs.append({"path": c["path"], "sha256": c["sha256"]})
     specs = [{"path": p, "mtime_ns": s[0], "size": s[1]} for p, s in sorted(spec_stats.items())]
