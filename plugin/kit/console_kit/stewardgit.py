@@ -29,8 +29,9 @@ of DATA, both untrusted, neither ever executed nor used to choose a path:
   changes no file's stat is not seen until the next push.
 
 Storage, per project under STATE/steward-git/: `blobs/<sha256 hex>` (written
-with mkstemp + replace, opened with O_NOFOLLOW, never named by anything the
-client sent) and `index.json` (commit ids and spec times). Every push prunes
+to an O_EXCL temporary and renamed over, opened with O_NOFOLLOW, never named by
+anything the client sent; every operation relative to a held folder descriptor,
+`_Folders`) and `index.json` (commit ids and spec times). Every push prunes
 the blobs no current lock names.
 """
 
@@ -44,7 +45,6 @@ import json
 import os
 import re
 import stat
-import tempfile
 import time
 from pathlib import Path
 
@@ -65,10 +65,6 @@ FROM = "from the steward"
 
 class PushError(ValueError):
     pass
-
-
-def _dir(state: Path) -> Path:
-    return Path(state) / DIR
 
 
 def named_shas(store) -> dict[str, str]:
@@ -145,45 +141,135 @@ def collect(root: Path, want: dict) -> tuple[list[dict], list[dict]]:
     return blobs, specs
 
 
-# -- writing ----------------------------------------------------------------------------------
+# -- the folders: every operation relative to a held descriptor ---------------------------------
 
-def _ensure(state: Path) -> Path:
-    d = _dir(state)
-    for p in (d, d / BLOBS):
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+class _Folders:
+    """STATE/steward-git and its blobs/, each held open as a descriptor.
+
+    Every open, rename, stat, list and unlink below names ONE component relative
+    to one of these descriptors, never a path: a symlink planted where either
+    folder goes is refused (O_NOFOLLOW on the folder itself), and one swapped in
+    after the open changes nothing, because nothing is looked up by path again.
+    `create` makes the folders (0700) for a write; a reader passes False and
+    gets None when they are not there.
+    """
+
+    def __init__(self, top: int, blobs: int) -> None:
+        self.top, self.blobs = top, blobs
+
+    @classmethod
+    def open(cls, state: Path, create: bool) -> "_Folders | None":
         try:
-            os.mkdir(p, 0o700)
-        except FileExistsError:
-            pass
-        if not stat.S_ISDIR(os.lstat(p).st_mode):   # a symlink or a file planted where the folder goes
-            raise PushError(f"{p.name} in the state folder is not a plain folder; nothing was stored")
-    return d
-
-
-def _write(folder: Path, name: str, data: bytes) -> None:
-    fd, tmp = tempfile.mkstemp(dir=folder, prefix=".tmp.")   # 0600 from creation
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-        os.replace(tmp, folder / name)
-    except BaseException:
-        try:
-            os.unlink(tmp)
+            st = os.open(state, DIR_FLAGS & ~os.O_NOFOLLOW)   # the configured state folder: the server's own
         except OSError:
-            pass
-        raise
+            if create:
+                raise PushError("the state folder cannot be opened; nothing was stored") from None
+            return None
+        fds: list[int] = []
+        try:
+            parent = st
+            for name in (DIR, BLOBS):
+                if create:
+                    try:
+                        os.mkdir(name, 0o700, dir_fd=parent)
+                    except FileExistsError:
+                        pass
+                try:
+                    fd = os.open(name, DIR_FLAGS, dir_fd=parent)
+                except OSError as e:
+                    if e.errno not in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
+                        raise
+                    if create:   # a symlink or a file planted where the folder goes
+                        raise PushError(f"{name} in the state folder is not a plain folder; nothing was stored") \
+                            from None
+                    return None
+                fds.append(fd)
+                parent = fd
+            return cls(fds[0], fds[1])
+        finally:
+            os.close(st)
+            if len(fds) < 2:
+                for fd in fds:
+                    os.close(fd)
 
+    def close(self) -> None:
+        os.close(self.blobs)
+        os.close(self.top)
+
+    def __enter__(self) -> "_Folders":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def names(self) -> list[str]:
+        return sorted(os.listdir(self.blobs))   # on a descriptor: fdopendir of a dup, no lookup by path
+
+    def size(self, name: str) -> int:
+        return os.stat(name, dir_fd=self.blobs, follow_symlinks=False).st_size
+
+    def unlink(self, name: str) -> None:
+        os.unlink(name, dir_fd=self.blobs)   # unlinkat never follows: a planted link is removed, not its target
+
+    def read(self, folder: int, name: str, limit: int) -> bytes | None:
+        """At most `limit` + 1 bytes of the REGULAR file `name` in `folder`; None when absent or not a plain file."""
+        try:
+            fd = os.open(name, FILE_FLAGS, dir_fd=folder)
+        except OSError as e:
+            if e.errno not in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
+                raise
+            return None   # absent, or a symlink planted in its place: never followed
+        with os.fdopen(fd, "rb") as fh:
+            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                return None
+            return fh.read(limit + 1)
+
+    def write(self, folder: int, name: str, data: bytes) -> None:
+        """`name` in `folder`, whole or not at all: a 0600 temporary created O_EXCL, then renamed over it."""
+        for _ in range(16):
+            tmp = ".tmp." + os.urandom(8).hex()
+            try:
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                             dir_fd=folder)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise PushError("no temporary name was free; nothing was stored")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            os.rename(tmp, name, src_dir_fd=folder, dst_dir_fd=folder)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=folder)
+            except OSError:
+                pass
+            raise
+
+
+# -- writing ----------------------------------------------------------------------------------
 
 def _empty() -> dict:
     return {"commits": {}, "specs": [], "pushed_at": None}
 
 
 def _read_index(state: Path) -> dict:
-    try:
-        fd = os.open(_dir(state) / INDEX, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except OSError:
+    f = _Folders.open(state, create=False)
+    if f is None:
         return _empty()
-    with os.fdopen(fd, "rb") as fh:
-        raw = fh.read(4 << 20)
+    with f:
+        return _load_index(f)
+
+
+def _load_index(f: _Folders) -> dict:
+    raw = f.read(f.top, INDEX, 4 << 20)
+    if raw is None:
+        return _empty()
     try:
         doc = json.loads(raw)
     except ValueError:
@@ -203,9 +289,22 @@ def pushed_at(state: Path) -> str | None:
     return _read_index(Path(state))["pushed_at"]
 
 
-def _write_index(state: Path, doc: dict) -> None:
+def _write_index(f: _Folders, doc: dict) -> None:
     doc["pushed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    _write(_dir(state), INDEX, json.dumps(doc, sort_keys=True).encode())
+    f.write(f.top, INDEX, json.dumps(doc, sort_keys=True).encode())
+
+
+def _prune(f: _Folders, named) -> int:
+    """Remove every blob no current lock names; the number removed."""
+    pruned = 0
+    for name in f.names():
+        if name not in named:
+            try:
+                f.unlink(name)
+                pruned += 1
+            except OSError:
+                pass
+    return pruned
 
 
 def push_blob(state: Path, store, body: object) -> dict:
@@ -226,20 +325,21 @@ def push_blob(state: Path, store, body: object) -> dict:
         raise PushError(f"the blob is over {MAX_BLOB} bytes")
     if hashlib.sha256(data).hexdigest() != sha:
         raise PushError(f"the content does not hash to {sha}; nothing was stored")
-    if sha not in named_shas(store):
+    named = named_shas(store)
+    if sha not in named:
         raise PushError(f"no current lock names {sha}; nothing was stored")
-    d = _ensure(state)
-    held = sum(os.lstat(d / BLOBS / n).st_size for n in os.listdir(d / BLOBS) if n != sha)
-    if held + len(data) > MAX_STORED:
-        raise PushError(f"this project's stored versions would pass {MAX_STORED} bytes; nothing was stored")
-    _write(d / BLOBS, sha, data)   # the file's name is the verified hash, never a string the client chose
-    idx = _read_index(state)
-    kept = isinstance(commit, str) and bool(COMMIT.match(commit))
-    if kept:
-        idx["commits"][sha] = commit
-    else:
-        idx["commits"].pop(sha, None)   # a commit id in any other shape is dropped
-    _write_index(state, idx)
+    with _Folders.open(state, create=True) as f:
+        held = sum(f.size(n) for n in f.names() if n != sha)
+        if held + len(data) > MAX_STORED:
+            raise PushError(f"this project's stored versions would pass {MAX_STORED} bytes; nothing was stored")
+        f.write(f.blobs, sha, data)   # the file's name is the verified hash, never a string the client chose
+        idx = _load_index(f)
+        kept = isinstance(commit, str) and bool(COMMIT.match(commit))
+        if kept:
+            idx["commits"][sha] = commit
+        else:
+            idx["commits"].pop(sha, None)   # a commit id in any other shape is dropped
+        _write_index(f, idx)
     return {"stored": sha, "commit": commit if kept else None}
 
 
@@ -275,20 +375,13 @@ def push_specs(state: Path, store, body: object, wanted: dict[str, tuple[int, in
             ignored.append(s["path"])   # not asked for, or the file changed since: never stored
             continue
         keep.append(s)
-    d = _ensure(state)
     named = named_shas(store)
-    pruned = 0
-    for name in sorted(os.listdir(d / BLOBS)):
-        if name not in named:
-            try:
-                os.unlink(d / BLOBS / name)   # unlink never follows: a planted link is removed, not its target
-                pruned += 1
-            except OSError:
-                pass
-    idx = _read_index(state)
-    idx["commits"] = {k: v for k, v in idx["commits"].items() if k in named}
-    idx["specs"] = keep
-    _write_index(state, idx)
+    with _Folders.open(state, create=True) as f:
+        pruned = _prune(f, named)
+        idx = _load_index(f)
+        idx["commits"] = {k: v for k, v in idx["commits"].items() if k in named}
+        idx["specs"] = keep
+        _write_index(f, idx)
     return {"specs": len(keep), "ignored": ignored, "pruned": pruned}
 
 
@@ -307,16 +400,13 @@ class PushedHistory:
     def find(self, rel: str, sha256: str):
         if not (isinstance(sha256, str) and SHA256.match(sha256)):
             return G.NO_GIT
-        try:
-            fd = os.open(_dir(self.state) / BLOBS / sha256, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        except OSError as e:
-            if e.errno not in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
-                raise
-            return G.NO_GIT   # absent, or a symlink planted in its place: never followed
-        with os.fdopen(fd, "rb") as fh:
-            if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
-                return G.NO_GIT
-            data = fh.read(MAX_BLOB + 1)
+        f = _Folders.open(self.state, create=False)
+        if f is None:
+            return G.NO_GIT
+        with f:
+            data = f.read(f.blobs, sha256, MAX_BLOB)
+        if data is None:
+            return G.NO_GIT   # absent, not a plain file, or a symlink planted in its place: never followed
         if len(data) > MAX_BLOB or hashlib.sha256(data).hexdigest() != sha256:
             return G.NO_GIT   # re-checked on every read: a changed file proves nothing
         return self._commits.get(sha256), data.decode("utf-8", errors="replace")

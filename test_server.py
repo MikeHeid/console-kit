@@ -3511,6 +3511,43 @@ def page_opens(trace: str, names: tuple[str, ...]) -> tuple[int, list[str]]:
     return safe, unsafe
 
 
+AT_CALLS = {"openat": "open", "openat2": "open", "newfstatat": "stat", "statx": "stat", "fstatat64": "stat",
+            "mkdirat": "", "unlinkat": "", "renameat": "", "renameat2": "", "readlinkat": ""}
+
+
+def dirfd_ops(trace: str, names: tuple[str, ...]) -> tuple[int, list[str]]:
+    """(safe count, unsafe lines) among ALL file syscalls in a `strace -e trace=%file` log naming one of `names`.
+
+    Safe: an *at call, every path it names given as ONE component (no "/") after a real dirfd (never AT_FDCWD);
+    an open also carries O_NOFOLLOW (openat2: RESOLVE_NO_SYMLINKS), a stat AT_SYMLINK_NOFOLLOW. Any other call
+    naming one of `names` (open, mkdir, rename, unlink, stat, lstat ...) is unsafe: it looks the path up again.
+    """
+    import re
+    safe, unsafe = 0, []
+    call = re.compile(r'^\d+\s+(\w+)\((.*)$')
+    pair = re.compile(r'(?:^|,\s*)(AT_FDCWD|-?\d+),\s*"([^"]*)"')
+    for line in trace.splitlines():
+        m = call.match(line)
+        if not m:
+            continue
+        sysc, args = m.groups()
+        paths = re.findall(r'"([^"]*)"', args)
+        if not any(p == n or p.endswith("/" + n) or ("/" + n + "/") in p for p in paths for n in names):
+            continue
+        pairs = pair.findall(args)
+        ok = (sysc in AT_CALLS and len(pairs) == len(paths)
+              and all(fd != "AT_FDCWD" and "/" not in p for fd, p in pairs))
+        if ok and AT_CALLS[sysc] == "open":
+            ok = "O_NOFOLLOW" in args or "RESOLVE_NO_SYMLINKS" in args
+        if ok and AT_CALLS[sysc] == "stat":
+            ok = "AT_SYMLINK_NOFOLLOW" in args
+        if ok:
+            safe += 1
+        else:
+            unsafe.append(line)
+    return safe, unsafe
+
+
 def check_then_open_read(root: Path, rel: str) -> bytes:
     """NEGATIVE CONTROL for the race: resolve, compare, then open the resolved path (two steps)."""
     p = os.path.realpath(os.path.join(root, rel))
@@ -3921,6 +3958,23 @@ class StewardGitTests(_Live, unittest.TestCase):
         (self.blob_dir() / self.v1).symlink_to(outside)
         self.assertEqual(self.condition()[1]["history"], NOGIT)
 
+    def test_a_symlink_planted_where_the_steward_folder_goes_is_refused_and_never_read(self):
+        # Catches: opening STATE/steward-git (or blobs/) with the link followed. The link's target holds the TRUE
+        # blob and index, so only O_NOFOLLOW on the folder stands between them and the panel, and a push must not
+        # write through it either.
+        import shutil
+        good = self.push()["blobs"][0]
+        outside = self.root.parent / f"{self.root.name}-sg-outside"
+        self.addCleanup(lambda: shutil.rmtree(outside, ignore_errors=True))
+        shutil.move(str(self.cfg.state / "steward-git"), str(outside))
+        (self.cfg.state / "steward-git").symlink_to(outside)
+        before = sorted(p.name for p in (outside / "blobs").iterdir())
+        self.assertEqual(self.condition()[1]["history"], NOGIT)
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob", good)
+        self.assertEqual(code, 400, out)
+        self.assertIn("steward-git in the state folder is not a plain folder", out["error"])
+        self.assertEqual(sorted(p.name for p in (outside / "blobs").iterdir()), before)
+
     def test_a_commit_id_in_any_other_shape_is_dropped(self):
         good = self.push()["blobs"][0]
         code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob", {**good, "commit": "HEAD; rm -rf"})
@@ -4075,6 +4129,59 @@ class OneServerStewardGitTests(_OneServer, unittest.TestCase):
         self.assertEqual(self.agent("GET", "/p/beta/check")[1]["history"], NOGIT)   # beta's data is its own
         self.stop()
         self.assertEqual(self.violations(), [])                 # no spawn, import or compile from a root
+
+    def history_push(self, alpha):
+        import subprocess
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg)}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        r = subprocess.run([sys.executable, str(HERE / "plugin" / "kit" / "agent.py"), "--state", str(alpha["state"]),
+                            "history-push", "--project", str(alpha["root"])],
+                           capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_every_steward_git_file_operation_is_dir_relative_and_follows_no_link(self):
+        # The syscall half of the K4 review's dir-fd finding: under strace, every file syscall of the server that
+        # names steward-git, blobs/, index.json or a blob (create, write, rename, list, stat, prune, read) goes
+        # through a held folder descriptor, one component at a time, with no link followed. Catches: any one of
+        # them done by path, which a symlink swapped in between two calls would redirect. NEGATIVE CONTROL: the
+        # same parser must flag path-based calls on the same names, or a parser that sees nothing passes anything.
+        import shutil
+        import subprocess
+        if shutil.which("strace") is None:
+            self.skipTest("strace not installed")
+        alpha = self.p["alpha"]
+        v1 = git_project(alpha["root"])
+        trace = self.t / "steward.strace"
+        self.spawn(prefix=("strace", "-f", "-qq", "-e", "trace=%file", "-o", str(trace)))
+        items = {"LANE": {"title": "a lane", "parent": None, "status": "open"},
+                 "LANE.1": {"title": "a phase", "parent": "LANE", "status": "open"}}
+        self.assertEqual(self.push("alpha", items)[0], 200)
+        self.assertEqual(self.agent("POST", "/p/alpha/question", spec_question(v1))[0], 200)
+        code, a = self.owner("alpha", "POST", "/api/answer", {"qid": "LANE.1/Q2", "picks": ["a"], "own_text": "",
+                                                             "nonce": "k4dirfdans01"})
+        self.assertEqual(code, 200, a)
+        self.assertEqual(self.owner("alpha", "POST", "/api/lock", {"qid": "LANE.1/Q2", "answer": a["record"]["id"],
+                                                                   "nonce": "k4dirfdlock1"})[0], 200)
+        self.history_push(alpha)                                  # creates the folders, writes a blob and the index
+        dead = "e" * 64
+        (alpha["state"] / "steward-git" / "blobs" / dead).write_bytes(b"no lock names this\n")
+        self.history_push(alpha)                                  # stats, lists and prunes, then writes again
+        self.assertFalse((alpha["state"] / "steward-git" / "blobs" / dead).exists())
+        [c] = self.agent("GET", "/p/alpha/check")[1]["stale"]["LANE.1/Q2"]["conditions"]
+        self.assertEqual(c["history"], "from the steward")       # the blob and the index were read
+        self.assertEqual(self.owner("alpha", "GET", "/api/view")[1]["view"]["tags"]["git"], "from the steward")
+        self.stop()
+        names = ("steward-git", "blobs", "index.json", v1, dead)
+        safe, unsafe = dirfd_ops(trace.read_text(), names)
+        self.assertEqual(unsafe, [])
+        self.assertGreaterEqual(safe, 12)                         # every kind above happened, each at least once
+        ctl = self.t / "control.strace"
+        sg = alpha["state"] / "steward-git"
+        subprocess.run(["strace", "-f", "-qq", "-e", "trace=%file", "-o", str(ctl), sys.executable, "-c",
+                        f"import os; os.lstat({str(sg)!r}); open({str(sg / 'index.json')!r}).read(); "
+                        f"os.rename({str(sg / 'index.json')!r}, {str(sg / 'index.json')!r}); "
+                        f"os.listdir({str(sg / 'blobs')!r})"], check=True, timeout=60)
+        self.assertEqual(len(dirfd_ops(ctl.read_text(), names)[1]), 4)   # each path-based call is caught
 
 
 if __name__ == "__main__":
