@@ -3318,9 +3318,9 @@ class OneServerTests(_OneServer, unittest.TestCase):
         self.assertIn("console_adapter.py", seen, r.stderr)
         self.assertIn("subprocess.Popen", seen)
 
-    AGENT_GETS = ("/view", "/check", "/health", "/no-such-route")
+    AGENT_GETS = ("/view", "/check", "/health", "/history-wants", "/no-such-route")
     AGENT_POSTS = ("/items", "/cursor", "/working", "/reanchor", "/visual", "/visual-export", "/question",
-                   "/message", "/transcript", "/no-such-route")
+                   "/message", "/transcript", "/history-blob", "/history-specs", "/no-such-route")
 
     def test_the_seam_is_the_only_admission_point(self):
         # K4 replaces `authorize` alone, so this is behaviour, not source text: with `authorize` refusing, EVERY
@@ -4230,7 +4230,7 @@ class OneServerStewardGitTests(_OneServer, unittest.TestCase):
         env.pop("CONSOLE_KIT_AGENT", None)
         r = subprocess.run([sys.executable, str(HERE / "plugin" / "kit" / "agent.py"), "--state", str(alpha["state"]),
                             "history-push", "--project", str(alpha["root"])],
-                           capture_output=True, text=True, env=env, timeout=120)
+                           capture_output=True, text=True, env=env, timeout=120, cwd=alpha["root"])   # K4: cwd picks
         self.assertEqual(r.returncode, 0, r.stderr)
         _, after = self.agent("GET", "/p/alpha/check")
         [c] = after["stale"]["LANE.1/Q2"]["conditions"]
@@ -4246,7 +4246,7 @@ class OneServerStewardGitTests(_OneServer, unittest.TestCase):
         env.pop("CONSOLE_KIT_AGENT", None)
         r = subprocess.run([sys.executable, str(HERE / "plugin" / "kit" / "agent.py"), "--state", str(alpha["state"]),
                             "history-push", "--project", str(alpha["root"])],
-                           capture_output=True, text=True, env=env, timeout=120)
+                           capture_output=True, text=True, env=env, timeout=120, cwd=alpha["root"])   # K4: cwd picks
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_every_steward_git_file_operation_is_dir_relative_and_follows_no_link(self):
@@ -4817,58 +4817,133 @@ class TokenReviewTests(_RawAgent, _OneServer, unittest.TestCase):
         self.assertIn("you own", str(cm.exception))
         self.assertEqual(self.SF.read_token("alpha", self.sfile), self.tokens["alpha"])
 
-    def test_the_drain_marks_the_body_taken(self):
-        # Catches: a drain that leaves `_body_taken` unset, so a `_Handler.finish` drain (517f15b) would read the
-        # same body again and stall a thread for its read timeout.
-        import email.message
-        import io
-        from unittest import mock
-        h = object.__new__(MS.MultiAgentHandler)
-        h.headers = email.message.Message()
-        h.headers["Content-Length"] = "2"
-        h.rfile = io.BufferedReader(io.BytesIO(b"{}"))
-        h.connection, h.timeout, h.max_body, h.close_connection = mock.Mock(), 30, MS.SV.AGENT_MAX_BODY, False
-        h._drain()
-        self.assertIs(h._body_taken, True)
-        self.assertEqual(h.rfile.read(), b"")                             # the body was read, once
-        self.assertFalse(h.close_connection)
+    def test_the_one_servers_post_routes_are_the_base_handlers(self):
+        # Catches: a route the base handler serves missing from POST_ROUTES (the one server would 404 it), or a
+        # name there the base does not serve.
+        import ast
+        import inspect
+        import textwrap
+        tree = ast.parse(textwrap.dedent(inspect.getsource(SV.AgentHandler.do_POST)))
+        served = {n.comparators[0].value for n in ast.walk(tree)
+                  if isinstance(n, ast.Compare) and isinstance(n.left, ast.Attribute) and n.left.attr == "path"
+                  and isinstance(n.comparators[0], ast.Constant)}
+        self.assertEqual(MS.POST_ROUTES, served | set(SV.AGENT_ROUTES))
+        self.assertEqual(set(OneServerTests.AGENT_POSTS) - {"/items", "/no-such-route"}, MS.POST_ROUTES)
 
-    def test_a_refused_request_cannot_hold_a_thread_past_the_drain_deadline(self):
-        # Catches: a drain bounded only by the per-read timeout, which a client resets with every byte it trickles
-        # (or holds for 30 s by sending nothing). The refusal must come within DRAIN_SECONDS.
+    def test_a_refused_request_is_answered_at_once_and_its_body_drained_within_the_base_deadline(self):
+        # Catches: a refusal that waits on the body before answering, and a drain bounded only by the per-read
+        # timeout (a client trickling a byte at a time resets it). The base `_Handler.finish` answers FIRST and
+        # drains after, within server.DRAIN_SECONDS in all; this holds for the one server's /p/ 403, 503 and 404.
         import socket as so
+        (self.p["beta"]["state"] / "store.jsonl").write_text('{"not": "a record"}\n')   # beta: a 503
         self.spawn()
-        head = ("POST /p/alpha/question HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
-                "Content-Length: 1000000\r\n\r\n").encode()
-        for mode in ("silent", "trickle"):
-            sock = so.socket(so.AF_UNIX, so.SOCK_STREAM)
-            sock.settimeout(MS.DRAIN_SECONDS + 5)
-            sock.connect(str(self.sock))
-            stop = threading.Event()
-            t0 = time.monotonic()
-            sock.sendall(head)
+        cases = (("403", "/p/alpha/question", ()), ("403 unknown", "/p/gamma/question", ()),
+                 ("503", "/p/beta/question", self.bearer(self.tokens["beta"])),
+                 ("404", "/p/alpha/no-such-route", self.bearer(self.tokens["alpha"])))
+        for label, path, headers in cases:
+            for mode in ("silent", "trickle"):
+                head = (f"POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+                        + "".join(f"{k}: {v}\r\n" for k, v in headers) + "Content-Length: 1000000\r\n\r\n").encode()
+                sock = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+                sock.settimeout(SV.DRAIN_SECONDS + 5)
+                sock.connect(str(self.sock))
+                stop = threading.Event()
 
-            def trickle():
-                while not stop.wait(0.2):
-                    try:
-                        sock.sendall(b" ")
-                    except OSError:
-                        return
-            th = threading.Thread(target=trickle, daemon=True)
-            if mode == "trickle":
-                th.start()
-            try:
-                data = sock.recv(4096)
-            except so.timeout:
-                data = b""
-            elapsed = time.monotonic() - t0
-            stop.set()
-            if th.is_alive():
-                th.join()
-            sock.close()
-            self.assertLess(elapsed, MS.DRAIN_SECONDS + 2, mode)
-            self.assertTrue(data.startswith(b"HTTP/1.0 403"), (mode, data[:60]))
+                def trickle():
+                    while not stop.wait(0.1):
+                        try:
+                            sock.sendall(b" ")
+                        except OSError:
+                            return
+                th = threading.Thread(target=trickle, daemon=True)
+                t0 = time.monotonic()
+                sock.sendall(head)
+                if mode == "trickle":
+                    th.start()
+                try:
+                    first = sock.recv(4096)
+                except so.timeout:
+                    first = b""
+                answered = time.monotonic() - t0
+                rest = b""
+                try:
+                    while True:                                           # then the close, after the drain
+                        chunk = sock.recv(4096)
+                        if not chunk:
+                            break
+                        rest += chunk
+                except (so.timeout, OSError):
+                    pass
+                closed = time.monotonic() - t0
+                stop.set()
+                if th.is_alive():
+                    th.join()
+                sock.close()
+                code = label.split()[0]
+                self.assertTrue(first.startswith(f"HTTP/1.0 {code}".encode()), (label, mode, first[:60]))
+                self.assertLess(answered, 1.0, (label, mode))           # well under the deadline: answered first
+                self.assertLess(closed, SV.DRAIN_SECONDS + 1.5, (label, mode))
         self.assertEqual(self.agent("GET", "/p/alpha/view")[0], 200)     # and the server still serves
+
+    def test_a_two_write_client_reads_every_refusal_never_a_broken_pipe(self):
+        # Catches: a /p/ 403, 503 or 404 closed with the body unread, so a client that sends its body in a second
+        # write (http.client, i.e. agent.py) gets EPIPE in place of the answer. Made deterministic: the body is
+        # written only AFTER the answer has been read, which succeeds only while the server is still draining.
+        import socket as so
+        (self.p["beta"]["state"] / "store.jsonl").write_text('{"not": "a record"}\n')
+        self.spawn()
+        body = b'{"text": "late"}'
+        for code, path, headers in (("403", "/p/alpha/question", ()), ("403", "/p/gamma/question", ()),
+                                    ("503", "/p/beta/question", self.bearer(self.tokens["beta"])),
+                                    ("404", "/p/alpha/no-such-route", self.bearer(self.tokens["alpha"]))):
+            sock = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect(str(self.sock))
+            sock.sendall((f"POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+                          + "".join(f"{k}: {v}\r\n" for k, v in headers)
+                          + f"Content-Length: {len(body)}\r\n\r\n").encode())
+            first = sock.recv(4096)
+            self.assertTrue(first.startswith(f"HTTP/1.0 {code}".encode()), (path, first[:60]))
+            time.sleep(0.2)                                               # the second write, well after the answer
+            try:
+                sock.sendall(body)
+            except OSError as e:
+                self.fail(f"{path}: the body's second write failed ({e!r}): the server closed without draining")
+            finally:
+                sock.close()
+        for _ in range(20):                                               # and the real two-write client
+            self.assertEqual(SV.agent_request(self.sock, "POST", "/p/alpha/question", {}), (403, MS.FORBIDDEN))
+
+    def test_the_sweep_never_runs_in_a_tokens_dir_linked_into_a_root(self):
+        # Catches: sweeping tokens/ before checking it, which deletes .token.*.tmp files in a repository that a
+        # symlinked tokens/ points into.
+        import shutil
+        A, SF = self.p["alpha"], self.SF
+        cfg2 = self.t / "cfg-link" / "console-kit"
+        cfg2.mkdir(parents=True)
+        shutil.copy(self.reg, cfg2 / "projects.json")
+        shutil.copy(self.sfile, cfg2 / "server.json")
+        (A["root"] / "tok").mkdir()
+        planted = A["root"] / "tok" / ".token.repo-file.tmp"
+        (cfg2 / "tokens").symlink_to(A["root"] / "tok")
+        for run in (lambda: SF.rotate("alpha", cfg2 / "server.json", self.reg),
+                    lambda: SF.add("alpha", A["state"], "alpha.example.com", AUD, 4901, TEAM, registry=self.reg,
+                                   path=cfg2 / "server.json")):
+            planted.write_text("a file of the repository's\n")
+            with self.assertRaises(SF.ServerFileError) as cm:
+                run()
+            self.assertIn("inside the registered project root", str(cm.exception))
+            self.assertEqual(planted.read_text(), "a file of the repository's\n")
+        # A link to a directory outside every root is refused too, and left unswept.
+        outside = self.t / "outside-tok"
+        outside.mkdir()
+        (outside / ".token.x.tmp").write_text("kept\n")
+        (cfg2 / "tokens").unlink()
+        (cfg2 / "tokens").symlink_to(outside)
+        with self.assertRaises(SF.ServerFileError) as cm:
+            SF.rotate("alpha", cfg2 / "server.json", self.reg)
+        self.assertIn("must be a directory you own", str(cm.exception))
+        self.assertTrue((outside / ".token.x.tmp").exists())
 
     def test_two_interleaved_writers_cannot_resurrect_a_revoked_hash(self):
         # Catches: load-modify-write with no lock. An add that loaded server.json before a rotation would write

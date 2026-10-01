@@ -130,14 +130,30 @@ def _inside_a_root(d: Path, registry: Path | None) -> str | None:
     return None
 
 
-def _write_token(name: str, path: Path | None, registry: Path | None) -> str:
-    """Mint a token, write it to its file (0600, 0700 dir, temp + rename) and return its HASH only."""
+def _check_tokens_dir(path: Path | None, registry: Path | None) -> None:
+    """Refuse a tokens directory inside a registered root, or one that is a link or not the user's own.
+
+    Runs before anything touches tokens/, the stale-temp sweep included, so a
+    tokens/ linked into a repository is never read, swept or written.
+    """
     d = tokens_dir(path)
     inside = _inside_a_root(d, registry)
     if inside is not None:
         raise ServerFileError(f"the tokens directory {d} lies inside the registered project root {inside}; a token "
                               f"must never be stored in a repository. Move XDG_CONFIG_HOME (or that link) outside "
                               f"every registered root")
+    try:
+        st = d.lstat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise ServerFileError(f"the tokens directory {d} must be a directory you own")
+
+
+def _write_token(name: str, path: Path | None, registry: Path | None) -> str:
+    """Mint a token, write it to its file (0600, 0700 dir, temp + rename) and return its HASH only."""
+    d = tokens_dir(path)
+    _check_tokens_dir(path, registry)
     d.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     d.mkdir(exist_ok=True, mode=0o700)
     st = d.lstat()
@@ -206,6 +222,7 @@ def rotate(name: str, path: Path | None = None, registry: Path | None = None) ->
     """
     p = Path(path or location())
     with _writing(p):
+        _check_tokens_dir(p, registry)
         _sweep(p)
         return _rotate(name, p, registry)
 
@@ -332,6 +349,7 @@ def add(name: str, state: Path, hostname: str, aud: str, port: int, team_domain:
     """
     p = Path(path or location())
     with _writing(p):
+        _check_tokens_dir(p, registry)
         _sweep(p)
         return _add(name, state, hostname, aud, port, team_domain, root, page, slugs, registry, p)
 

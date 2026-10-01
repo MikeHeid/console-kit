@@ -44,7 +44,6 @@ import stat
 import sys
 import tempfile
 import threading
-import time
 from dataclasses import dataclass, field
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -70,8 +69,10 @@ MAX_ITEM_COUNT = 10_000
 MAX_PAGE = 4 << 20
 PROJECT_PATH = re.compile(r"^/p/([a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31})(/[^?#]*)\Z")
 FORBIDDEN = {"error": "forbidden"}   # one body for every refusal at the agent door: it names nothing (§3.5)
-DRAIN_SECONDS = 3.0   # the most a refused request's unread body may hold a thread, however it trickles
-POST_ROUTES = {"/cursor", "/working", "/reanchor", "/visual", "/visual-export", *SV.AGENT_ROUTES}
+# The agent POST routes the base handler serves; anything else is the 404 below. `_Handler.finish` drains the
+# unread body of that 404, and of every 403 and 503 here, within its own total deadline.
+POST_ROUTES = {"/cursor", "/working", "/reanchor", "/visual", "/visual-export", "/history-blob", "/history-specs",
+               *SV.AGENT_ROUTES}
 BEARER = re.compile(r"^Bearer (ck1_[A-Za-z0-9_-]{43})\Z")
 NO_HASH = "0" * 64   # compared against when a project has no hash, so an unknown project costs the same compare
 
@@ -411,53 +412,14 @@ class MultiAgentHandler(SV.AgentHandler):
 
     multi: "MultiServer"
 
-    def _drain(self) -> None:
-        """Read a refused request's body before answering, so the caller reads the refusal rather than a broken
-        pipe (a client still writing its body to a socket the server closed gets EPIPE, not the 403).
-
-        This runs BEFORE the token is checked, so it has a TOTAL deadline
-        (DRAIN_SECONDS), not just the per-read timeout a trickling client resets
-        with every byte: past it the rest is left unread and the connection is
-        closed after the answer.
-
-        TODO(517f15b): goes once the `_Handler.finish` drain lands, which covers
-        every early exit; until then `_body_taken` is set here so that finish
-        never reads the same body a second time.
-        """
-        self._body_taken = True
-        raw = self.headers.get("Content-Length") or ""
-        if not (raw.isascii() and raw.isdigit() and int(raw) <= self.max_body):
-            self.close_connection = True
-            return
-        left = int(raw)
-        deadline = time.monotonic() + DRAIN_SECONDS
-        try:
-            while left > 0:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                self.connection.settimeout(remaining)
-                chunk = self.rfile.read1(min(left, 65536))
-                if not chunk:
-                    break
-                left -= len(chunk)
-        except OSError:
-            pass
-        finally:
-            self.connection.settimeout(self.timeout)
-        if left:
-            self.close_connection = True
-
     def _project(self) -> Hosted | None:
         m = PROJECT_PATH.match(self.path)
         name = m.group(1) if m else None
         h = self.multi.projects.get(name) if name else None
         if name is None or not authorize(self.multi, name, self.headers) or h is None:
-            self._drain()
             self._send(403, FORBIDDEN)   # an unknown project and a refused one look the same
             return None
         if h.fault is not None:
-            self._drain()
             self._send(503, {"error": f"{name}: {h.fault}"})
             return None
         self.console = h.console      # this request's project, for every route the handler already has
@@ -478,8 +440,7 @@ class MultiAgentHandler(SV.AgentHandler):
                 return self._send(200, self.console.push_items(self._body()))
             except SV.RequestError as e:
                 return self._send(e.code, {"error": str(e)})
-        if self.path not in POST_ROUTES:   # answered unread, a body still being written would meet a closed socket
-            self._drain()
+        if self.path not in POST_ROUTES:
             return self._send(404, {"error": "not found"})
         super().do_POST()
 
