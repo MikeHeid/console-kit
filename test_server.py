@@ -3100,6 +3100,10 @@ class OneServerTests(_OneServer, unittest.TestCase):
             view = self.agent("GET", f"/p/{name}/view")[1]
             self.assertEqual(view["view"]["tags"]["git"], NOGIT)   # labelled (F63), the key the page renders
         self.assertEqual(self.agent("GET", "/p/alpha/check")[1]["history"], NOGIT)
+        # The page reads the OWNER door: the same fields the single-project page renders (test_browser.py, the
+        # Q23 tests) must arrive there, so the label reaches the screen by the one rendering path.
+        self.assertEqual(self.owner("alpha", "GET", "/api/check")[1]["history"], NOGIT)
+        self.assertEqual(self.owner("alpha", "GET", "/api/view")[1]["view"]["tags"]["git"], NOGIT)
         health = self.agent("GET", "/health")
         self.assertEqual(health[0], 200)
         self.assertNotIn("alpha", json.dumps(health[1]))        # it names no project
