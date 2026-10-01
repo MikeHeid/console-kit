@@ -180,6 +180,12 @@ class EarlyRefusalDrainTests(unittest.TestCase):
             stop.set()
         return time.monotonic() - t0
 
+    def test_the_agent_door_serves_one_request_per_connection(self):
+        # Pins the premise /history-blob's per-INSTANCE max_body rests on (lane 4 review, LOW): HTTP/1.0, so a
+        # handler object never serves a second request. Catches: a move to HTTP/1.1 keep-alive, under which the
+        # raised limit would carry over to every later route on the same connection.
+        self.assertEqual(SV.AgentHandler.protocol_version, "HTTP/1.0")
+
     def test_a_body_nested_past_the_decoders_depth_is_refused_as_not_json(self):
         # Catches (lane 4 review, LOW): json.loads raising RecursionError, which `except ValueError` lets escape,
         # so the handler dies and the client gets a dropped connection instead of the normal refusal.

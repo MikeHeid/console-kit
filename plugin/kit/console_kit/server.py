@@ -1407,6 +1407,9 @@ class AgentHandler(_Handler):
             if self.path == "/visual-export":  # 0.8.1: a read; agent.py writes into the agent's own worktree
                 return self._send(200, self.console.visual_export(self._body()))
             if self.path == "/history-blob":   # Q23 part 2: one past version, proved by its own hash
+                # Set on the INSTANCE, and safe there: the handler speaks HTTP/1.0 (BaseHTTPRequestHandler's
+                # default protocol_version), so one handler object serves exactly one request and the larger
+                # limit cannot carry over to another route on a kept-alive connection.
                 self.max_body = SG.MAX_BLOB_BODY
                 return self._send(200, self.console.push_history_blob(self._body()))
             if self.path == "/history-specs":  # Q23 part 2: spec last-commit times, and a prune of the blobs
