@@ -3938,14 +3938,33 @@ class StewardGitTests(_Live, unittest.TestCase):
         from unittest import mock
         from console_kit import stewardgit as SG
         good = steward_push(self.console, self.root)["blobs"][0]
-        (self.blob_dir() / ("f" * 64)).write_bytes(b"x" * 100)   # what the folder already holds
+        (self.blob_dir() / ("f" * 64)).write_bytes(b"x" * 100)   # what the folder already holds, for a live lock
+        real = SG.named_shas
+        also = mock.patch.object(SG, "named_shas", lambda store: {**real(store), "f" * 64: "specs/other.md"})
         size = (self.blob_dir() / self.v1).stat().st_size
-        with mock.patch.object(SG, "MAX_STORED", size + 99):
+        with also, mock.patch.object(SG, "MAX_STORED", size + 99):
             code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob", good)
         self.assertEqual(code, 400, out)
         self.assertIn(f"would pass {size + 99} bytes", out["error"])
-        with mock.patch.object(SG, "MAX_STORED", size + 100):   # the control: exactly at the cap is allowed
+        with also, mock.patch.object(SG, "MAX_STORED", size + 100):   # the control: exactly at the cap is allowed
             self.assertEqual(SV.agent_request(self.cfg.socket, "POST", "/history-blob", good)[0], 200)
+
+    def test_blobs_no_lock_names_never_count_against_the_cap(self):
+        # Catches (lane 4 review, MEDIUM): a cap that counts dead blobs, so versions whose locks have moved on
+        # fill it and every later push of a NAMED blob is refused until a specs push happens to prune them.
+        from unittest import mock
+        from console_kit import stewardgit as SG
+        good = steward_push(self.console, self.root)["blobs"][0]
+        size = (self.blob_dir() / self.v1).stat().st_size
+        (self.blob_dir() / self.v1).unlink()
+        dead = [self.blob_dir() / (c * 64) for c in "abcd"]
+        for p in dead:
+            p.write_bytes(b"x" * size)                            # four dead versions, together 4x the cap
+        with mock.patch.object(SG, "MAX_STORED", size):
+            code, out = SV.agent_request(self.cfg.socket, "POST", "/history-blob", good)
+        self.assertEqual(code, 200, out)
+        self.assertEqual(sorted(p.name for p in self.blob_dir().iterdir()), [self.v1])
+        self.assertEqual(self.condition()[1]["history"], "from the steward")
 
     def test_a_symlink_planted_where_a_blob_goes_is_not_followed(self):
         # Catches: opening a blob by name with the link followed. The target holds the TRUE v1 bytes, so
@@ -4156,13 +4175,21 @@ class OneServerStewardGitTests(_OneServer, unittest.TestCase):
         items = {"LANE": {"title": "a lane", "parent": None, "status": "open"},
                  "LANE.1": {"title": "a phase", "parent": "LANE", "status": "open"}}
         self.assertEqual(self.push("alpha", items)[0], 200)
-        self.assertEqual(self.agent("POST", "/p/alpha/question", spec_question(v1))[0], 200)
-        code, a = self.owner("alpha", "POST", "/api/answer", {"qid": "LANE.1/Q2", "picks": ["a"], "own_text": "",
-                                                             "nonce": "k4dirfdans01"})
-        self.assertEqual(code, 200, a)
-        self.assertEqual(self.owner("alpha", "POST", "/api/lock", {"qid": "LANE.1/Q2", "answer": a["record"]["id"],
-                                                                   "nonce": "k4dirfdlock1"})[0], 200)
+        import base64, hashlib
+        now = (alpha["root"] / "specs/spec.md").read_bytes()
+        v2 = hashlib.sha256(now).hexdigest()                      # a second lock, on the current version
+        for n, (qid, sha) in enumerate((("LANE.1/Q2", v1), ("LANE.1/Q3", v2))):
+            q = {**spec_question(sha), "qid": qid, "nonce": f"k4dirfdque{n}"}
+            self.assertEqual(self.agent("POST", "/p/alpha/question", q)[0], 200)
+            code, a = self.owner("alpha", "POST", "/api/answer", {"qid": qid, "picks": ["a"], "own_text": "",
+                                                                 "nonce": f"k4dirfdans{n}"})
+            self.assertEqual(code, 200, a)
+            self.assertEqual(self.owner("alpha", "POST", "/api/lock", {"qid": qid, "answer": a["record"]["id"],
+                                                                       "nonce": f"k4dirfdloc{n}"})[0], 200)
         self.history_push(alpha)                                  # creates the folders, writes a blob and the index
+        code, out = self.agent("POST", "/p/alpha/history-blob",   # a second named blob: the cap stats the first
+                               {"sha256": v2, "commit": None, "content_b64": base64.b64encode(now).decode()})
+        self.assertEqual(code, 200, out)
         dead = "e" * 64
         (alpha["state"] / "steward-git" / "blobs" / dead).write_bytes(b"no lock names this\n")
         self.history_push(alpha)                                  # stats, lists and prunes, then writes again
@@ -4171,7 +4198,7 @@ class OneServerStewardGitTests(_OneServer, unittest.TestCase):
         self.assertEqual(c["history"], "from the steward")       # the blob and the index were read
         self.assertEqual(self.owner("alpha", "GET", "/api/view")[1]["view"]["tags"]["git"], "from the steward")
         self.stop()
-        names = ("steward-git", "blobs", "index.json", v1, dead)
+        names = ("steward-git", "blobs", "index.json", v1, v2, dead)
         safe, unsafe = dirfd_ops(trace.read_text(), names)
         self.assertEqual(unsafe, [])
         self.assertGreaterEqual(safe, 12)                         # every kind above happened, each at least once

@@ -329,6 +329,7 @@ def push_blob(state: Path, store, body: object) -> dict:
     if sha not in named:
         raise PushError(f"no current lock names {sha}; nothing was stored")
     with _Folders.open(state, create=True) as f:
+        _prune(f, named)   # first: blobs whose locks have moved on never count against the cap
         held = sum(f.size(n) for n in f.names() if n != sha)
         if held + len(data) > MAX_STORED:
             raise PushError(f"this project's stored versions would pass {MAX_STORED} bytes; nothing was stored")
