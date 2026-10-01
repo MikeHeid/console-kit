@@ -313,11 +313,14 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   whole-file hash was locked against. `reanchor` leaves locks stale and says
   why. Refine chips show a spec's file time in place of its last commit.
   These return once an agent-side step computes and supplies them.
-- **How it is held.** `console_kit/gitseam.py` is the only place a process
-  can be started, and the server closes it before reading the project. A test
-  runs the real server under an audit hook and fails if any route starts a
-  process. A second test walks every kit module's syntax tree and fails on
-  any other way to start one.
+- **How it is held.** Among the modules the server runs,
+  `console_kit/gitseam.py` is the only place a process can be started, and
+  the server closes it before reading the project. (`agent.py` and `tools/`
+  still run git, in the agent's or the operator's own process; the server
+  never imports them.) A test runs the real server under an audit hook and
+  fails if any route starts a process. A second test walks the syntax tree of
+  every kit module except those named exceptions, and fails on any other way
+  to start one.
 
 ## How it fits together
 
