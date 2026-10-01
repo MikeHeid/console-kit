@@ -4966,7 +4966,7 @@ class MultiStoreTests(unittest.TestCase):
             ms.close()
 
     def test_ac34_a_second_one_server_holding_beta_refuses_it_here(self):
-        only_beta = self.t / "only-beta.json"
+        only_beta = self.reg.parent / "only-beta.json"   # beside the registry, as server.json always is
         doc = json.loads(self.sfile.read_text())
         only_beta.write_text(json.dumps({**doc, "projects": {"beta": doc["projects"]["beta"]}}))
         first = self.server(only_beta)
@@ -4975,6 +4975,73 @@ class MultiStoreTests(unittest.TestCase):
         self.assertEqual(ms.served(), ["alpha"])
         self.assertIn("another console server holds", ms.refused()["beta"])
         self.assertIn("server.lock", ms.refused()["beta"])
+
+    def test_any_exception_opening_one_project_is_that_project_s_fault(self):
+        # Catches: open_project catching a fixed list of types, so an exception nobody foresaw (here a RuntimeError
+        # from beta's seed) escapes MultiServer() and takes alpha down with it.
+        real = self.MS.ProjectConsole.seed
+
+        def seed(console):
+            if console.cfg.project == "beta":
+                raise RuntimeError("nobody foresaw this")
+            return real(console)
+        self.MS.ProjectConsole.seed = seed
+        try:
+            ms = self.server()
+        finally:
+            self.MS.ProjectConsole.seed = real
+        self.assertEqual(ms.served(), ["alpha"])
+        self.assertEqual(ms.refused()["beta"], "beta's console cannot open: RuntimeError: nobody foresaw this")
+        self.assertEqual(self.MultiServerLock(self.p["beta"]["state"]), "free")   # its lock released
+
+    def MultiServerLock(self, state):
+        import fcntl
+        fd = os.open(state / "server.lock", os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return "free"
+        except OSError:
+            return "held"
+        finally:
+            os.close(fd)
+
+    def test_a_server_json_root_not_registered_on_its_state_is_refused_at_start(self):
+        # Catches: trusting server.json's root after `server add` (a hand edit could point a project anywhere).
+        stray = self.t / "root-stray"
+        stray.mkdir()
+        doc = json.loads(self.sfile.read_text())
+        doc["projects"]["beta"]["root"] = str(stray)
+        self.sfile.write_text(json.dumps(doc))
+        ms = self.server()
+        self.assertEqual(ms.served(), ["alpha"])
+        self.assertIn(f"root {stray} is not registered on the console at", ms.refused()["beta"])
+
+    def test_the_agent_socket_folder_must_be_0700_and_yours(self):
+        # Catches: a socket made in a folder other users can enter.
+        ms = self.server()
+        d = self.t / "sockdir"
+        d.mkdir(mode=0o755)
+        os.chmod(d, 0o755)
+        with self.assertRaises(SystemExit) as cm:
+            self.MS._agent_server(ms, d / "server.sock")
+        self.assertIn(f"chmod 700 {d}", str(cm.exception))
+        self.assertFalse((d / "server.sock").exists())
+        os.chmod(d, 0o700)
+        srv = self.MS._agent_server(ms, d / "server.sock")       # the control: 0700 is accepted
+        srv.server_close()
+
+    def test_a_held_root_is_found_by_its_configured_path_never_by_resolving_it(self):
+        # Catches: looking the held descriptor up by realpath(root) on each read, which lets a root path swapped
+        # for a symlink to ANOTHER held root read that project's tree.
+        from console_kit import rootfs as RF
+        a, b = self.t / "held-a", self.t / "held-b"
+        for d, text in ((a, "A-OWN"), (b, "B-OWN")):
+            d.mkdir()
+            (d / "f.txt").write_text(text)
+            RF.hold(d)
+        os.rename(a, self.t / "held-a.moved")
+        os.symlink(b, a)                                          # alpha's root path now leads to beta's root
+        self.assertEqual(RF.read(a, "f.txt", 100), b"A-OWN")     # still the tree alpha opened at start
 
     def test_a_stale_old_socket_file_does_not_refuse(self):
         import socket

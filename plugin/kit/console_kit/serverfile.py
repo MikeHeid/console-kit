@@ -134,6 +134,12 @@ def _write(p: Path, doc: dict) -> None:
         raise
 
 
+def registered_roots(state: str | Path, projects: dict) -> list[str]:
+    """The roots the registry (`R.load`'s result) registers on the console at `state`, real paths, sorted."""
+    s = os.path.realpath(state)
+    return sorted(r for r, e in projects.items() if isinstance(e, dict) and e.get("state") == s)
+
+
 def add(name: str, state: Path, hostname: str, aud: str, port: int, team_domain: str,
         root: Path | None = None, page: str = "index.html", slugs: list[str] | None = None,
         registry: Path | None = None, path: Path | None = None) -> dict:
@@ -149,8 +155,7 @@ def add(name: str, state: Path, hostname: str, aud: str, port: int, team_domain:
     if N.problem(name):
         problems.append(f"project name: {N.problem(name)}")
     s = os.path.realpath(state)
-    projects = R.load(registry)
-    roots = sorted(r for r, e in projects.items() if isinstance(e, dict) and e.get("state") == s)
+    roots = registered_roots(s, R.load(registry))
     r = ""
     if not roots:
         problems.append(f"no project is registered on the console at {s}; run `agent.py --state {s} register "

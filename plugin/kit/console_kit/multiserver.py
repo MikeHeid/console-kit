@@ -46,6 +46,7 @@ from typing import Callable
 from . import gitseam as G
 from . import projectcfg as PC
 from . import publish as P
+from . import registry as R
 from . import rootfs as RF
 from . import names as N
 from . import schema as S
@@ -62,6 +63,50 @@ MAX_ITEM_COUNT = 10_000
 MAX_PAGE = 4 << 20
 PROJECT_PATH = re.compile(r"^/p/([a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31})(/[^?#]*)\Z")
 FORBIDDEN = {"error": "forbidden"}   # one body for every refusal at the agent door: it names nothing (§3.5)
+
+
+ITEM_FIELDS = {"title": (str,), "parent": (str, type(None)), "status": (str, type(None))}
+
+
+def snapshot_problem(doc: object) -> str | None:
+    """Why a pushed (or stored) snapshot cannot be served, naming the first bad field; None when it can.
+
+    One check for both doors in: `items-push` refuses with it, and a stored
+    STATE/items.json that fails it refuses that project, so no request ever
+    reaches the view with an item it cannot read (a list `parent` is unhashable
+    there, a number `title` breaks the feed).
+    """
+    if not isinstance(doc, dict) or set(doc) - {"items", "seed_questions", "board"} or "items" not in doc:
+        return 'items-push sends {"items": {...}, "seed_questions": [...], "board": ...}'
+    items, seeds, board = doc["items"], doc.get("seed_questions", []), doc.get("board")
+    if not isinstance(items, dict) or len(items) > MAX_ITEM_COUNT:
+        return f"items is an object of at most {MAX_ITEM_COUNT} item ids"
+    for k, v in items.items():
+        if not (isinstance(k, str) and len(k) <= 128 and S.ITEM_ID.match(k)):
+            return f"items: {k[:40]!r} is not an item id" if isinstance(k, str) else "items: an id is not a string"
+        if not isinstance(v, dict):
+            return f"items.{k} is not an object"
+        if set(v) - set(ITEM_FIELDS):
+            return f"items.{k} has unknown fields {sorted(set(v) - set(ITEM_FIELDS))[:5]}; known: {sorted(ITEM_FIELDS)}"
+        if "title" not in v:
+            return f"items.{k}.title is missing"
+        for f, types in ITEM_FIELDS.items():
+            if f in v and not isinstance(v[f], types):
+                want = " or ".join("null" if t is type(None) else t.__name__ for t in types)
+                return f"items.{k}.{f} must be {want}, not {type(v[f]).__name__}"
+    if seeds is None:
+        seeds = []
+    if not isinstance(seeds, list) or not all(isinstance(q, dict) for q in seeds):
+        return "seed_questions is a list of question objects"
+    for n, q in enumerate(seeds):   # the seed reads qid before the store checks the rest
+        if not isinstance(q.get("qid"), str):
+            return f"seed_questions[{n}].qid must be str"
+    if board is not None and not (isinstance(board, dict) and isinstance(board.get("shape"), str)
+                                  and isinstance(board.get("values"), dict)
+                                  and all(isinstance(k, str) and isinstance(v, str)
+                                          for k, v in board["values"].items())):
+        return "board is null or {shape: str, values: {str: str}}"
+    return None
 
 
 class SnapshotAdapter:
@@ -91,8 +136,14 @@ class SnapshotAdapter:
                     raw = fh.read(MAX_ITEMS + 1)
                 if len(raw) > MAX_ITEMS:
                     raise StoreError(f"{self.path} is over {MAX_ITEMS} bytes")
-                doc = json.loads(raw.decode("utf-8"))
-                self._doc = {"items": doc.get("items") or {}, "seed_questions": doc.get("seed_questions") or [],
+                try:
+                    doc = json.loads(raw.decode("utf-8"))
+                except ValueError as e:   # UnicodeDecodeError and JSONDecodeError both
+                    raise StoreError(f"{self.path} is not JSON: {e}") from None
+                why = snapshot_problem(doc)
+                if why:
+                    raise StoreError(f"{self.path}: {why}")
+                self._doc = {"items": doc["items"], "seed_questions": doc.get("seed_questions") or [],
                              "board": doc.get("board")}
                 self._seen = key
             return self._doc
@@ -179,20 +230,10 @@ class ProjectConsole(SV.Console):
 
     def push_items(self, body: object) -> dict:
         """`items-push` (§3.6): the steward's adapter output, as data. Kept in STATE/items.json, then seeded."""
-        if not isinstance(body, dict) or set(body) - {"items", "seed_questions", "board"} or "items" not in body:
-            raise SV.RequestError(400, 'items-push sends {"items": {...}, "seed_questions": [...], "board": ...}')
-        items, seeds, board = body["items"], body.get("seed_questions", []), body.get("board")
-        if (not isinstance(items, dict) or len(items) > MAX_ITEM_COUNT
-                or not all(isinstance(k, str) and len(k) <= 128 and S.ITEM_ID.match(k) and isinstance(v, dict)
-                           for k, v in items.items())):
-            raise SV.RequestError(400, f"items is an object of at most {MAX_ITEM_COUNT} item ids, each an object")
-        if not isinstance(seeds, list) or not all(isinstance(q, dict) for q in seeds):
-            raise SV.RequestError(400, "seed_questions is a list of question objects")
-        if board is not None and not (isinstance(board, dict) and isinstance(board.get("shape"), str)
-                                      and isinstance(board.get("values"), dict)
-                                      and all(isinstance(k, str) and isinstance(v, str)
-                                              for k, v in board["values"].items())):
-            raise SV.RequestError(400, "board is null or {shape: str, values: {str: str}}")
+        why = snapshot_problem(body)
+        if why:
+            raise SV.RequestError(400, why)
+        items, seeds, board = body["items"], body.get("seed_questions") or [], body.get("board")
         data = json.dumps({"items": items, "seed_questions": seeds, "board": board}, sort_keys=True).encode()
         if len(data) > MAX_ITEMS:
             raise SV.RequestError(413, f"the pushed items are over {MAX_ITEMS} bytes")
@@ -216,12 +257,26 @@ class ProjectConsole(SV.Console):
         return {"items": len(items), "seeds_added": added}
 
 
-def open_project(name: str, entry: dict, team_domain: str) -> Hosted:
-    """Open one project's console, or return it refused with the reason. Never raises for a project fault."""
+def open_project(name: str, entry: dict, team_domain: str, registry: dict | str) -> Hosted:
+    """Open one project's console, or return it refused with the reason. Never raises for a project fault.
+
+    `registry` is the user's registry as `R.load` read it (or why it could not
+    be read): server.json is checked against it again here, at every start,
+    because a hand edit between `server add` and now could point a project at
+    a root the user never registered on that state.
+    """
     h = Hosted(name, entry)
     problems = SF.entry_problems(name, entry)
     if problems:
         h.fault = "; ".join(problems)
+        return h
+    if isinstance(registry, str):
+        h.fault = f"the registry cannot be read, so {name}'s root cannot be checked: {registry}"
+        return h
+    roots = SF.registered_roots(entry["state"], registry)
+    if os.path.realpath(entry["root"]) not in roots:
+        h.fault = (f"{name}'s root {entry['root']} is not registered on the console at {entry['state']} "
+                   f"(registered: {', '.join(roots) or 'none'}); re-run `agent.py server add`")
         return h
     state = Path(entry["state"])
     try:
@@ -250,9 +305,10 @@ def open_project(name: str, entry: dict, team_domain: str) -> Hosted:
     try:
         h.console = ProjectConsole(cfg, SnapshotAdapter(state))
         h.console.seed()
-    except (StoreError, PC.ConfigError, N.NamesError, OSError, ValueError) as e:
+    except Exception as e:   # anything a project's own files can provoke is that project's fault (§3.10)
+        named = isinstance(e, (StoreError, PC.ConfigError, N.NamesError, OSError, ValueError))
         h.console = None
-        h.fault = f"{name}'s console cannot open: {e}"
+        h.fault = f"{name}'s console cannot open: {e if named else f'{type(e).__name__}: {e}'}"
         h.close()
     return h
 
@@ -261,11 +317,16 @@ class MultiServer:
     """Every project in server.json, each opened independently."""
 
     def __init__(self, path: Path | None = None) -> None:
+        path = Path(path or SF.location())
         doc = SF.load(path)
         self.team_domain = doc["team_domain"] or ""
+        try:   # the registry beside server.json: the pair always travels together
+            registry: dict | str = R.load(path.parent / R.FILE)
+        except (R.RegistryError, OSError) as e:
+            registry = str(e)
         self.projects: dict[str, Hosted] = {}
         for name in sorted(doc["projects"]):
-            self.projects[name] = open_project(name, doc["projects"][name], self.team_domain)
+            self.projects[name] = open_project(name, doc["projects"][name], self.team_domain, registry)
 
     def served(self) -> list[str]:
         return [n for n, h in self.projects.items() if h.fault is None]
@@ -348,8 +409,17 @@ class MultiOwnerHandler(SV.OwnerHandler):
         super().do_GET()
 
 
+FAULT_BODY = {"error": "this project is not being served right now; the console server's log names why"}
+
+
 class FaultOwnerHandler(SV._Handler):
-    """A refused project's owner door: past the same Access gate, every request is 503 with the reason."""
+    """A refused project's owner door: past the same Access gate, every request is 503.
+
+    The body is the same for every refused project and names no path: the
+    reason (a lock file, a state dir) is the operator's, so it goes to the
+    server's log (at start, and once per refused request here), never to the
+    browser, even past the gate.
+    """
 
     verify: Callable[[str | None], dict]
     fault: str
@@ -359,7 +429,8 @@ class FaultOwnerHandler(SV._Handler):
             self.verify(self.headers.get("Cf-Access-Jwt-Assertion"))
         except SV.AuthError as e:
             return self._send(403, {"error": str(e)})
-        self._send(503, {"error": self.fault})
+        sys.stderr.write(f"console-server: refused request on a refused project: {self.fault}\n")
+        self._send(503, FAULT_BODY)
 
     do_GET = do_POST = do_HEAD = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _dispatch
 
@@ -370,7 +441,19 @@ def socket_path(server_file: Path) -> Path:
 
 def _agent_server(ms: "MultiServer", path: Path) -> SV.UnixHTTPServer:
     if len(os.fsencode(path)) > SV.SOCKET_PATH_MAX:
-        raise SystemExit(f"the agent socket path {path} is over {SV.SOCKET_PATH_MAX} bytes")
+        raise SystemExit(f"the agent socket path {path} is over {SV.SOCKET_PATH_MAX} bytes, the limit a Unix "
+                         f"socket path has (108 bytes on Linux, including the terminator). It sits beside "
+                         f"server.json, so shorten XDG_CONFIG_HOME (the console-kit folder under it), or pass "
+                         f"--socket with a shorter path")
+    parent = path.parent
+    try:
+        st = parent.lstat()
+    except OSError as e:
+        raise SystemExit(f"the agent socket's folder {parent} cannot be read: {e.strerror}") from None
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+        raise SystemExit(f"the agent socket's folder {parent} must be a folder you own with mode 0700 (it is "
+                         f"{stat.filemode(st.st_mode)}): any user who can enter it could reach every project's "
+                         f"agent door. Run: chmod 700 {parent}")
     if path.exists() or path.is_symlink():
         if not stat.S_ISSOCK(path.lstat().st_mode):
             raise SystemExit(f"{path} exists and is not a socket; refusing to replace it")
@@ -424,22 +507,34 @@ def start(server_file: Path | None = None, sock: Path | None = None,
     agent = _agent_server(ms, path)
     threading.Thread(target=agent.serve_forever, daemon=True).start()
     owners = {}
-    for name, h in ms.projects.items():
-        if not isinstance(h.entry, dict) or not isinstance(h.entry.get("aud"), str):
-            continue   # no gate can be built for an entry this broken; its refusal is on the agent door
-        verify = verify_for(h.entry["aud"])
-        if h.console is not None:
-            handler = type("BoundMultiOwnerHandler", (MultiOwnerHandler,),
-                           {"console": h.console, "verify": staticmethod(verify)})
-            srv = ThreadingHTTPServer((SV.HOST, port_for(h)), handler)
+    try:
+        for name, h in ms.projects.items():
+            if not isinstance(h.entry, dict) or SF.entry_problems(name, h.entry):
+                continue   # no port or gate can be trusted from an entry this broken; its refusal is on the agent door
+            verify = verify_for(h.entry["aud"])
+            if h.console is not None:
+                handler = type("BoundMultiOwnerHandler", (MultiOwnerHandler,),
+                               {"console": h.console, "verify": staticmethod(verify)})
+            else:
+                handler = type("BoundFaultOwnerHandler", (FaultOwnerHandler,),
+                               {"verify": staticmethod(verify), "fault": f"{name}: {h.fault}"})
+            try:
+                srv = ThreadingHTTPServer((SV.HOST, port_for(h)), handler)
+            except OSError as e:   # a port in use is this project's fault, never the server's (§3.10)
+                h.console = None
+                h.fault = f"{name}'s owner door cannot listen on port {h.entry['port']}: {e.strerror}"
+                h.close()
+                continue
             srv.daemon_threads = True
-        else:
-            handler = type("BoundFaultOwnerHandler", (FaultOwnerHandler,),
-                           {"verify": staticmethod(verify), "fault": f"{name}: {h.fault}"})
-            srv = ThreadingHTTPServer((SV.HOST, port_for(h)), handler)
-            srv.daemon_threads = True
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        owners[name] = srv
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            owners[name] = srv
+    except BaseException:
+        for s in (agent, *owners.values()):
+            s.shutdown()
+            s.server_close()
+        path.unlink(missing_ok=True)
+        ms.close()
+        raise
     return Running(ms, agent, path, owners)
 
 

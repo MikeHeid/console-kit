@@ -60,16 +60,26 @@ def confined() -> bool:
     return _confined
 
 
+def _key(root: Path) -> str:
+    """The configured root as TEXT, never resolved: a read must not consult the filesystem to find its root.
+
+    Resolving per read (the first cut) let a root path swapped for a symlink to
+    ANOTHER held root find that project's descriptor. Keyed by text, a swapped
+    path still names the descriptor its own project opened at start.
+    """
+    return os.path.abspath(os.fspath(root))
+
+
 def hold(root: Path) -> None:
-    """Open and keep the descriptor of `root` (its real path, as the user registered it). Raises OSError."""
-    key = os.path.realpath(root)
+    """Open and keep the descriptor of `root`, resolved once, here. Raises OSError."""
+    key = _key(root)
     with _lock:
         if key not in _roots:
-            _roots[key] = os.open(key, DIR_FLAGS)
+            _roots[key] = os.open(os.path.realpath(key), DIR_FLAGS)
 
 
 def _root_fd(root: Path) -> int:
-    key = os.path.realpath(root)
+    key = _key(root)
     with _lock:
         fd = _roots.get(key)
     if fd is None:
