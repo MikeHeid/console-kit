@@ -25,9 +25,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
-import os
 import re
-import subprocess
 from pathlib import Path
 from typing import Callable, Mapping
 

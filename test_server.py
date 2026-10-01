@@ -2567,6 +2567,61 @@ def spec_question(v1: str) -> dict:
             "source": "specs/spec.md:5-6", "nonce": "nogitquest01"}
 
 
+# Modules that may start a process, and why each is allowed (the no-spawn walk skips them):
+SPAWN_ALLOWED = {
+    "console_kit/gitseam.py": "the one door for git; it starts nothing once the server closes it",
+    "agent.py": "run by an agent inside its own jail; the server process never imports it",
+    "tools/": "operator tools (verify_vendor.py runs git on a kit clone); never imported by the server",
+}
+SPAWN_MODULES = ("subprocess", "pty", "multiprocessing")
+SPAWN_OS = ("system", "popen", "exec", "spawn", "posix_spawn", "fork")
+
+
+def spawn_sites(source: str) -> list[str]:
+    """Every way `source` could start a process: imports of subprocess, pty or multiprocessing in any form,
+    os.system/popen/exec*/spawn*/posix_spawn*/fork* (called, or imported from os), and a dynamic import of
+    one of those modules by name."""
+    import ast
+    tree = ast.parse(source)
+    os_names = {"os"}
+    found: list[str] = []
+
+    def banned_module(name: str) -> bool:
+        return name.split(".")[0] in SPAWN_MODULES
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if banned_module(a.name):
+                    found.append(f"import {a.name}")
+                if a.name == "os":
+                    os_names.add(a.asname or "os")
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            if banned_module(node.module):
+                found += [f"from {node.module} import {a.name}" for a in node.names]
+            elif node.module == "os":
+                found += [f"from os import {a.name}" for a in node.names
+                          if a.name == "*" or a.name.startswith(SPAWN_OS)]
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.value.id in os_names
+                and f.attr.startswith(SPAWN_OS)):
+            found.append(f"os.{f.attr}()")
+        name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+        if (name in ("__import__", "import_module") and node.args and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str) and banned_module(node.args[0].value)):
+            found.append(f"{name}({node.args[0].value!r})")
+    return found
+
+
+def spawn_scan(top: Path) -> dict[str, list[str]]:
+    """`spawn_sites` for every .py under `top`, recursively, keyed by its path relative to `top`."""
+    return {p.relative_to(top).as_posix(): spawn_sites(p.read_text(encoding="utf-8"))
+            for p in sorted(top.rglob("*.py")) if "__pycache__" not in p.parts}
+
+
 # The real server (`server.serve`, as `server.py` runs it) in a child process that audits itself.
 # The hook goes in before the kit is imported, and records every way Python can start a process.
 AUDIT_CHILD = r'''
@@ -2739,11 +2794,53 @@ class NoServerGitTests(_Live, unittest.TestCase):
         self.assertEqual((G.NO_GIT.reason, G.UNAVAILABLE), (NOGIT, NOGIT))
         with seam_open():
             self.assertRegex(G.run(["rev-parse", "HEAD"], self.root, timeout=30), rb"^[0-9a-f]{40}\n$")
-        kit = Path(SV.__file__).resolve().parent
-        for f in sorted(kit.glob("*.py")) + [kit.parent / "agent.py"]:
-            if f.name != "gitseam.py":
-                with self.subTest(file=f.name):
-                    self.assertNotRegex(f.read_text(), r"subprocess\.(run|Popen|call|check_output)\(")
+
+    def test_no_kit_module_but_the_seam_can_start_a_process(self):
+        # An AST walk, not a regex (security review of a4a363b): `from subprocess import run`,
+        # `import subprocess as sp`, `os.system`/`os.popen` and a file in a subfolder all got past
+        # the regex. Every .py under plugin/kit, recursively, is read; gitseam.py is the one door.
+        kit = Path(SV.__file__).resolve().parent.parent
+        found = spawn_scan(kit)
+        self.assertGreater(len(found), 15)   # the walk really read the kit, subfolders included
+        self.assertIn("console_kit/server.py", found)
+        self.assertIn("tools/verify_vendor.py", found)
+        for rel, sites in sorted(found.items()):
+            if any(rel == k or (k.endswith("/") and rel.startswith(k)) for k in SPAWN_ALLOWED):
+                continue   # each with its reason in SPAWN_ALLOWED
+            with self.subTest(file=rel):
+                self.assertEqual(sites, [], f"{rel} can start a process outside gitseam")
+        # The allowlist is not dead weight: verify_vendor.py really does spawn git, agent side.
+        self.assertIn("import subprocess", found["tools/verify_vendor.py"])
+
+    def test_the_spawn_walk_catches_each_evasion(self):
+        # Decoys: each form the regex missed, and each must be flagged.
+        decoys = {
+            "import subprocess as sp\nsp.run(['git'])\n": "import subprocess",
+            "from subprocess import run\nrun(['git'])\n": "from subprocess import run",
+            "from subprocess import *\n": "from subprocess import *",
+            "import os\nos.system('git log')\n": "os.system()",
+            "import os\nos.popen('git log')\n": "os.popen()",
+            "import os as o\no.execvp('git', ['git'])\n": "os.execvp()",
+            "import os\nos.posix_spawn('/usr/bin/git', [], {})\n": "os.posix_spawn()",
+            "import os\nos.spawnlp(0, 'git', 'git')\n": "os.spawnlp()",
+            "import os\nos.fork()\n": "os.fork()",
+            "from os import system\nsystem('git')\n": "from os import system",
+            "import pty\n": "import pty",
+            "import multiprocessing.pool\n": "import multiprocessing.pool",
+            "def f():\n    import subprocess\n": "import subprocess",
+            "__import__('subprocess')\n": "__import__('subprocess')",
+            "import importlib\nimportlib.import_module('subprocess')\n": "import_module('subprocess')",
+        }
+        for src, want in decoys.items():
+            with self.subTest(src=src):
+                self.assertIn(want, spawn_sites(src))
+        self.assertEqual(spawn_sites("import os\nos.walk('.')\nos.environ.get('X')\n"), [])   # no false alarm
+        with tempfile.TemporaryDirectory() as td:
+            nested = Path(td) / "a" / "b" / "deep.py"
+            nested.parent.mkdir(parents=True)
+            nested.write_text("import subprocess as quiet\n")
+            (Path(td) / "top.py").write_text("x = 1\n")
+            self.assertEqual(spawn_scan(Path(td)), {"a/b/deep.py": ["import subprocess"], "top.py": []})
 
     # (b) ---------------------------------------------------------------------------------
 

@@ -74,7 +74,6 @@ from __future__ import annotations
 import calendar
 import os
 import re
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -90,15 +89,8 @@ MAX_SPEC_FILES = 2000
 MAX_SPEC_BYTES = 16 << 20
 MAX_TERMS = 10
 GIT_TIMEOUT = 10
-# 0.8.1: every git call in the project is READ-ONLY. Plain `git status` refreshes
-# the index's stat cache and rewrites .git/index when it can take the lock, which
-# is a write into the live service checkout; `--no-optional-locks` (and the same
-# as an environment variable, for any git a hook or alias starts) turns that off.
-GIT = ("git", "--no-optional-locks")
-
-
-def git_env() -> dict[str, str]:
-    return {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
+# 0.8.1: every git call is READ-ONLY (`--no-optional-locks`, flag and env); both are
+# set in `gitseam`, the one door every git call goes through (CONSOLE-kit/Q23).
 # Pairs every backtick span (so a short `ab` cannot pair its closing tick with the next
 # span's opening one); only a span of 3 to 80 characters is a term.
 BACKTICK = re.compile(r"`([^`\n]{1,80})`")
