@@ -35,6 +35,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import rootfs as RF
 from . import schema as S
 from .registry import RegistryError, read_regular
 
@@ -75,8 +76,14 @@ def _dir(root: Path, v: object, key: str) -> str:
 def load(root: Path) -> ProjectConfig:
     """The project's console keys; an absent file or key is simply unset."""
     try:
-        raw = read_regular(Path(root) / FILE, MAX_FILE)
-    except RegistryError as e:
+        if RF.confined():   # the one console server (K3): beneath the held root, no symlink followed
+            try:
+                raw = RF.read(Path(root), FILE, MAX_FILE)
+            except FileNotFoundError:
+                raw = None
+        else:
+            raw = read_regular(Path(root) / FILE, MAX_FILE)
+    except (RegistryError, RF.Refused, ValueError) as e:
         raise ConfigError(str(e)) from None
     if raw is None:
         return ProjectConfig()

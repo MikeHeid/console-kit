@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from . import gitseam as G
+from . import rootfs as RF
 from . import schema as S
 
 HISTORY_COMMITS = 300   # how far back `git log` looks for the version a lock was taken on
@@ -40,7 +41,8 @@ SIMILAR = 0.5           # below this, a region is "not similar" and no diff is s
 MAX_READ = 2 << 20      # bytes: a larger file is never read (0.7.0); it answers like an unreadable one
 UNREADABLE = {"outside": "resolves outside the project", "missing": "is not in the project",
               "secret": "is a secrets file, which is never read", "too_large": f"is over {MAX_READ >> 20} MiB, "
-              "so it is not read"}
+              "so it is not read",
+              "refused": "is not a plain file under the project root (a symlink, or a path that leaves it)"}
 SOURCE_RANGE = re.compile(r"^(?P<path>[^:]+):(?P<a>[0-9]+)(?:-(?P<b>[0-9]+))?\Z")
 
 
@@ -76,6 +78,8 @@ class Tree:
         self._norms: dict[str, str] = {}
 
     def _file(self, rel: str) -> _File:
+        if RF.confined():
+            return self._confined_file(rel)
         p = (self.root / rel).resolve()
         if self.root not in p.parents:
             return _File("outside", None)
@@ -91,6 +95,26 @@ class Tree:
                 if p.stat().st_size > MAX_READ:
                     return _File("too_large", None)
                 f = _File("ok", p.read_bytes())
+            except OSError:
+                return _File("missing", None)
+            if self.snapshot:
+                self._files[rel] = f
+        return f
+
+    def _confined_file(self, rel: str) -> _File:
+        """The one console server's read (K3, §3.6): beneath the held root, no symlink at any depth."""
+        if S.secret_path(rel):
+            return _File("secret", None)
+        f = self._files.get(rel) if self.snapshot else None
+        if f is None:
+            try:
+                f = _File("ok", RF.read(self.root, rel, MAX_READ))
+            except RF.Refused:
+                return _File("refused", None)
+            except FileNotFoundError:
+                return _File("missing", None)
+            except ValueError:
+                return _File("too_large", None)
             except OSError:
                 return _File("missing", None)
             if self.snapshot:

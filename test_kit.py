@@ -4725,5 +4725,340 @@ def stat_mode(p: Path) -> int:
     return os.stat(p).st_mode & 0o777
 
 
+def old_kit(tag: str, dest: Path, paths=("plugin/kit", "plugin/hooks")) -> Path:
+    """Extract a released kit from this repository's tag into `dest`; the tests start it as the competitor."""
+    arch = subprocess.run(["git", "-C", str(HERE), "archive", tag, *paths], capture_output=True, timeout=60)
+    if arch.returncode != 0:
+        raise AssertionError(f"the {tag} tag must be fetched for this test: {arch.stderr.decode(errors='replace')}")
+    dest.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["tar", "-x", "-C", str(dest)], input=arch.stdout, check=True, timeout=60)
+    return dest
+
+
+def released_single_store_tags() -> list[str]:
+    """The single-store releases a user could roll back to: 0.8.7, 0.8.8 and, once tagged, 0.8.9 (K3 brief)."""
+    have = subprocess.run(["git", "-C", str(HERE), "tag", "--list", "v0.8.*"], capture_output=True, text=True,
+                          timeout=30).stdout.split()
+    want = ["v0.8.7", "v0.8.8", "v0.8.9"]
+    missing = [t for t in want[:2] if t not in have]
+    if missing:
+        raise AssertionError(f"tags {missing} must be fetched for this test")
+    return [t for t in want if t in have]
+
+
+OLD_BOOT = r'''
+import sys, threading
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from console_kit import server as SV
+d, state = Path(sys.argv[2]), Path(sys.argv[3])
+d.mkdir(parents=True, exist_ok=True)
+(d / "page.html").write_text("<!doctype html><html><body></body></html>\n")
+class A:
+    def items(self): return {"LANE": {"title": "a lane", "parent": None, "status": "open"}}
+    def seed_questions(self):
+        return [{"qid": "LANE/Q1", "item": "LANE", "text": "Which?", "kind": "single",
+                 "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}], "star": "b",
+                 "valid_if": [], "source": "spec.md:1", "by": "agent", "nonce": "seednonce0001"}]
+    def record(self, entries, dry_run): return []
+cfg = SV.Config(root=d, page=d / "page.html", state=state, adapter=d / "unused.py",
+                team_domain="team.example.cloudflareaccess.com", aud="a" * 64, hostname="console.example.com", port=0)
+c = SV.Console(cfg, A()); c.seed()
+srv = SV.agent_server(c); threading.Thread(target=srv.serve_forever, daemon=True).start()
+code, out = SV.agent_request(cfg.socket, "GET", "/view")
+print(code, flush=True)
+if len(sys.argv) > 4 and sys.argv[4] == "stay":
+    sys.stdin.read()          # serve until the test closes our stdin
+srv.shutdown(); srv.server_close(); cfg.socket.unlink(missing_ok=True)
+'''
+
+
+def start_old_server(kit: Path, work: Path, state: Path, stay: bool):
+    """Run a released single-store server on `state`; with `stay`, return it still answering on STATE/agent.sock."""
+    p = subprocess.Popen([sys.executable, "-c", OLD_BOOT, str(kit / "plugin" / "kit"), str(work), str(state),
+                          *(["stay"] if stay else [])], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True)
+    first = p.stdout.readline().strip()
+    if first != "200":
+        p.kill()
+        raise AssertionError(f"the old kit did not serve /view: {first!r} {p.stderr.read()}")
+    if not stay:
+        stop_old_server(p)
+    return p
+
+
+def stop_old_server(p) -> None:
+    p.communicate(timeout=60)   # closes stdin (the server's cue to stop), drains and closes both pipes
+
+
+class ServerAddTests(unittest.TestCase):
+    """K3 step 1: `agent.py server add` and server.json (spec §3.3, §3.5; AC3.1, AC3.2)."""
+
+    TEAM = "team.example.cloudflareaccess.com"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = Path(os.path.realpath(self.tmp.name))
+        self.cfg = t / "cfg"
+        self.root = t / "proj"
+        self.root.mkdir()
+        self.state = t / "state"
+        self.state.mkdir()
+        self.reg = self.cfg / "console-kit" / "projects.json"
+        self.sfile = self.cfg / "console-kit" / "server.json"
+        R.register(self.root, self.state, KIT, path=self.reg)
+        # The repository's config names a project and a token: both must be ignored (AC3.1's trap).
+        (self.root / ".console-kit.json").write_text(json.dumps({"project": "hijack", "token": "ck1_planted"}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def add(self, name="alpha", *extra, state=None, host="alpha.example.com", port="4801"):
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg)}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        args = ["--state", str(state or self.state), "server", "add", name, "--hostname", host, "--aud", "a" * 64,
+                "--port", port, "--team-domain", self.TEAM, *extra]
+        return subprocess.run([sys.executable, str(KIT / "agent.py"), *args], capture_output=True, text=True,
+                              env=env, cwd=self.root, timeout=60)
+
+    def test_ac31_refusals_and_the_repo_config_is_ignored(self):
+        # Catches: a project name read from `.console-kit.json`, and any refusal that still writes.
+        other = Path(self.tmp.name) / "unregistered"
+        other.mkdir()
+        refused = [
+            self.add(state=other),                                         # no registry entry names it
+            self.add("Bad_Name"), self.add("agent"), self.add("x-"), self.add("a" * 33),
+        ] + [self.add(host=h) for h in ("https://alpha.example.com", "alpha.example.com:443",
+                                        "alpha.example.com/x", "me@alpha.example.com", "alpha example.com",
+                                        "Alpha.example.com", "localhost", "alpha.example.com.", "")]
+        for r in refused:
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("refused, nothing written", r.stderr)
+        self.assertFalse(self.sfile.exists())
+        r = self.add()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        doc = json.loads(self.sfile.read_text())
+        self.assertEqual(list(doc["projects"]), ["alpha"])
+        self.assertNotIn("hijack", self.sfile.read_text())
+        self.assertNotIn("ck1_planted", self.sfile.read_text())
+        e = doc["projects"]["alpha"]
+        self.assertEqual((e["state"], e["root"], e["hostname"], e["port"]),
+                         (str(self.state), str(self.root), "alpha.example.com", 4801))
+        self.assertEqual(stat_mode(self.sfile), 0o600)
+
+    def test_ac31_one_state_port_and_hostname_per_project_and_the_root_rule(self):
+        self.assertEqual(self.add().returncode, 0)
+        t = Path(self.tmp.name)
+        st2, root2 = t / "state2", t / "proj2"
+        st2.mkdir()
+        root2.mkdir()
+        R.register(root2, st2, KIT, path=self.reg)
+        self.assertIn("already holds the console", self.add("beta", port="4802", host="b.example.com").stderr)
+        self.assertIn("already holds port", self.add("beta", state=st2, host="b.example.com").stderr)
+        self.assertIn("already holds hostname", self.add("beta", state=st2, port="4802").stderr)
+        self.assertEqual(self.add("beta", state=st2, port="4802", host="b.example.com").returncode, 0)
+        # A second root on one state: --root is required and must be one of them.
+        wt = t / "proj-wt"
+        wt.mkdir()
+        R.register(wt, self.state, KIT, path=self.reg)
+        self.assertIn("name the main one with --root", self.add().stderr)
+        self.assertIn("is not registered", self.add("alpha", "--root", str(root2)).stderr)
+        self.assertEqual(self.add("alpha", "--root", str(self.root)).returncode, 0)
+
+    def test_ac32_the_registry_bytes_never_change_and_older_hooks_still_read_it(self):
+        # Catches: a `name` or `token` key added to registry entries "because it is simpler" (§1's trap).
+        (self.state / "inbox.jsonl").write_text(json.dumps(
+            {"seq": 1, "type": "message", "ts": "t", "item": "X", "intent": "process"}) + "\n")
+        before = self.reg.read_bytes()
+        self.assertEqual(self.add().returncode, 0)
+        self.add("Bad_Name")                                           # a refused add touches nothing either
+        self.assertEqual(self.add("alpha", "--slug", "lane-x").returncode, 0)   # nor does a re-add
+        self.assertEqual(self.reg.read_bytes(), before)
+        hooks = [HERE / "plugin" / "hooks" / "session_start.py"]
+        for tag in released_single_store_tags():
+            hooks.append(old_kit(tag, Path(self.tmp.name) / f"hook-{tag}", ("plugin/hooks",))
+                         / "plugin" / "hooks" / "session_start.py")
+        for hook in hooks:
+            env = dict(os.environ, CLAUDE_PROJECT_DIR=str(self.root), XDG_CONFIG_HOME=str(self.cfg))
+            r = subprocess.run([sys.executable, str(hook)], env=env, input="", capture_output=True, text=True,
+                               timeout=30)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            note = json.loads(r.stdout)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn(str(self.state), note, hook)               # it still found this project's console
+
+    def test_one_reader_shared_by_the_cost_collector_and_unknown_keys_ignored(self):
+        from console_kit import costs as C
+        from console_kit import serverfile as SF
+        self.assertEqual(self.add("alpha", "--slug", "lane-one", "--slug", "lane-two").returncode, 0)
+        doc = json.loads(self.sfile.read_text())
+        doc["projects"]["alpha"]["token_sha256"] = "f" * 64              # what K4 will add
+        self.sfile.write_text(json.dumps(doc))
+        self.assertEqual(SF.entry_problems("alpha", doc["projects"]["alpha"]), [])
+        self.assertEqual(C.project_slugs(self.state, self.reg),
+                         sorted([C.slug_of(str(self.root)), "lane-one", "lane-two"]))
+        self.assertEqual(self.add().returncode, 0)                     # a re-add keeps K4's key and the slugs
+        kept = json.loads(self.sfile.read_text())["projects"]["alpha"]
+        self.assertEqual((kept["token_sha256"], kept["slugs"]), ("f" * 64, ["lane-one", "lane-two"]))
+        self.assertFalse(hasattr(C, "_listed_slugs"))                  # one reader, not two
+
+
+class MultiStoreTests(unittest.TestCase):
+    """K3 step 2: a Store per project, the locks, and one project's fault kept its own (AC3.4, AC3.6 part)."""
+
+    TEAM = "team.example.cloudflareaccess.com"
+
+    def setUp(self):
+        from console_kit import multiserver as MS
+        from console_kit import serverfile as SF
+        self.MS, self.SF = MS, SF
+        self.tmp = tempfile.TemporaryDirectory()
+        self.t = Path(os.path.realpath(self.tmp.name))
+        self.reg = self.t / "cfg" / "console-kit" / "projects.json"
+        self.sfile = self.reg.parent / "server.json"
+        self.p = {}
+        for i, name in enumerate(("alpha", "beta")):
+            root, state = self.t / f"root-{name}", self.t / f"state-{name}"
+            root.mkdir()
+            state.mkdir()
+            (root / "index.html").write_text(f"<html><body>{name}</body></html>\n")
+            R.register(root, state, KIT, path=self.reg)
+            SF.add(name, state, f"{name}.example.com", "a" * 64, 4801 + i, self.TEAM, page="index.html",
+                   registry=self.reg, path=self.sfile)
+            self.p[name] = {"root": root, "state": state}
+        self.open = []
+
+    def tearDown(self):
+        for ms in self.open:
+            ms.close()
+        self.tmp.cleanup()
+
+    def server(self, path=None):
+        ms = self.MS.MultiServer(path or self.sfile)
+        self.open.append(ms)
+        return ms
+
+    def test_ac34_a_store_object_per_project(self):
+        # Catches: one shared Store whose index holds both files (breaks store.py's one-writer rule).
+        from console_kit.store import Store
+        ms = self.server()
+        self.assertEqual(ms.served(), ["alpha", "beta"])
+        stores = ms.stores()
+        self.assertEqual(len(stores), 2)
+        self.assertEqual(len({id(s) for s in stores}), 2)
+        self.assertTrue(all(isinstance(s, Store) for s in stores))
+        self.assertEqual(sorted(str(s.path) for s in stores),
+                         sorted(str(self.p[n]["state"] / "store.jsonl") for n in ("alpha", "beta")))
+
+    def test_ac34_a_live_old_server_on_beta_refuses_beta_by_name_only(self):
+        # Catches: a lock check that only sees other new-kit servers. The competitor is the released kit.
+        for tag in released_single_store_tags():
+            kit = old_kit(tag, self.t / f"kit-{tag}", ("plugin/kit",))
+            old = start_old_server(kit, self.t / f"work-{tag}", self.p["beta"]["state"], stay=True)
+            try:
+                ms = self.server()
+                self.assertEqual(ms.served(), ["alpha"], tag)
+                self.assertIn("still answers", ms.refused()["beta"])
+                ms.close()
+            finally:
+                stop_old_server(old)
+            ms = self.server()                         # the old server gone: beta opens
+            self.assertEqual(ms.served(), ["alpha", "beta"], tag)
+            ms.close()
+
+    def test_ac34_a_second_one_server_holding_beta_refuses_it_here(self):
+        only_beta = self.reg.parent / "only-beta.json"   # beside the registry, as server.json always is
+        doc = json.loads(self.sfile.read_text())
+        only_beta.write_text(json.dumps({**doc, "projects": {"beta": doc["projects"]["beta"]}}))
+        first = self.server(only_beta)
+        self.assertEqual(first.served(), ["beta"])
+        ms = self.server()
+        self.assertEqual(ms.served(), ["alpha"])
+        self.assertIn("another console server holds", ms.refused()["beta"])
+        self.assertIn("server.lock", ms.refused()["beta"])
+
+    def test_any_exception_opening_one_project_is_that_project_s_fault(self):
+        # Catches: open_project catching a fixed list of types, so an exception nobody foresaw (here a RuntimeError
+        # from beta's seed) escapes MultiServer() and takes alpha down with it.
+        real = self.MS.ProjectConsole.seed
+
+        def seed(console):
+            if console.cfg.project == "beta":
+                raise RuntimeError("nobody foresaw this")
+            return real(console)
+        self.MS.ProjectConsole.seed = seed
+        try:
+            ms = self.server()
+        finally:
+            self.MS.ProjectConsole.seed = real
+        self.assertEqual(ms.served(), ["alpha"])
+        self.assertEqual(ms.refused()["beta"], "beta's console cannot open: RuntimeError: nobody foresaw this")
+        self.assertEqual(self.MultiServerLock(self.p["beta"]["state"]), "free")   # its lock released
+
+    def MultiServerLock(self, state):
+        import fcntl
+        fd = os.open(state / "server.lock", os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return "free"
+        except OSError:
+            return "held"
+        finally:
+            os.close(fd)
+
+    def test_a_server_json_root_not_registered_on_its_state_is_refused_at_start(self):
+        # Catches: trusting server.json's root after `server add` (a hand edit could point a project anywhere).
+        stray = self.t / "root-stray"
+        stray.mkdir()
+        doc = json.loads(self.sfile.read_text())
+        doc["projects"]["beta"]["root"] = str(stray)
+        self.sfile.write_text(json.dumps(doc))
+        ms = self.server()
+        self.assertEqual(ms.served(), ["alpha"])
+        self.assertIn(f"root {stray} is not registered on the console at", ms.refused()["beta"])
+
+    def test_the_agent_socket_folder_must_be_0700_and_yours(self):
+        # Catches: a socket made in a folder other users can enter.
+        ms = self.server()
+        d = self.t / "sockdir"
+        d.mkdir(mode=0o755)
+        os.chmod(d, 0o755)
+        with self.assertRaises(SystemExit) as cm:
+            self.MS._agent_server(ms, d / "server.sock")
+        self.assertIn(f"chmod 700 {d}", str(cm.exception))
+        self.assertFalse((d / "server.sock").exists())
+        os.chmod(d, 0o700)
+        srv = self.MS._agent_server(ms, d / "server.sock")       # the control: 0700 is accepted
+        srv.server_close()
+
+    def test_a_held_root_is_found_by_its_configured_path_never_by_resolving_it(self):
+        # Catches: looking the held descriptor up by realpath(root) on each read, which lets a root path swapped
+        # for a symlink to ANOTHER held root read that project's tree.
+        from console_kit import rootfs as RF
+        a, b = self.t / "held-a", self.t / "held-b"
+        for d, text in ((a, "A-OWN"), (b, "B-OWN")):
+            d.mkdir()
+            (d / "f.txt").write_text(text)
+            RF.hold(d)
+        os.rename(a, self.t / "held-a.moved")
+        os.symlink(b, a)                                          # alpha's root path now leads to beta's root
+        self.assertEqual(RF.read(a, "f.txt", 100), b"A-OWN")     # still the tree alpha opened at start
+
+    def test_a_stale_old_socket_file_does_not_refuse(self):
+        import socket
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(self.p["beta"]["state"] / "agent.sock"))      # bound, never listening: a server that died
+        s.close()
+        self.assertEqual(self.server().served(), ["alpha", "beta"])
+
+    def test_ac36_a_store_the_loader_refuses_is_that_project_s_fault_alone(self):
+        # Catches: a server that refuses to start at all when any one store is bad.
+        bad = self.p["beta"]["state"] / "store.jsonl"
+        bad.write_text('{"not": "a record"}\n')
+        ms = self.server()
+        self.assertEqual(ms.served(), ["alpha"])
+        self.assertIn("beta's console cannot open", ms.refused()["beta"])
+        self.assertEqual(bad.read_text(), '{"not": "a record"}\n')      # never repaired or rewritten
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

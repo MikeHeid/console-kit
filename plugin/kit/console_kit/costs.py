@@ -57,13 +57,12 @@ import time
 from pathlib import Path
 
 from . import registry as R
+from . import serverfile as SF
 
 FILE = "costs.jsonl"
 LOCK = ".costs.lock"
-SERVER_FILE = "server.json"
 FORK_TAG = re.compile(r"^ck-fork:([0-9a-f]{24})(?=\s|\Z)")
 TAG_SPAN = 64                                   # the only part of a description ever matched
-SLUG = re.compile(r"^[A-Za-z0-9-]{1,255}\Z")   # one directory name: never "/", "." or ".."
 AGENT_TYPE = re.compile(r"^[A-Za-z0-9:_.-]{1,64}\Z")
 SEAT_PREFIX = "console-kit:"
 COUNTS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
@@ -94,31 +93,6 @@ def slug_of(root: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(root))
 
 
-def _listed_slugs(state: str, server_path: Path) -> list[str]:
-    """Extra slugs a user listed for this state in server.json (`{"projects": {NAME: {"state", "slugs"}}}`)."""
-    raw = R.read_regular(server_path, R.MAX_REGISTRY)
-    if raw is None:
-        return []
-    try:
-        doc = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as e:
-        raise CostError(f"{server_path} is not JSON: {e}") from None
-    projects = doc.get("projects") if isinstance(doc, dict) else None
-    if not isinstance(projects, dict):
-        raise CostError(f"{server_path} needs a \"projects\" object")
-    out = []
-    for name, e in projects.items():
-        if not isinstance(e, dict) or not isinstance(e.get("state"), str):
-            continue
-        if os.path.realpath(e["state"]) != state:
-            continue
-        slugs = e.get("slugs", [])
-        if not isinstance(slugs, list) or not all(isinstance(s, str) and SLUG.match(s) for s in slugs):
-            raise CostError(f"{server_path}: project {name!r}: slugs must be a list of single directory names")
-        out.extend(slugs)
-    return out
-
-
 def project_slugs(state: Path, registry: Path | None = None) -> list[str]:
     """Exactly this console's slugs: its registered roots' and server.json's, never matched by prefix."""
     s = os.path.realpath(state)
@@ -127,7 +101,11 @@ def project_slugs(state: Path, registry: Path | None = None) -> list[str]:
     roots = sorted(r for r, e in projects.items() if isinstance(e, dict) and e.get("state") == s)
     if not roots:
         raise CostError(f"no project is registered on the console at {s}; nothing to collect")
-    return sorted({slug_of(r) for r in roots} | set(_listed_slugs(s, reg.parent / SERVER_FILE)))
+    try:   # server.json has one reader, shared with the console server (K3)
+        listed = SF.slugs_for_state(s, reg.parent / SF.FILE)
+    except SF.ServerFileError as e:
+        raise CostError(str(e)) from None
+    return sorted({slug_of(r) for r in roots} | set(listed))
 
 
 def _keep(pairs):

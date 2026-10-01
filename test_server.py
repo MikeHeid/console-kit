@@ -10,11 +10,13 @@ so no test reaches the network.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import http.client
 import io
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -33,6 +35,7 @@ if not os.environ.get("CONSOLE_KIT_TEST_CONFIG"):
     os.environ["CONSOLE_KIT_TEST_CONFIG"] = os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="ck-cfg-")
 os.environ.pop("CONSOLE_KIT_AGENT", None)
 from console_kit import server as SV  # noqa: E402
+from console_kit import multiserver as MS  # noqa: E402
 
 TEAM = "team.example.cloudflareaccess.com"
 AUD = "a" * 64
@@ -2902,6 +2905,723 @@ class NoServerGitTests(_Live, unittest.TestCase):
         [refine] = [t for t in tags["questions"]["LANE.1/Q2"] if t["step"] == "refine"]
         self.assertIn("(last commit ", refine["reason"])
         self.assertNotIn(NOGIT, refine["reason"])
+
+
+# -- K3: the one server, run as its own process (an audit hook cannot be removed, and a kill -9 needs one) ---
+
+ONE_SERVER = r'''
+import json, os, sys
+kit, server_file, sock, pem, audit_log, roots = sys.argv[1:7]
+roots = [r.rstrip("/") + "/" for r in roots.split(",") if r]
+log = open(audit_log, "a", buffering=1)
+armed = [False]
+SPAWN = {"subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "os.forkpty"}
+import sysconfig
+TRUSTED = tuple(os.path.realpath(sysconfig.get_paths()[k]) + "/" for k in ("stdlib", "platstdlib", "purelib",
+                                                                           "platlib")) + (os.path.realpath(kit) + "/",)
+
+def under(p):
+    try:
+        p = os.path.realpath(os.fsdecode(p))
+    except Exception:
+        return False
+    return any((p + "/").startswith(r) for r in roots)
+
+def hook(event, args):
+    why = None
+    if event in SPAWN:
+        why = f"{event} {args[:2]!r}"
+    elif event == "import" and len(args) > 1 and args[1] and under(args[1]):
+        why = f"import {args[0]} from {args[1]}"
+    # A NET, NOT THE GUARD: a confined read (rootfs: one component, opened by dir_fd) reaches this hook with a bare
+    # name resolved against nothing it can see, so `under()` is false for it. The adapter running is caught by the
+    # import, compile and spawn rules, and by the marker file it writes; this rule only adds a plain open by path.
+    elif event == "open" and isinstance(args[0], (str, bytes)) and os.fsdecode(args[0]).endswith(".py") \
+            and under(args[0]):
+        why = f"open {os.fsdecode(args[0])}"
+    elif event == "compile" and len(args) > 1 and isinstance(args[1], (str, bytes)) and under(args[1]):
+        why = f"compile {args[1]}"
+    elif event in ("compile", "exec") and armed[0]:
+        # While serving, code may come only from the interpreter's own library (a lazy stdlib import, e.g.
+        # _strptime on first use) or the kit. A string ("<string>") or any other file is flagged: that is
+        # how an importer that reads the adapter's source and execs it would show.
+        code = args[0]
+        name = getattr(code, "co_filename", None) or (args[1] if len(args) > 1 else None)
+        name = os.fsdecode(name) if isinstance(name, (str, bytes)) else "<unknown>"
+        if not any(name.startswith(p) for p in TRUSTED):
+            why = f"{event} while serving: {name} {getattr(code, 'co_name', '')}"
+    if why:
+        log.write(why + "\n")
+
+sys.addaudithook(hook)
+sys.path.insert(0, kit)
+from console_kit import multiserver as MS
+from console_kit import server as SV
+from cryptography.hazmat.primitives import serialization
+pub = serialization.load_pem_public_key(open(pem, "rb").read())
+r = MS.start(server_file, sock, verify_for=lambda aud: SV.access_verifier("team.example.cloudflareaccess.com", aud,
+             key_for=lambda t: pub), port_for=lambda h: 0)
+armed[0] = True
+print(json.dumps({"ports": r.ports(), "refused": r.ms.refused(), "stores": len(r.ms.stores())}), flush=True)
+sys.stdin.read()
+r.shutdown()
+'''
+
+
+class _OneServer:
+    """A fixture of two projects, alpha and beta, on one server run as its own process."""
+
+    def setUp(self):
+        import test_kit as TK
+        from console_kit import serverfile as SF
+        from console_kit import registry as R
+        from cryptography.hazmat.primitives import serialization
+        self.TK, self.SF, self.R = TK, SF, R
+        self.tmp = tempfile.TemporaryDirectory()
+        self.t = Path(os.path.realpath(self.tmp.name))
+        self.cfg = self.t / "cfg"
+        self.reg = self.cfg / "console-kit" / "projects.json"
+        self.sfile = self.reg.parent / "server.json"
+        self.sock = self.sfile.parent / "server.sock"          # where agent.py looks for the one server
+        self.audit = self.t / "audit.log"
+        self.pem = self.t / "pub.pem"
+        self.pem.write_bytes(KEY.public_key().public_bytes(serialization.Encoding.PEM,
+                                                             serialization.PublicFormat.SubjectPublicKeyInfo))
+        self.p = {}
+        for i, name in enumerate(("alpha", "beta")):
+            root, state = self.t / f"root-{name}", self.t / f"state-{name}"
+            root.mkdir()
+            state.mkdir()
+            (root / "index.html").write_text(f"<!doctype html><html><body>{name} board</body></html>\n")
+            marker = self.t / f"ADAPTER-RAN-{name}"
+            # The project's adapter: if anything in the server imports or runs it, the marker appears.
+            (root / "console_adapter.py").write_text(
+                f"open({str(marker)!r}, 'w').write('ran')\n"
+                "def items():\n    return {'FROM_ADAPTER': {'title': 'the adapter says', 'parent': None, "
+                "'status': 'open'}}\n"
+                "def seed_questions():\n    return []\n"
+                "def record(entries, dry_run):\n    return []\n")
+            R.register(root, state, HERE / "plugin" / "kit", path=self.reg)
+            SF.add(name, state, f"{name}.example.com", AUD, 4901 + i, TEAM, registry=self.reg, path=self.sfile)
+            self.p[name] = {"root": root, "state": state, "marker": marker}
+        self.proc = None
+        self.logs: list[str] = []
+
+    def tearDown(self):
+        self.stop()
+        self.tmp.cleanup()
+
+    def spawn(self, script=ONE_SERVER):
+        roots = ",".join(str(v["root"]) for v in self.p.values())
+        # stderr to a file, not a pipe: an undrained pipe fills at 64 KiB of access lines and stalls the server.
+        self.errlog = open(self.t / f"server-{len(self.logs)}.err", "w+")
+        self.proc = subprocess.Popen([sys.executable, "-c", script, str(HERE / "plugin" / "kit"),
+                                      str(self.sfile), str(self.sock), str(self.pem), str(self.audit), roots],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.errlog,
+                                     text=True, env={**os.environ, "XDG_CONFIG_HOME": str(self.cfg)})
+        line = self.proc.stdout.readline()
+        if not line:
+            self.proc.wait(timeout=60)
+            self.errlog.seek(0)
+            raise AssertionError(f"the one server did not start: {self.errlog.read()}")
+        self.info = json.loads(line)
+        return self.info
+
+    def stop(self, kill=False):
+        if self.proc is None:
+            return
+        if kill:
+            self.proc.kill()
+            self.proc.communicate(timeout=60)
+        else:
+            self.proc.communicate(input="", timeout=60)
+        self.errlog.seek(0)
+        self.logs.append(self.errlog.read())   # every log line the server wrote, for the sentinel checks
+        self.errlog.close()
+        self.proc = None
+
+    def agent(self, method, path, body=None):
+        return SV.agent_request(self.sock, method, path, body)
+
+    def owner(self, name, method, path, body=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.info["ports"][name], timeout=30)
+        h = {"Cf-Access-Jwt-Assertion": token()}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            h.update({"Content-Type": "application/json", "Origin": f"https://{name}.example.com"})
+        conn.request(method, path, body=data, headers=h)
+        r = conn.getresponse()
+        raw = r.read()
+        conn.close()
+        try:
+            return r.status, json.loads(raw)
+        except ValueError:
+            return r.status, raw.decode()
+
+    def push(self, name, items=None):
+        items = items if items is not None else {"PUSHED": {"title": "pushed", "parent": None, "status": "open"}}
+        return self.agent("POST", f"/p/{name}/items", {"items": items, "seed_questions": [], "board": None})
+
+    def question(self, item, n, name="alpha"):
+        return self.agent("POST", f"/p/{name}/question", {
+            "qid": f"{item}/Q{n}", "item": item, "text": "Which?", "kind": "single",
+            "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}], "star": "b", "valid_if": [],
+            "source": "index.html:1", "nonce": f"k3q{item.lower()}{name}{n:04d}"})
+
+    def violations(self):
+        return self.audit.read_text().splitlines() if self.audit.exists() else []
+
+
+class OneServerTests(_OneServer, unittest.TestCase):
+    """K3 step 3: the one server's doors, items-push, and its rules (AC3.3, AC3.5, AC3.6)."""
+
+    def test_ac35_no_project_code_and_items_only_from_the_push(self):
+        # Catches: importing the adapter (or reading its source and exec-ing a string), spawning git or anything
+        # else, and validating writes against the adapter rather than the pushed snapshot.
+        info = self.spawn()
+        self.assertEqual(info["refused"], {})
+        for name in ("alpha", "beta"):
+            self.assertEqual(self.push(name)[0], 200)
+            code, out = self.question("FROM_ADAPTER", 1, name)
+            self.assertEqual(code, 400, out)                       # the adapter's item is not the pushed one
+            self.assertEqual(self.question("PUSHED", 1, name)[0], 200)
+            for path in ("/view", "/check", "/health"):
+                self.assertIn(self.agent("GET", f"/p/{name}{path}")[0], (200, 503), path)
+            for path, body in (("/message", {"item": "PUSHED", "text": "hi", "nonce": f"k3msg{name}01"}),
+                               ("/cursor", {"last_synced_at": "2026-10-01T00:00:00Z", "last_error": None}),
+                               ("/working", {"items": ["PUSHED"]}), ("/reanchor", {"dry_run": True})):
+                self.assertEqual(self.agent("POST", f"/p/{name}{path}", body)[0], 200, path)
+            for path in ("/", "/api/view", "/api/check", "/api/board", "/api/usage", "/api/feed",
+                         "/api/wait?since=0&timeout=0", "/api/evidence?qid=PUSHED/Q1"):
+                self.assertIn(self.owner(name, "GET", path)[0], (200, 404), path)
+            self.assertEqual(self.owner(name, "POST", "/api/message", {"item": "PUSHED", "text": "owner",
+                                                                       "nonce": f"k3own{name}01"})[0], 200)
+            view = self.agent("GET", f"/p/{name}/view")[1]
+            self.assertEqual(view["view"]["tags"]["git"], NOGIT)   # labelled (F63), the key the page renders
+        self.assertEqual(self.agent("GET", "/p/alpha/check")[1]["history"], NOGIT)
+        # The page reads the OWNER door: the same fields the single-project page renders (test_browser.py, the
+        # Q23 tests) must arrive there, so the label reaches the screen by the one rendering path.
+        self.assertEqual(self.owner("alpha", "GET", "/api/check")[1]["history"], NOGIT)
+        self.assertEqual(self.owner("alpha", "GET", "/api/view")[1]["view"]["tags"]["git"], NOGIT)
+        health = self.agent("GET", "/health")
+        self.assertEqual(health[0], 200)
+        self.assertNotIn("alpha", json.dumps(health[1]))        # it names no project
+        self.stop()
+        self.assertEqual(self.violations(), [])
+        for v in self.p.values():
+            self.assertFalse(v["marker"].exists())
+        # The negative control: the same hook DOES see an adapter run and a git spawn in its process.
+        probe = self.t / "probe.py"
+        probe.write_text("import runpy, subprocess, sys\nrunpy.run_path(sys.argv[8])\n"
+                         "subprocess.run(['git', '--version'], capture_output=True)\n")
+        ctl = ONE_SERVER.split("sys.path.insert(0, kit)")[0] + "exec(open(sys.argv[7]).read())\n"
+        ctl_log = self.t / "audit-control.log"
+        r = subprocess.run([sys.executable, "-c", ctl, "k", "s", "x", "p", str(ctl_log), str(self.p["alpha"]["root"]),
+                            str(probe), str(self.p["alpha"]["root"] / "console_adapter.py")],
+                           capture_output=True, text=True, timeout=60)
+        seen = ctl_log.read_text()
+        self.assertIn("console_adapter.py", seen, r.stderr)
+        self.assertIn("subprocess.Popen", seen)
+
+    AGENT_GETS = ("/view", "/check", "/health", "/no-such-route")
+    AGENT_POSTS = ("/items", "/cursor", "/working", "/reanchor", "/visual", "/visual-export", "/question",
+                   "/message", "/transcript", "/no-such-route")
+
+    def test_the_seam_is_the_only_admission_point(self):
+        # K4 replaces `authorize` alone, so this is behaviour, not source text: with `authorize` refusing, EVERY
+        # route of every project (served, refused, unknown) answers the one 403, and with it admitting, they don't.
+        # Catches: any route (or a fault check) reached before the seam, and an unknown project told apart.
+        self.assertEqual(set(self.AGENT_POSTS) >= set(SV.AGENT_ROUTES), True)   # the list keeps up with the table
+        (self.p["beta"]["state"] / "store.jsonl").write_text('{"not": "a record"}\n')   # beta is a refused project
+        self.spawn(ONE_SERVER.replace("r = MS.start(", "MS.authorize = lambda project, headers: False\nr = MS.start("))
+        for name in ("alpha", "beta", "nobody"):
+            for path in self.AGENT_GETS:
+                self.assertEqual(self.agent("GET", f"/p/{name}{path}"), (403, {"error": "forbidden"}), (name, path))
+            for path in self.AGENT_POSTS:
+                self.assertEqual(self.agent("POST", f"/p/{name}{path}", {}), (403, {"error": "forbidden"}),
+                                 (name, path))
+        self.assertEqual(self.agent("GET", "/health")[0], 200)   # the server's own liveness names no project
+        self.stop()
+        self.spawn()                                              # the control: admitted, no route is that 403
+        for path in self.AGENT_GETS:
+            self.assertNotEqual(self.agent("GET", f"/p/alpha{path}")[0], 403, path)
+        for path in self.AGENT_POSTS:
+            self.assertNotEqual(self.agent("POST", f"/p/alpha{path}", {})[0], 403, path)
+        self.assertEqual(self.agent("GET", "/p/beta/view")[0], 503)
+        self.assertEqual(self.agent("GET", "/p/nobody/view"), (403, {"error": "forbidden"}))
+
+    def test_ac36_one_bad_store_is_503_there_and_a_kill_loses_nothing_acknowledged(self):
+        # Catches: a server that refuses to start for one project's fault, and a restart test that writes nothing.
+        (self.p["beta"]["state"] / "store.jsonl").write_text('{"not": "a record"}\n')
+        info = self.spawn()
+        self.assertEqual(list(info["refused"]), ["beta"])
+        code, out = self.agent("GET", "/p/beta/view")             # the steward's own socket: named
+        self.assertEqual(code, 503)
+        self.assertIn("beta's console cannot open", out["error"])
+        code, out = self.owner("beta", "GET", "/api/view")        # the browser: one body that names nothing
+        self.assertEqual((code, out), (503, MS.FAULT_BODY))
+        self.assertEqual(self.owner("alpha", "GET", "/api/view")[0], 200)
+        self.assertEqual(self.push("alpha")[0], 200)
+        seqs = []
+        for n in (1, 2):
+            code, out = self.question("PUSHED", n)
+            self.assertEqual(code, 200, out)
+            seqs.append(out["record"]["seq"])
+        store = self.p["alpha"]["state"] / "store.jsonl"
+        held = store.read_bytes()
+        self.stop(kill=True)                                  # SIGKILL: no shutdown code runs
+        self.assertEqual(store.read_bytes(), held)            # both acknowledged writes are on disk
+        self.spawn()
+        code, out = self.question("PUSHED", 3)
+        self.assertEqual(code, 200, out)
+        self.assertEqual(out["record"]["seq"], seqs[-1] + 1)   # seq continues
+        self.assertTrue(store.read_bytes().startswith(held))  # append-only across the kill
+
+    def test_ac33_a_fixture_copy_keeps_its_bytes_and_every_released_kit_starts_on_it_after(self):
+        # Catches: hashing the live dir, and never starting the old kit afterwards (a new file it refuses
+        # would go unseen until a rollback was needed).
+        import shutil
+        made = self.t / "made-by-old"
+        kits = {tag: self.TK.old_kit(tag, self.t / f"kit-{tag}", ("plugin/kit",))
+                for tag in self.TK.released_single_store_tags()}
+        self.TK.start_old_server(kits[sorted(kits)[0]], self.t / "work-make", made, stay=False)
+        fixture = self.p["alpha"]["state"]
+        shutil.rmtree(fixture)
+        shutil.copytree(made, fixture)                        # a COPY: every command runs against it
+        def snapshot():   # EVERY path in the state dir, its kind and (for a file) its hash: not a chosen few
+            out = {}
+            for p in sorted(fixture.rglob("*")):
+                rel = p.relative_to(fixture).as_posix()
+                if p.is_symlink():
+                    out[rel] = ("link", os.readlink(p))
+                elif p.is_file():
+                    out[rel] = ("file", hashlib.sha256(p.read_bytes()).hexdigest())
+                else:
+                    out[rel] = ("dir" if p.is_dir() else "other", None)
+            return out
+        before = snapshot()
+        self.assertEqual(before["store.jsonl"][0], "file")
+        (self.p["alpha"]["root"] / "console_adapter.py").write_text(
+            "def items():\n    return {'LANE': {'title': 'a lane', 'parent': None, 'status': 'open'}}\n"
+            "def seed_questions():\n    return []\n"
+            "def record(entries, dry_run):\n    return []\n")
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg), "PYTHONDONTWRITEBYTECODE": "1"}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        agent_py = str(HERE / "plugin" / "kit" / "agent.py")
+        r = subprocess.run([sys.executable, agent_py, "--state", str(fixture), "server", "add", "alpha", "--hostname",
+                            "alpha.example.com", "--aud", AUD, "--port", "4901", "--team-domain", TEAM],
+                           capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.spawn()
+        r = subprocess.run([sys.executable, agent_py, "--state", str(fixture), "items-push", "--adapter",
+                            "console_adapter.py", "--project", str(self.p["alpha"]["root"])],
+                           capture_output=True, text=True, env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for path in ("/view", "/check", "/health"):
+            self.assertEqual(self.agent("GET", f"/p/alpha{path}")[0], 200, path)
+        self.assertEqual(self.owner("alpha", "GET", "/api/view")[0], 200)
+        self.stop()
+        after = snapshot()
+        self.assertEqual({k: v for k, v in after.items() if k in before}, before)   # nothing it had was touched
+        self.assertEqual(sorted(set(after) - set(before)), ["items.json", "server.lock"])   # the two it adds, only
+        for tag, kit in kits.items():                          # the rollback: every released kit starts on it
+            self.TK.start_old_server(kit, self.t / f"work-{tag}", fixture, stay=False)
+
+
+class FaultIsolationTests(_OneServer, unittest.TestCase):
+    """K3 review fixes: a project's bad entry, port or stored items is ITS fault (AC3.6), and a refused project's
+    owner door keeps the Access gate and names nothing past it."""
+
+    REAL_PORTS = "port_for=lambda h: 0"
+
+    def rewrite(self, fn):
+        doc = json.loads(self.sfile.read_text())
+        fn(doc["projects"])
+        self.sfile.write_text(json.dumps(doc))
+
+    def owner_raw(self, name, path, headers):
+        conn = http.client.HTTPConnection("127.0.0.1", self.info["ports"][name], timeout=30)
+        conn.request("GET", path, headers=headers)
+        r = conn.getresponse()
+        raw = r.read()
+        conn.close()
+        return r.status, json.loads(raw)
+
+    def alpha_serves(self):
+        self.assertEqual(self.agent("GET", "/p/alpha/view")[0], 200)
+        self.assertEqual(self.owner("alpha", "GET", "/api/view")[0], 200)
+
+    def test_an_entry_with_no_port_refuses_that_project_and_the_server_starts(self):
+        # Catches: start() reading entry["port"] for an entry entry_problems already refused (KeyError).
+        self.rewrite(lambda p: p["beta"].pop("port"))
+        info = self.spawn(ONE_SERVER.replace(self.REAL_PORTS, "port_for=lambda h: h.entry['port'] and 0"))
+        self.assertEqual(list(info["refused"]), ["beta"])
+        self.assertIn("port", info["refused"]["beta"])
+        self.assertNotIn("beta", info["ports"])                  # no door is built from a broken entry
+        self.assertEqual(self.agent("GET", "/p/beta/view")[0], 503)
+        self.alpha_serves()
+
+    def test_a_port_in_use_refuses_that_project_and_the_server_starts(self):
+        # Catches: a bind's OSError escaping start() and taking every project down with it.
+        import socket as so
+        held = so.socket(so.AF_INET, so.SOCK_STREAM)
+        try:
+            held.bind(("127.0.0.1", 0))
+            held.listen(1)
+            free = so.socket(so.AF_INET, so.SOCK_STREAM)
+            free.bind(("127.0.0.1", 0))
+            alpha_port = free.getsockname()[1]
+            free.close()
+            busy = held.getsockname()[1]
+
+            def ports(p):
+                p["alpha"]["port"], p["beta"]["port"] = alpha_port, busy
+            self.rewrite(ports)
+            info = self.spawn(ONE_SERVER.replace(self.REAL_PORTS, "port_for=lambda h: h.entry['port']"))
+            self.assertEqual(list(info["refused"]), ["beta"])
+            self.assertIn(f"cannot listen on port {busy}", info["refused"]["beta"])
+            self.assertEqual(info["ports"], {"alpha": alpha_port})
+            self.assertEqual(self.agent("GET", "/p/beta/view")[0], 503)
+            self.alpha_serves()
+            self.stop()
+        finally:
+            held.close()                                          # the listener is released whatever happened
+
+    def test_a_bad_stored_items_file_refuses_that_project_only(self):
+        # Catches: open_project catching too few exception types ({"items": [1]} raised TypeError out of
+        # MultiServer()), and a snapshot read without the push's own check.
+        for doc in ({"items": [1]}, {"items": {"X": {"title": 5, "parent": None}}},
+                    {"items": {"X": {"title": "x", "parent": ["q"]}}}, "not an object", {"items": {}, "seed_questions": "q"},
+                    {"items": {}, "seed_questions": [{"text": "no qid"}]}):
+            (self.p["beta"]["state"] / "items.json").write_text(json.dumps(doc))
+            info = self.spawn()
+            self.assertEqual(list(info["refused"]), ["beta"], doc)
+            self.assertIn("items.json", info["refused"]["beta"])
+            self.alpha_serves()
+            self.stop()
+
+    def test_a_bad_push_is_refused_naming_the_field_and_nothing_is_kept(self):
+        # Catches: a push accepted with a number title or a list parent, after which every payload() 500s.
+        self.spawn()
+        self.assertEqual(self.push("alpha")[0], 200)
+        kept = (self.p["alpha"]["state"] / "items.json").read_bytes()
+        for items, field in (({"X": {"title": 5, "parent": None}}, "items.X.title must be str, not int"),
+                             ({"X": {"title": "x", "parent": ["q"]}}, "items.X.parent must be str or null, not list"),
+                             ({"X": {"title": "x", "status": 3}}, "items.X.status must be str or null, not int"),
+                             ({"X": {"parent": None}}, "items.X.title is missing"),
+                             ({"X": {"title": "x", "owner": "me"}}, "items.X has unknown fields ['owner']")):
+            code, out = self.push("alpha", items)
+            self.assertEqual(code, 400, out)
+            self.assertIn(field, out["error"])
+            self.assertEqual((self.p["alpha"]["state"] / "items.json").read_bytes(), kept)
+        self.assertEqual(self.agent("GET", "/p/alpha/view")[0], 200)
+
+    def test_a_refused_projects_owner_door_keeps_the_gate_and_names_nothing(self):
+        # Catches: the Access verify skipped on a refused project's door (its 503 then reaches anyone at the tunnel),
+        # and a 503 body that names a path. Beta gets its own audience, so alpha's token is another project's.
+        other_aud = "b" * 64
+        self.rewrite(lambda p: p["beta"].update(aud=other_aud))
+        (self.p["beta"]["state"] / "store.jsonl").write_text('{"not": "a record"}\n')
+        info = self.spawn()
+        self.assertEqual(list(info["refused"]), ["beta"])
+        refusals = {}
+        for case, headers in (("no token", {}),
+                              ("wrong aud", {"Cf-Access-Jwt-Assertion": token(aud=["c" * 64])}),
+                              ("another project's token", {"Cf-Access-Jwt-Assertion": token()}),
+                              ("wrong key", {"Cf-Access-Jwt-Assertion": token(key=OTHER, aud=[other_aud])})):
+            code, out = self.owner_raw("beta", "/api/view", headers)
+            self.assertEqual(code, 403, case)
+            self.assertNotIn("store", json.dumps(out), case)
+            self.assertNotIn(str(self.t), json.dumps(out), case)
+            refusals[case] = (code, out)
+        # Alpha's own door refuses the same headers the same way: one gate, whatever the project's state.
+        for case, headers in (("no token", {}), ("wrong aud", {"Cf-Access-Jwt-Assertion": token(aud=["c" * 64])})):
+            self.assertEqual(self.owner_raw("alpha", "/api/view", headers), refusals[case], case)
+        code, out = self.owner_raw("beta", "/api/view", {"Cf-Access-Jwt-Assertion": token(aud=[other_aud])})
+        self.assertEqual((code, out), (503, MS.FAULT_BODY))      # past the gate: still names nothing
+        self.stop()
+        self.assertIn("beta's console cannot open", "\n".join(self.logs))   # the operator's reason is in the log
+
+
+REFUSAL = "is not a plain file under the project root"
+
+
+def naive_read(root: Path, rel: str) -> bytes:
+    """NEGATIVE CONTROL: open the path as given."""
+    return (Path(root) / rel).read_bytes()
+
+
+def prefix_read(root: Path, rel: str) -> bytes:
+    """NEGATIVE CONTROL: a check on the path string (`startswith root`) without resolving symlinks."""
+    p = os.path.abspath(os.path.join(root, rel))
+    if not p.startswith(str(root).rstrip("/") + "/"):
+        raise PermissionError(rel)
+    return Path(p).read_bytes()
+
+
+def check_then_open_read(root: Path, rel: str) -> bytes:
+    """NEGATIVE CONTROL for the race: resolve, compare, then open the resolved path (two steps)."""
+    p = os.path.realpath(os.path.join(root, rel))
+    if not p.startswith(str(root).rstrip("/") + "/"):
+        raise PermissionError(rel)
+    with open(p, "rb") as fh:
+        return fh.read()
+
+
+class RootConfinementTests(_OneServer, unittest.TestCase):
+    """K3 step 4: root reads are confined (AC3.7) and cannot race (AC3.8)."""
+
+    def setUp(self):
+        super().setUp()
+        A = self.p["alpha"]
+        self.SF.add("alpha", A["state"], "alpha.example.com", AUD, 4901, TEAM, page="pg/page.html",
+                    registry=self.reg, path=self.sfile)
+        (A["root"] / "pg").mkdir()
+        (A["root"] / "pg" / "page.html").write_text("<html><body>ORDINARY-PAGE</body></html>\n")
+        (A["root"] / "ok.txt").write_text("ORDINARY-OK a plain file inside the root\n")
+
+    def plant(self):
+        """Targets with a sentinel each, and the links in alpha's root that point at them."""
+        A, B = self.p["alpha"], self.p["beta"]
+        tokens = self.cfg / "console-kit" / "tokens"
+        tokens.mkdir(parents=True)
+        (tokens / "beta").write_text("SENTINEL-TOKEN-FILE-beta\n")
+        (B["root"] / "secret.txt").write_text("SENTINEL-B-ROOT-FILE\n")
+        (B["root"] / "pgb").mkdir()
+        (B["root"] / "pgb" / "page.html").write_text("SENTINEL-B-ROOT-PAGE\n")
+        (A["root"] / "inside.txt").write_text("SENTINEL-INSIDE-A-ROOT\n")
+        doc = json.loads(self.sfile.read_text())
+        doc["note"] = "SENTINEL-SERVER-JSON"
+        self.sfile.write_text(json.dumps(doc))
+        targets = {"b_store": (B["state"] / "store.jsonl", "SENTINEL-B-STORE"),
+                   "a_store": (A["state"] / "store.jsonl", "SENTINEL-A-STORE"),
+                   "b_token": (tokens / "beta", "SENTINEL-TOKEN-FILE-beta"),
+                   "server_json": (self.sfile, "SENTINEL-SERVER-JSON"),
+                   "b_root": (B["root"] / "secret.txt", "SENTINEL-B-ROOT-FILE")}
+        host = Path("/etc/hostname")
+        if host.is_file() and len(host.read_text().strip()) >= 10:   # the excerpt is [1:-1] and needs 8+
+            targets["etc_hostname"] = (host, host.read_text().strip())
+        self.cases = []   # (case, path in alpha's root, sentinel)
+        for i, (case, (target, sentinel)) in enumerate(targets.items()):
+            (A["root"] / f"t{i}").symlink_to(target)
+            self.cases.append((case, f"t{i}", sentinel))
+        (A["root"] / "mid").symlink_to(B["root"])              # a symlinked directory in the middle
+        self.cases.append(("middle_dir", "mid/secret.txt", "SENTINEL-B-ROOT-FILE"))
+        (A["root"] / "inlink").symlink_to(A["root"] / "inside.txt")   # a symlink pointing inside the root
+        self.cases.append(("inside_link", "inlink", "SENTINEL-INSIDE-A-ROOT"))
+        (A["root"] / "loopa").symlink_to(A["root"] / "loopb")
+        (A["root"] / "loopb").symlink_to(A["root"] / "loopa")
+        self.cases.append(("loop", "loopa", None))
+        self.cases.append(("dotdot", "../root-beta/secret.txt", "SENTINEL-B-ROOT-FILE"))
+        self.sentinels = {s for _, _, s in self.cases if s} | {"SENTINEL-B-ROOT-PAGE"}
+
+    def point_page(self, case: str, rel: str) -> None:
+        """Make alpha's host page `pg/page.html` lead where the case's link leads."""
+        A = self.p["alpha"]
+        pg = A["root"] / "pg"
+        if pg.is_symlink():
+            pg.unlink()
+        elif pg.exists():
+            for f in pg.iterdir():
+                f.unlink()
+            pg.rmdir()
+        if case == "middle_dir":
+            pg.symlink_to(self.p["beta"]["root"] / "pgb")       # the middle component is the link
+            return
+        pg.mkdir()
+        if case == "loop":
+            (pg / "page.html").symlink_to(pg / "page2.html")
+            (pg / "page2.html").symlink_to(pg / "page.html")
+        elif case == "dotdot":
+            (pg / "page.html").symlink_to("../../root-beta/secret.txt")   # a relative link out
+        else:
+            (pg / "page.html").symlink_to(os.readlink(A["root"] / rel))
+
+    def test_ac37_every_planted_link_is_refused_alike_and_no_sentinel_leaves(self):
+        # Catches: a `startswith root` string check (every link passes it), and a check of only the final
+        # component (the symlinked middle directory passes it). Both ship below as named negative controls.
+        self.spawn()
+        for name, sentinel in (("alpha", "SENTINEL-A-STORE"), ("beta", "SENTINEL-B-STORE")):
+            self.assertEqual(self.push(name)[0], 200)
+            code, out = self.agent("POST", f"/p/{name}/message", {"item": "PUSHED", "text": sentinel,
+                                                                  "nonce": f"k3sent{name}01"})
+            self.assertEqual(code, 200, out)
+        self.plant()
+        seen: list[str] = []
+        for n, (case, rel, sentinel) in enumerate(self.cases, 1):
+            # As the host page.
+            self.point_page(case, rel)
+            code, out = self.owner("alpha", "GET", "/")
+            seen.append(json.dumps(out))
+            self.assertEqual((code, out), (404, {"error": f"pg/page.html: refused, not a plain file under the project "
+                                                          f"root"}), case)
+            # As an anchor's file: an evidence row is read when the question is asked.
+            code, out = self.question_with(n, evidence=[{"cite": f"{rel}:1"}])
+            seen.append(json.dumps(out))
+            self.assertEqual(code, 400, case)
+            if case != "dotdot":                              # '..' is refused by the cite grammar, before any read
+                self.assertIn(f"{rel} {REFUSAL}", out["error"], case)
+            # As a valid_if path: the excerpt is the sentinel minus its ends, so a followed link would HOLD, and the
+            # whole sentinel can appear in a reply only if the file's bytes did (the reply echoes the excerpt).
+            code, out = self.question_with(100 + n, valid_if=[{"kind": "excerpt", "path": rel,
+                                                                "text": (sentinel or "-SENTINEL-LOOP-NEVER-")[1:-1]}])
+            seen.append(json.dumps(out))
+            if code == 200:
+                self.lock(f"PUSHED/Q{100 + n}")
+                code, chk = self.agent("GET", "/p/alpha/check")
+                seen.append(json.dumps(chk))
+                self.assertIn(f"{rel} {REFUSAL}", json.dumps(chk), case)
+            else:
+                self.assertEqual(case, "dotdot", out)          # only the grammar's own refusal comes earlier
+        # After the loop and all the rest, everything else still serves, and an ordinary file is still read.
+        pg = self.p["alpha"]["root"] / "pg"
+        if pg.is_symlink():
+            pg.unlink()
+        else:
+            for f in pg.iterdir():
+                f.unlink()
+            pg.rmdir()
+        pg.mkdir()
+        (pg / "page.html").write_text("SENTINEL-NO-BODY a plain page the console cannot be injected into\n")
+        self.sentinels.add("SENTINEL-NO-BODY")
+        self.assertEqual(self.owner("alpha", "GET", "/"),   # named, not a dropped connection
+                         (404, {"error": "the host page cannot carry the console: the page has 0 </body> tags; "
+                                         "expected exactly one"}))
+        (pg / "page.html").write_text("<html><body>ORDINARY-PAGE</body></html>\n")
+        code, html = self.owner("alpha", "GET", "/")
+        self.assertEqual(code, 200)
+        self.assertIn("ORDINARY-PAGE", html)
+        self.assertEqual(self.question_with(999, evidence=[{"cite": "ok.txt:1"}])[0], 200)
+        self.assertEqual(self.agent("GET", "/p/beta/view")[0], 200)
+        self.assertEqual(self.owner("alpha", "GET", "/api/view")[0], 200)
+        self.stop()
+        blob = "\n".join(seen + self.logs)
+        for s in self.sentinels:
+            self.assertNotIn(s, blob)
+        self.assertNotIn("alpha.example.com", "\n".join(self.logs))   # nothing of server.json in a log line
+
+    def test_ac37_negative_controls_leak_where_the_real_reader_refuses(self):
+        # The counter-check: the same planted tree read three ways, in this process.
+        from console_kit import rootfs as RF
+        self.spawn()
+        for name, sentinel in (("alpha", "SENTINEL-A-STORE"), ("beta", "SENTINEL-B-STORE")):
+            self.push(name)
+            self.agent("POST", f"/p/{name}/message", {"item": "PUSHED", "text": sentinel, "nonce": f"k3ctl{name}01"})
+        self.stop()
+        self.plant()
+        root = self.p["alpha"]["root"]
+        RF.hold(root)
+
+        def leaks(reader):
+            out = []
+            for case, rel, sentinel in self.cases:
+                try:
+                    data = reader(root, rel)
+                except (OSError, ValueError):
+                    continue
+                if sentinel and sentinel.encode() in data:
+                    out.append(case)
+            return out
+        naive = leaks(naive_read)
+        self.assertEqual(naive[:1], [self.cases[0][0]])          # fails on its FIRST planted link
+        symlinks = [c for c, _, s in self.cases if s and c != "dotdot"]
+        self.assertEqual(sorted(leaks(prefix_read)), sorted(symlinks))   # every symlink case passes a string check
+        self.assertEqual(leaks(lambda r, p: RF.read(r, p, 1 << 20)), [])
+        self.assertEqual(RF.read(root, "ok.txt", 1 << 20), b"ORDINARY-OK a plain file inside the root\n")
+
+    def question_with(self, n, **fields):
+        body = {"qid": f"PUSHED/Q{n}", "item": "PUSHED", "text": "Which?", "kind": "single",
+                "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}], "star": "b", "valid_if": [],
+                "source": "ok.txt:1", "nonce": f"k3conf{n:05d}", **fields}
+        return self.agent("POST", "/p/alpha/question", body)
+
+    def lock(self, qid):
+        code, a = self.owner("alpha", "POST", "/api/answer", {"qid": qid, "picks": ["a"], "own_text": "",
+                                                              "nonce": f"ans{qid.split('Q')[1]:0>9}"})
+        self.assertEqual(code, 200, a)
+        code, lk = self.owner("alpha", "POST", "/api/lock", {"qid": qid, "answer": a["record"]["id"],
+                                                             "nonce": f"lck{qid.split('Q')[1]:0>9}"})
+        self.assertEqual(code, 200, lk)
+
+    def test_ac38_a_swapped_parent_never_serves_the_other_side(self):
+        # Catches: realpath-then-open (passes AC3.7, loses this race) and O_NOFOLLOW on the last component only.
+        import shutil
+        from console_kit import rootfs as RF
+        A, B = self.p["alpha"], self.p["beta"]
+        (B["state"] / "page.html").write_text("SENTINEL-RACE-B-STATE\n")
+        self.SF.add("alpha", A["state"], "alpha.example.com", AUD, 4901, TEAM, page="race/page.html",
+                    registry=self.reg, path=self.sfile)
+        race, real = A["root"] / "race", A["root"] / "race.real"
+        race.mkdir()
+        (race / "page.html").write_text("<html><body>ORDINARY-RACE</body></html>\n")
+        stop = threading.Event()
+
+        def swap():
+            while not stop.is_set():
+                try:
+                    os.rename(race, real)
+                    os.symlink(B["state"], race)
+                    os.unlink(race)
+                    os.rename(real, race)
+                except OSError:
+                    pass
+
+        def run(reader, n, deadline):
+            leaked = served = refused = 0
+            t0 = time.monotonic()
+            for _ in range(n):
+                if time.monotonic() - t0 > deadline:
+                    break
+                try:
+                    data = reader()
+                except (OSError, ValueError):
+                    refused += 1
+                    continue
+                if b"SENTINEL-RACE-B-STATE" in data:
+                    leaked += 1
+                else:
+                    served += 1
+            return leaked, served, refused
+        RF.hold(A["root"])
+        th = threading.Thread(target=swap, daemon=True)
+        th.start()
+        try:
+            # The named negative control must lose the race, or the swap is too slow to prove anything.
+            leaked, _, _ = run(lambda: check_then_open_read(A["root"], "race/page.html"), 200_000, 20.0)
+            if leaked == 0:
+                self.fail("inconclusive: the check-then-open control never served B's sentinel, so the swap loop "
+                          "is too slow to prove the real reader safe")
+            self.assertEqual(run(lambda: RF.read(A["root"], "race/page.html", 1 << 20), 200_000, 20.0)[0], 0)
+            # And through the server's own door, 10,000 times.
+            stop.set()
+            th.join()
+            if real.exists():
+                race.unlink(missing_ok=True) if race.is_symlink() else None
+                os.rename(real, race)
+            self.spawn()
+            stop.clear()
+            th = threading.Thread(target=swap, daemon=True)
+            th.start()
+            counts = {"ok": 0, "refused": 0}
+            for _ in range(10_000):
+                code, body = self.owner("alpha", "GET", "/")
+                text = body if isinstance(body, str) else json.dumps(body)
+                self.assertNotIn("SENTINEL-RACE-B-STATE", text)
+                if code == 200:
+                    self.assertIn("ORDINARY-RACE", text)
+                    counts["ok"] += 1
+                else:
+                    self.assertEqual(code, 404, text)
+                    counts["refused"] += 1
+            self.assertGreater(counts["ok"], 0)
+        finally:
+            stop.set()
+            th.join()
+        if shutil.which("strace") is None:
+            self.skipTest("the strace half of AC3.8 needs strace, which is not installed (the race half ran: "
+                          f"{counts})")
+        self.fail("strace is installed: the syscall assertion of AC3.8 is not written yet (see the K3 report)")
 
 
 if __name__ == "__main__":
