@@ -271,6 +271,55 @@ class EarlyRefusalDrainTests(unittest.TestCase):
             took = self.refused_then_eof(self.server(), 100_000, feed=trickle)
         self.assertLess(took, 2.0)
 
+    @staticmethod
+    def late_then_silent(s, stop):
+        """Bytes at 0, 0.3, 0.6 and 0.9 s, then nothing: the last read starts just before a 1 s deadline."""
+        for _ in range(4):
+            try:
+                s.send(b" ")
+            except OSError:
+                return
+            if stop.wait(0.3):
+                return
+
+    def test_each_read_waits_only_for_what_is_left_of_the_drain_deadline(self):
+        # Catches (lane 4 review, LOW gap a): each read given the WHOLE budget (settimeout(seconds)) instead of
+        # what is left (settimeout(remaining)). A read that starts at 0.9 s of a 1 s deadline then waits until
+        # 1.9 s; the loop's own check runs only between reads, so it cannot stop that. The trickle tests above
+        # stay under their bound either way; this one does not.
+        from unittest import mock
+        with mock.patch.object(SV, "DRAIN_SECONDS", 1.0):
+            took = self.refused_then_eof(self.server(), 100_000, feed=self.late_then_silent)
+        self.assertLess(took, 1.45)
+
+    def test_each_read_waits_only_for_what_is_left_of_the_body_deadline(self):
+        # The same, for the body read (`_body` shares `_read_within`): the 408 arrives at the deadline, not a
+        # whole budget after the last byte.
+        import socket as so
+        from unittest import mock
+        sock = self.server()
+        s = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+        s.settimeout(15)
+        s.connect(str(sock))
+        self.addCleanup(s.close)
+        stop = threading.Event()
+        with mock.patch.object(SV, "BODY_SECONDS", 1.0):
+            s.sendall(b"POST /cursor HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n")
+            t0 = time.monotonic()
+            threading.Thread(target=self.late_then_silent, args=(s, stop), daemon=True).start()
+            got = b""
+            try:
+                while not got.endswith(b"}"):
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    got += chunk
+            finally:
+                stop.set()
+            took = time.monotonic() - t0
+        self.assertIn(b" 408 ", got.split(b"\r\n", 1)[0], got[:80])
+        self.assertLess(took, 1.45)
+
 
 def steward_push(console, root) -> dict:
     """What `agent.py history-push` does, in-process: the server says what it wants, the steward reads git
