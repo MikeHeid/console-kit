@@ -277,6 +277,30 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
 - **Your picks survive a refresh.** Seat ticks, the other seat and the mode are
   kept across a re-render, in this form and in "Follow up on this answer".
 
+### Slim reads and a cost sidecar (0.8.9)
+
+- **`agent.py todo`.** Prints only what waits for the agent: forks, threads,
+  chat, visuals, inbox and seq. It is computed from the view's own rules, so it
+  can never disagree with `view`. Measured once on a 116-question console:
+  `todo` printed 184 bytes where `view` would have printed 501,167.
+- **Narrower reads.** `view --item ID` prints one item and everything under it
+  (`@chat` for the chat). `--since SEQ` on `view` and `answers` keeps only
+  questions touched after that seq; a later lock or re-anchor counts as a
+  touch, and stale questions are always kept. JSON is compact when stdout is
+  not a terminal.
+- **A 64 KiB cap.** A `todo`, `view` or `answers` read over 64 KiB exits 4,
+  prints nothing on stdout, and names the narrower command; `--full` prints it
+  anyway. The console skills say what to do on exit 4.
+- **Newer client, older server.** `todo`, `view --item` and `answers` work
+  against a 0.8.8 server. `--since` refuses in one line until the server is
+  restarted on 0.8.9, because it needs a field only 0.8.9 sends.
+- **`agent.py costs collect | show --fork ID`.** Reads token usage from Claude
+  Code's own transcripts, only this project's, and only the usage, message id
+  and agent type, plus the first 64 characters of a subagent's description to
+  find its `ck-fork:<id>` tag. Writes `costs.jsonl` beside the store, never
+  into it. `collect` is steward-only; `show` only reads. Symlinks are
+  refused, and lines and files are size-capped.
+
 ## How it fits together
 
 ```
