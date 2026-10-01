@@ -299,6 +299,26 @@ What the project change usually touches, besides `<vendored>` itself:
 
 ---
 
+## What a project token protects
+
+Once projects move onto the one console server, each project's agents reach
+it with that project's own token (`tokens/NAME` beside `server.json`, mode
+0600; the server keeps only a hash). The token stops cross-talk through the
+kit and by mistake: a wrong `--state` or a skill bug cannot reach another
+project's console. It is **not** isolation between agents running as the same
+user: such an agent can read `tokens/` and every other project's state
+directory directly. Real isolation needs a sandbox or a separate user covering
+both.
+
+Two consequences for the cut-over:
+
+- **Stop the old per-project servers first.** While a hosted project's old
+  server still listens on `STATE/agent.sock`, that socket is an
+  unauthenticated route to its store, whatever the tokens say. The cut-over
+  must stop and disable those servers before the token is relied on.
+- **A broken `server.json` blocks every `agent.py` command**, read-only ones
+  included, until it is fixed.
+
 ## Upgrading the pinned install
 
     git -C <kit-clone> fetch --tags origin

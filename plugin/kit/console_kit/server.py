@@ -1559,8 +1559,9 @@ def serve(cfg: Config, verify: Callable[[str | None], dict] | None = None) -> No
 
 
 def agent_request(sock_path: Path, method: str, path: str, body: object = None,
-                  agent: str | None = None) -> tuple[int, dict]:
-    """Call the agent door. Used by `agent.py` and the tests. `agent` (0.8.2) names the calling session."""
+                  agent: str | None = None, token: str | None = None) -> tuple[int, dict]:
+    """Call the agent door. Used by `agent.py` and the tests. `agent` (0.8.2) names the calling session;
+    `token` (K4) is the project's token for the one server's `/p/<project>/…` routes, sent as a bearer."""
     import http.client
 
     class _Conn(http.client.HTTPConnection):
@@ -1573,6 +1574,8 @@ def agent_request(sock_path: Path, method: str, path: str, body: object = None,
     headers = {} if data is None else {"Content-Type": "application/json"}
     if agent is not None:
         headers[N.HEADER] = agent
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
     conn.request(method, path, body=data, headers=headers)
     resp = conn.getresponse()
     out = json.loads(resp.read() or b"{}")

@@ -3194,6 +3194,8 @@ class _OneServer:
             R.register(root, state, HERE / "plugin" / "kit", path=self.reg)
             SF.add(name, state, f"{name}.example.com", AUD, 4901 + i, TEAM, registry=self.reg, path=self.sfile)
             self.p[name] = {"root": root, "state": state, "marker": marker}
+        # Each project's token as `server add` minted it (K4): `agent()` sends the path's project's own token.
+        self.tokens = {n: SF.read_token(n, self.sfile) for n in self.p}
         self.proc = None
         self.logs: list[str] = []
 
@@ -3231,7 +3233,9 @@ class _OneServer:
         self.proc = None
 
     def agent(self, method, path, body=None):
-        return SV.agent_request(self.sock, method, path, body)
+        """The agent door with the token of the project the path names (K4); `/health` and the rest go bare."""
+        m = MS.PROJECT_PATH.match(path)
+        return SV.agent_request(self.sock, method, path, body, token=self.tokens.get(m.group(1)) if m else None)
 
     def owner(self, name, method, path, body=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.info["ports"][name], timeout=30)
@@ -3314,9 +3318,9 @@ class OneServerTests(_OneServer, unittest.TestCase):
         self.assertIn("console_adapter.py", seen, r.stderr)
         self.assertIn("subprocess.Popen", seen)
 
-    AGENT_GETS = ("/view", "/check", "/health", "/no-such-route")
+    AGENT_GETS = ("/view", "/check", "/health", "/history-wants", "/no-such-route")
     AGENT_POSTS = ("/items", "/cursor", "/working", "/reanchor", "/visual", "/visual-export", "/question",
-                   "/message", "/transcript", "/no-such-route")
+                   "/message", "/transcript", "/history-blob", "/history-specs", "/no-such-route")
 
     def test_the_seam_is_the_only_admission_point(self):
         # K4 replaces `authorize` alone, so this is behaviour, not source text: with `authorize` refusing, EVERY
@@ -3324,7 +3328,7 @@ class OneServerTests(_OneServer, unittest.TestCase):
         # Catches: any route (or a fault check) reached before the seam, and an unknown project told apart.
         self.assertEqual(set(self.AGENT_POSTS) >= set(SV.AGENT_ROUTES), True)   # the list keeps up with the table
         (self.p["beta"]["state"] / "store.jsonl").write_text('{"not": "a record"}\n')   # beta is a refused project
-        self.spawn(ONE_SERVER.replace("r = MS.start(", "MS.authorize = lambda project, headers: False\nr = MS.start("))
+        self.spawn(ONE_SERVER.replace("r = MS.start(", "MS.authorize = lambda ms, project, headers: False\nr = MS.start("))
         for name in ("alpha", "beta", "nobody"):
             for path in self.AGENT_GETS:
                 self.assertEqual(self.agent("GET", f"/p/{name}{path}"), (403, {"error": "forbidden"}), (name, path))
@@ -3406,7 +3410,7 @@ class OneServerTests(_OneServer, unittest.TestCase):
         self.spawn()
         r = subprocess.run([sys.executable, agent_py, "--state", str(fixture), "items-push", "--adapter",
                             "console_adapter.py", "--project", str(self.p["alpha"]["root"])],
-                           capture_output=True, text=True, env=env, timeout=60)
+                           capture_output=True, text=True, env=env, timeout=60, cwd=self.p["alpha"]["root"])
         self.assertEqual(r.returncode, 0, r.stderr)
         for path in ("/view", "/check", "/health"):
             self.assertEqual(self.agent("GET", f"/p/alpha{path}")[0], 200, path)
@@ -3637,7 +3641,7 @@ class RootConfinementTests(_OneServer, unittest.TestCase):
         """Targets with a sentinel each, and the links in alpha's root that point at them."""
         A, B = self.p["alpha"], self.p["beta"]
         tokens = self.cfg / "console-kit" / "tokens"
-        tokens.mkdir(parents=True)
+        tokens.mkdir(parents=True, exist_ok=True)
         (tokens / "beta").write_text("SENTINEL-TOKEN-FILE-beta\n")
         (B["root"] / "secret.txt").write_text("SENTINEL-B-ROOT-FILE\n")
         (B["root"] / "pgb").mkdir()
@@ -4226,7 +4230,7 @@ class OneServerStewardGitTests(_OneServer, unittest.TestCase):
         env.pop("CONSOLE_KIT_AGENT", None)
         r = subprocess.run([sys.executable, str(HERE / "plugin" / "kit" / "agent.py"), "--state", str(alpha["state"]),
                             "history-push", "--project", str(alpha["root"])],
-                           capture_output=True, text=True, env=env, timeout=120)
+                           capture_output=True, text=True, env=env, timeout=120, cwd=alpha["root"])   # K4: cwd picks
         self.assertEqual(r.returncode, 0, r.stderr)
         _, after = self.agent("GET", "/p/alpha/check")
         [c] = after["stale"]["LANE.1/Q2"]["conditions"]
@@ -4242,7 +4246,7 @@ class OneServerStewardGitTests(_OneServer, unittest.TestCase):
         env.pop("CONSOLE_KIT_AGENT", None)
         r = subprocess.run([sys.executable, str(HERE / "plugin" / "kit" / "agent.py"), "--state", str(alpha["state"]),
                             "history-push", "--project", str(alpha["root"])],
-                           capture_output=True, text=True, env=env, timeout=120)
+                           capture_output=True, text=True, env=env, timeout=120, cwd=alpha["root"])   # K4: cwd picks
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_every_steward_git_file_operation_is_dir_relative_and_follows_no_link(self):
@@ -4296,6 +4300,730 @@ class OneServerStewardGitTests(_OneServer, unittest.TestCase):
                         f"os.rename({str(sg / 'index.json')!r}, {str(sg / 'index.json')!r}); "
                         f"os.listdir({str(sg / 'blobs')!r})"], check=True, timeout=60)
         self.assertEqual(len(dirfd_ops(ctl.read_text(), names)[1]), 4)   # each path-based call is caught
+
+
+# -- K4: project tokens and the agent door (spec §3.5, §3.8, §8.2) ---------------------------------------------
+
+# NEGATIVE CONTROL gates for AC4.1, spliced into ONE_SERVER before MS.start. Each must make the isolation check fail.
+ALWAYS_SERVES = "MS.authorize = lambda ms, project, headers: True\n"
+SERVES_BY_TOKENS_PROJECT = r"""
+import hashlib as _hl
+def _by_token(self):
+    m = MS.PROJECT_PATH.match(self.path)
+    auth = self.headers.get("Authorization") or ""
+    got = _hl.sha256(auth[len("Bearer "):].encode()).hexdigest() if auth.startswith("Bearer ") else None
+    for name, h in self.multi.projects.items():          # the TOKEN's project, whatever the path names
+        if m and got and self.multi.token_hash(name) == got and h.console is not None:
+            self.console, self.path = h.console, m.group(2)
+            return h
+    self._send(403, MS.FORBIDDEN)
+    return None
+MS.MultiAgentHandler._project = _by_token
+"""
+TOKEN_SHAPE = r"ck1_[A-Za-z0-9_-]{43}"
+
+
+class _RawAgent:
+    """Bytes off the agent socket, headers and all, so a test asserts on what the socket carried."""
+
+    def raw(self, method, path, body=None, headers=()):
+        """One request written in one send (so no refusal can race the body), the response read whole."""
+        import socket as so
+        data = b"" if body is None else json.dumps(body).encode()
+        lines = [f"{method} {path} HTTP/1.1", "Host: localhost", *(f"{k}: {v}" for k, v in headers)]
+        if body is not None:
+            lines += ["Content-Type: application/json", f"Content-Length: {len(data)}"]
+        sock = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+        sock.settimeout(30)
+        sock.connect(str(self.sock))
+        try:
+            sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode() + data)
+            r = http.client.HTTPResponse(sock)
+            r.begin()
+            out = (r.status, sorted((k, v) for k, v in r.getheaders() if k.lower() != "date"), r.read())
+        finally:
+            sock.close()
+        return out
+
+    @staticmethod
+    def bearer(tok):
+        return (("Authorization", f"Bearer {tok}"),)
+
+
+def state_files(d: Path) -> dict:
+    """Every file in a state dir, by sha256: the store, names, inbox, cursor, working, items and the rest."""
+    return {p.relative_to(d).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(d.rglob("*")) if p.is_file() and not p.is_symlink()}
+
+
+class ProjectTokenTests(_RawAgent, _OneServer, unittest.TestCase):
+    """K4: a token per project at the one server's agent door; the project chosen by where agent.py runs."""
+
+    def setUp(self):
+        super().setUp()
+        self.outputs: list[str] = []      # every byte agent.py printed, for AC4.2
+
+    def agent_py(self, cwd, *args, state=None, check=None):
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg), "PYTHONDONTWRITEBYTECODE": "1"}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        env.pop("CONSOLE_KIT_SESSION", None)
+        r = subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(state), *args],
+                           capture_output=True, text=True, env=env, timeout=120, cwd=cwd)
+        self.outputs += [r.stdout, r.stderr]
+        if check is not None:
+            self.assertEqual(r.returncode, check, (args, r.stdout, r.stderr))
+        return r
+
+    def seed_sentinels(self, tag=""):
+        for name, sentinel in (("alpha", "SENTINEL-K4-ALPHA"), ("beta", "SENTINEL-K4-BETA")):
+            self.assertEqual(self.push(name)[0], 200)
+            code, out = self.agent("POST", f"/p/{name}/message", {"item": "PUSHED", "text": sentinel,
+                                                                  "nonce": f"k4sent{name}{tag}01"})
+            self.assertEqual(code, 200, out)
+
+    # AC4.1 -------------------------------------------------------------------------------------------------
+
+    def isolation(self, tag):
+        """The AC4.1 check against whatever gate the running server has. Raises AssertionError on a leak."""
+        self.seed_sentinels(tag)
+        old_b = self.tokens["beta"]
+        self.SF.rotate("beta", self.sfile, self.reg)                       # a rotated B token
+        self.tokens["beta"] = self.SF.read_token("beta", self.sfile)
+        made_up = "ck1_" + "A" * 43
+        bad = {"A's token": self.bearer(self.tokens["alpha"]), "no token": (), "rotated B token": self.bearer(old_b),
+               "made-up token": self.bearer(made_up), "malformed": (("Authorization", "Bearer not-a-token"),),
+               "B's token sent twice": self.bearer(self.tokens["beta"]) * 2,
+               "B's token as Basic": (("Authorization", f"Basic {self.tokens['beta']}"),)}
+        routes = ([("GET", p) for p in OneServerTests.AGENT_GETS]
+                  + [("POST", p) for p in OneServerTests.AGENT_POSTS])
+        b_state = self.p["beta"]["state"]
+        before = state_files(b_state)
+        seen = []                                                         # (label, (status, headers, body))
+        # The first request of all is A's token on B's first route: the always-serving control fails right here.
+        for case, h in bad.items():
+            for method, path in routes:
+                seen.append((f"{case} {method} /p/beta{path}", self.raw(method, f"/p/beta{path}", {}
+                                                                         if method == "POST" else None, h)))
+        for case, h in {**bad, "B's token": self.bearer(self.tokens["beta"])}.items():   # a project not hosted
+            seen.append((f"{case} GET /p/gamma/view", self.raw("GET", "/p/gamma/view", None, h)))
+        for method, path in routes:                                       # B's own token on A's path
+            seen.append((f"B's token {method} /p/alpha{path}",
+                         self.raw(method, f"/p/alpha{path}", {} if method == "POST" else None,
+                                  self.bearer(self.tokens["beta"]))))
+        for label, (_st, _h, body) in seen:                               # no B record text, in any refusal
+            if b"SENTINEL-K4-BETA" in body:
+                raise AssertionError(f"sentinel leaked on {label}")
+        first = seen[0][1]
+        self.assertEqual(first[0], 403)
+        self.assertEqual(json.loads(first[2]), MS.FORBIDDEN)
+        for label, resp in seen:
+            self.assertEqual(resp, first, f"not the one refusal: {label}")  # status, headers and body bytes
+        self.assertEqual(state_files(b_state), before)                    # B's files untouched by any refusal
+        for method, path in routes:                                       # B's token serves every B route
+            code = self.raw(method, f"/p/beta{path}", {} if method == "POST" else None,
+                            self.bearer(self.tokens["beta"]))[0]
+            self.assertNotEqual(code, 403, path)
+        self.assertEqual(self.raw("GET", "/p/beta/view", None, self.bearer(self.tokens["beta"]))[0], 200)
+
+    def test_ac41_token_isolation_and_its_two_negative_controls(self):
+        # Catches: a gate that admits any well-formed token, and one that serves the TOKEN's project rather than
+        # the path's. Both ship here as stub gates, and the check must fail against each.
+        self.spawn()
+        self.isolation("r")
+        self.stop()
+        self.spawn(ONE_SERVER.replace("r = MS.start(", ALWAYS_SERVES + "r = MS.start("))
+        with self.assertRaises(AssertionError) as cm:
+            self.isolation("s")
+        self.assertIn("sentinel leaked on A's token GET /p/beta/view", str(cm.exception))   # its first A request
+        self.stop()
+        self.spawn(ONE_SERVER.replace("r = MS.start(", SERVES_BY_TOKENS_PROJECT + "r = MS.start("))
+        with self.assertRaises(AssertionError) as cm:
+            self.isolation("t")
+        self.assertIn("sentinel leaked on B's token", str(cm.exception))
+
+    def test_ac41_the_token_compare_is_hmac_compare_digest_on_the_paths_project(self):
+        # Pins the constant-time compare (a timing test is not practical): `==` in its place goes red here, and
+        # so does an `authorize` that admits anyone again. An unknown project still costs one compare.
+        import email.message
+        import hmac
+        from unittest import mock
+        from console_kit import serverfile as SF
+        tok, other = "ck1_" + "a" * 43, "ck1_" + "b" * 43
+
+        class FakeMS:
+            def token_hash(self, project):
+                return {"alpha": SF.token_hash(tok), "beta": SF.token_hash(other)}.get(project)
+
+        def headers(*values):
+            m = email.message.Message()
+            for v in values:
+                m["Authorization"] = v
+            return m
+        cases = [("alpha", (f"Bearer {tok}",), True), ("beta", (f"Bearer {tok}",), False),
+                 ("gamma", (f"Bearer {tok}",), False), ("alpha", (), False), ("alpha", ("Bearer nope",), False),
+                 ("alpha", (f"Bearer {tok}", f"Bearer {tok}"), False), ("alpha", (f"Basic {tok}",), False),
+                 ("alpha", (f"Bearer {tok} ",), False)]
+        for project, values, want in cases:
+            with mock.patch.object(MS.hmac, "compare_digest", wraps=hmac.compare_digest) as cd:
+                self.assertIs(MS.authorize(FakeMS(), project, headers(*values)), want, (project, values))
+            self.assertEqual(cd.call_count, 1, (project, values))
+            got, stored = cd.call_args.args
+            if want:
+                self.assertEqual(got, stored)
+                self.assertEqual(got, SF.token_hash(tok).encode())
+
+    # AC4.2 -------------------------------------------------------------------------------------------------
+
+    def test_ac42_a_token_is_never_in_a_repository_or_echoed(self):
+        # Catches: a check of server.json alone while an error message prints the token. Every byte the processes
+        # wrote is searched: both state dirs, server.json, the server's stderr and every agent.py output.
+        import shutil
+        A, B = self.p["alpha"], self.p["beta"]
+        tdir = self.cfg / "console-kit" / "tokens"
+        self.assertEqual(stat.S_IMODE(tdir.stat().st_mode), 0o700)
+        for name in ("alpha", "beta"):
+            self.assertEqual(stat.S_IMODE((tdir / name).lstat().st_mode), 0o600)
+        self.assertNotIn(self.tokens["alpha"], self.sfile.read_text())
+        self.assertEqual(json.loads(self.sfile.read_text())["projects"]["alpha"]["token_sha256"],
+                         self.SF.token_hash(self.tokens["alpha"]))
+        minted = set(self.tokens.values())
+        # A tokens directory that resolves inside a registered root is refused by `server add` and `rotate`.
+        cfg2 = self.t / "cfg2"
+        (cfg2 / "console-kit").mkdir(parents=True)
+        shutil.copy(self.reg, cfg2 / "console-kit" / "projects.json")
+        (A["root"] / "tok").mkdir()
+        (cfg2 / "console-kit" / "tokens").symlink_to(A["root"] / "tok")
+        env = {**os.environ, "XDG_CONFIG_HOME": str(cfg2)}
+        r = subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(A["state"]), "server", "add",
+                            "alpha", "--hostname", "alpha.example.com", "--aud", AUD, "--port", "4901",
+                            "--team-domain", TEAM], capture_output=True, text=True, env=env, timeout=60)
+        self.outputs += [r.stdout, r.stderr]
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("inside the registered project root", r.stderr)
+        self.assertFalse((cfg2 / "console-kit" / "server.json").exists())
+        shutil.copy(self.sfile, cfg2 / "console-kit" / "server.json")
+        held = (cfg2 / "console-kit" / "server.json").read_bytes()
+        r = subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(A["state"]), "server", "token",
+                            "rotate", "alpha"], capture_output=True, text=True, env=env, timeout=60)
+        self.outputs += [r.stdout, r.stderr]
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("inside the registered project root", r.stderr)
+        self.assertEqual(list((A["root"] / "tok").iterdir()), [])
+        self.assertEqual((cfg2 / "console-kit" / "server.json").read_bytes(), held)
+        # And a config dir that is itself a plain directory inside a registered root (no link to see through).
+        cfg3 = B["root"] / "cfg-in-repo"
+        (cfg3 / "console-kit").mkdir(parents=True)
+        shutil.copy(self.reg, cfg3 / "console-kit" / "projects.json")
+        r = subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(B["state"]), "server", "add",
+                            "beta", "--hostname", "beta.example.com", "--aud", AUD, "--port", "4902",
+                            "--team-domain", TEAM], capture_output=True, text=True,
+                           env={**os.environ, "XDG_CONFIG_HOME": str(cfg3)}, timeout=60)
+        self.outputs += [r.stdout, r.stderr]
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn(f"inside the registered project root {B['root']}", r.stderr)
+        self.assertFalse((cfg3 / "console-kit" / "tokens").exists())
+        self.assertFalse((cfg3 / "console-kit" / "server.json").exists())
+        # A full run: every agent route through agent.py, refusals and errors included, and a rotation.
+        self.spawn()
+        self.agent_py(A["root"], "items-push", "--adapter", "console_adapter.py", state=A["state"], check=0)
+        for args in (("view",), ("todo",), ("health",), ("check",), ("answers",), ("answers", "--json"),
+                     ("inbox", "--all"), ("reply", "PUSHED", "hello"), ("working", "PUSHED"), ("synced",),
+                     ("reanchor", "--dry-run"), ("reply", "NO-SUCH-ITEM", "refused"), ("fork-context", "nope")):
+            self.agent_py(A["root"], *args, state=A["state"])
+        self.agent_py(A["root"], "view", state=B["state"], check=1)        # the wrong console: refused
+        self.agent_py(self.t, "view", state=A["state"], check=1)           # outside every root: refused
+        made_up = "ck1_" + "Z" * 43
+        minted.add(made_up)
+        good = (tdir / "alpha").read_bytes()
+        (tdir / "alpha").write_text(made_up + "\n")                        # a token the server does not hold
+        self.agent_py(A["root"], "view", state=A["state"], check=1)
+        self.agent_py(A["root"], "reply", "PUSHED", "x", state=A["state"], check=1)
+        (tdir / "alpha").write_text("not a token at all\n")               # a broken file: named, never shown
+        r = self.agent_py(A["root"], "view", state=A["state"], check=1)
+        self.assertIn(str(tdir / "alpha"), r.stderr)
+        (tdir / "alpha").write_bytes(good)
+        self.agent_py(A["root"], "server", "token", "rotate", "alpha", state=A["state"], check=0)
+        minted.add(self.SF.read_token("alpha", self.sfile))
+        self.agent_py(A["root"], "view", state=A["state"], check=0)
+        self.stop()
+        written = list(self.outputs) + list(self.logs) + [self.sfile.read_text()]
+        for st in (A["state"], B["state"]):
+            written += [p.read_bytes().decode("utf-8", "replace") for p in st.rglob("*")
+                        if p.is_file() and not p.is_socket()]
+        blob = "\n".join(written)
+        for tok in minted:
+            self.assertNotIn(tok, blob)
+        self.assertIsNone(__import__("re").search(TOKEN_SHAPE, blob))     # no token of any kind, anywhere
+
+    # AC4.3 -------------------------------------------------------------------------------------------------
+
+    def test_ac43_rotation_refuses_the_old_token_at_once_with_no_restart(self):
+        # Catches: hashes cached at start-up (the old token works until a restart). One server process throughout.
+        B = self.p["beta"]
+        self.spawn()
+        pid = self.proc.pid
+        self.agent_py(B["root"], "view", state=B["state"], check=0)
+        old = self.tokens["beta"]
+        self.assertEqual(self.raw("GET", "/p/beta/view", None, self.bearer(old))[0], 200)
+        common = self.raw("GET", "/p/beta/view", None, self.bearer("ck1_" + "Q" * 43))
+        r = self.agent_py(self.t, "server", "token", "rotate", "beta", state=B["state"], check=0)
+        self.assertIn("tokens/beta", r.stdout)
+        new = self.SF.read_token("beta", self.sfile)
+        self.assertNotEqual(new, old)
+        self.assertEqual(self.raw("GET", "/p/beta/view", None, self.bearer(old)), common)   # the common 403
+        self.assertEqual(self.raw("GET", "/p/beta/view", None, self.bearer(new))[0], 200)
+        self.agent_py(B["root"], "view", state=B["state"], check=0)       # its next call, no restart anywhere
+        self.assertEqual((self.proc.pid, self.proc.poll()), (pid, None))
+
+    # AC4.4 -------------------------------------------------------------------------------------------------
+
+    def a_reads(self, fork):
+        """A's reads: the bytes off the socket for /view and /check, and agent.py's six read commands."""
+        A = self.p["alpha"]
+        h = self.bearer(self.tokens["alpha"])
+        out = {"socket /view": self.raw("GET", "/p/alpha/view", None, h)[2],
+               "socket /check": self.raw("GET", "/p/alpha/check", None, h)[2]}
+        for args in (("view", "--full"), ("answers", "--full"), ("answers", "--json", "--full"),
+                     ("inbox", "--all"), ("check",), ("fork-context", fork)):
+            r = self.agent_py(A["root"], *args, state=A["state"], check=0)
+            out[" ".join(args)] = r.stdout.encode()
+        return out
+
+    def test_ac44_each_read_is_the_bytes_a_one_project_server_gives(self):
+        # Catches: a server that sends both projects and lets agent.py filter (the socket carried B's records):
+        # the bytes compared are read off the socket, as well as agent.py's output.
+        import shutil
+        self.spawn()
+        self.seed_sentinels()
+        self.assertEqual(self.question("PUSHED", 1)[0], 200)
+        self.assertEqual(self.question("PUSHED", 1, "beta")[0], 200)
+        code, a = self.owner("alpha", "POST", "/api/answer", {"qid": "PUSHED/Q1", "picks": ["a"], "own_text": "",
+                                                              "nonce": "k4answer0001"})
+        self.assertEqual(code, 200, a)
+        code, lk = self.owner("alpha", "POST", "/api/lock", {"qid": "PUSHED/Q1", "answer": a["record"]["id"],
+                                                             "nonce": "k4lock000001"})
+        self.assertEqual(code, 200, lk)
+        code, fk = self.owner("alpha", "POST", "/api/message", {"item": "PUSHED", "text": "deliberate",
+                                                                "intent": "fork", "mode": "tighten",
+                                                                "nonce": "k4fork000001"})
+        self.assertEqual(code, 200, fk)
+        fork = fk["record"]["id"]
+        two = self.a_reads(fork)
+        for k, v in two.items():
+            self.assertNotIn(b"SENTINEL-K4-BETA", v, k)
+        self.assertIn(b"SENTINEL-K4-ALPHA", two["socket /view"])          # the reads are not empty
+        for n in range(100):                                              # B grows; A's reads do not move
+            code, out = self.agent("POST", "/p/beta/message", {"item": "PUSHED", "text": f"SENTINEL-K4-BETA {n}",
+                                                                "nonce": f"k4grow{n:06d}"})
+            self.assertEqual(code, 200, out)
+        self.assertEqual(self.a_reads(fork), two)
+        # A server that loaded the stores from disk orders a record's keys as stored, one that appended them in
+        # memory as sent: compare like with like, both freshly started on the same files.
+        self.stop()
+        self.spawn()
+        two = self.a_reads(fork)
+        self.assertNotIn(b"SENTINEL-K4-BETA", b"".join(two.values()))
+        self.stop()
+        # The one-project server, built on A's state alone: its own config dir holding A and nothing of B.
+        one = self.t / "cfg-one" / "console-kit"
+        (one / "tokens").mkdir(parents=True, mode=0o700)
+        os.chmod(one, 0o700)
+        shutil.copy(self.reg, one / "projects.json")
+        doc = json.loads(self.sfile.read_text())
+        doc["projects"] = {"alpha": doc["projects"]["alpha"]}
+        (one / "server.json").write_text(json.dumps(doc))
+        shutil.copy(self.cfg / "console-kit" / "tokens" / "alpha", one / "tokens" / "alpha")
+        os.chmod(one / "tokens" / "alpha", 0o600)
+        self.cfg, self.sfile, self.sock = one.parent, one / "server.json", one / "server.sock"
+        info = self.spawn()
+        self.assertEqual(list(info["ports"]), ["alpha"])
+        self.assertEqual(self.a_reads(fork), two)
+
+    # AC4.5 -------------------------------------------------------------------------------------------------
+
+    def test_ac45_the_working_directory_picks_the_project_and_a_mismatch_sends_nothing(self):
+        # Catches: honouring --state to choose the token (so `--state B` quietly becomes B's agent). No server
+        # runs: a listener on the one server's socket records every request that reaches it.
+        import socket as so
+        A, B = self.p["alpha"], self.p["beta"]
+        seen: list[bytes] = []
+        lsn = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+        lsn.bind(str(self.sock))
+        lsn.listen(16)
+        lsn.settimeout(0.2)
+        stop = threading.Event()
+
+        def serve():
+            while not stop.is_set():
+                try:
+                    c, _ = lsn.accept()
+                except OSError:
+                    continue
+                c.settimeout(5)
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = c.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                seen.append(data)
+                c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n"
+                          b"Connection: close\r\n\r\n{}")
+                c.close()
+        th = threading.Thread(target=serve, daemon=True)
+        th.start()
+        try:
+            for args in (("view",), ("health",), ("check",), ("reply", "PUSHED", "hi"), ("working", "PUSHED"),
+                         ("synced",), ("inbox", "--all"), ("watch", "--timeout", "0.2", "--poll", "0.1"),
+                         ("items-push", "--adapter", "console_adapter.py")):
+                r = self.agent_py(A["root"], *args, state=B["state"], check=1)   # in A's root, told B
+                self.assertIn(f"--state {B['state']}", r.stderr, args)
+                self.assertIn(str(A["state"]), r.stderr, args)
+                self.assertIn(str(A["root"]), r.stderr, args)
+                r = self.agent_py(self.t, *args, state=A["state"], check=1)      # outside every root
+                self.assertIn("inside no registered project root", r.stderr, args)
+            self.assertEqual(seen, [])                                    # not one request reached the socket
+            self.assertFalse((B["state"] / "watch.json").exists())         # and B's doorbell was never watched
+            # The control: from each project's own root, its own token on its own path.
+            for name in ("alpha", "beta"):
+                self.agent_py(self.p[name]["root"], "health", state=self.p[name]["state"], check=0)
+                head = seen[-1].decode()
+                self.assertTrue(head.startswith(f"GET /p/{name}/health "), head)
+                self.assertIn(f"Authorization: Bearer {self.tokens[name]}\r\n", head)
+        finally:
+            stop.set()
+            th.join()
+            lsn.close()
+
+    # AC4.6 -------------------------------------------------------------------------------------------------
+
+    def test_ac46_a_doorbell_on_b_wakes_only_bs_watch_and_a_cursor_moves_only_its_own(self):
+        # Catches: both stewards watching one shared inbox, each ignoring the other's lines once woken. Wake exits
+        # are counted per watcher.
+        A, B = self.p["alpha"], self.p["beta"]
+        self.spawn()
+        self.seed_sentinels()
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg)}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        watchers = {}
+        for name, timeout in (("alpha", "8"), ("beta", "60")):
+            v = self.p[name]
+            watchers[name] = subprocess.Popen([sys.executable, str(KIT / "agent.py"), "--state", str(v["state"]),
+                                               "watch", "--timeout", timeout, "--poll", "0.1"], cwd=v["root"],
+                                              env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.monotonic() + 30
+        while not all((v["state"] / "watch.json").exists() for v in (A, B)):   # both are polling
+            self.assertLess(time.monotonic(), deadline, "the watchers never started")
+            time.sleep(0.05)
+        code, out = self.owner("beta", "POST", "/api/message", {"item": "@chat", "text": "only for beta",
+                                                               "intent": "chat", "nonce": "k4chatbeta01"})
+        self.assertEqual(code, 200, out)
+        results = {n: p.communicate(timeout=90) + (p.returncode,) for n, p in watchers.items()}
+        wakes = {n: int(r[2] == 0) for n, r in results.items()}
+        self.assertEqual(wakes, {"alpha": 0, "beta": 1}, results)
+        self.assertEqual(results["alpha"][2], 3)                          # A timed out: nothing for it
+        self.assertIn('"intent": "chat"', results["beta"][0])
+        self.assertFalse((A["state"] / "inbox.jsonl").exists() and (A["state"] / "inbox.jsonl").read_text())
+        # POST /p/alpha/cursor moves A's cursor and working bucket, and nothing of B's.
+        self.agent_py(B["root"], "working", "PUSHED", state=B["state"], check=0)
+        self.agent_py(A["root"], "working", "PUSHED", state=A["state"], check=0)
+        b_before = {f: (B["state"] / f).read_bytes() if (B["state"] / f).exists() else None
+                    for f in ("cursor.json", "working.json", "inbox.jsonl")}
+        a_before = (A["state"] / "working.json").read_bytes()
+        self.agent_py(A["root"], "synced", state=A["state"], check=0)
+        self.assertIsNotNone(json.loads((A["state"] / "cursor.json").read_text())["last_synced_at"])
+        self.assertNotEqual((A["state"] / "working.json").read_bytes(), a_before)
+        self.assertEqual({f: (B["state"] / f).read_bytes() if (B["state"] / f).exists() else None
+                          for f in b_before}, b_before)
+
+
+
+class TokenReviewTests(_RawAgent, _OneServer, unittest.TestCase):
+    """K4 review round 1: the token file's mode, the drain's deadline, the writers' lock, stale temp files, and a
+    server.json too deeply nested to parse."""
+
+    @contextlib.contextmanager
+    def fake_door(self):
+        """A listener on the one server's socket that records every request reaching it, and answers 200 {}."""
+        import socket as so
+        seen: list[bytes] = []
+        lsn = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+        lsn.bind(str(self.sock))
+        lsn.listen(16)
+        lsn.settimeout(0.2)
+        stop = threading.Event()
+
+        def serve():
+            while not stop.is_set():
+                try:
+                    c, _ = lsn.accept()
+                except OSError:
+                    continue
+                c.settimeout(5)
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = c.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                seen.append(data)
+                c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n"
+                          b"Connection: close\r\n\r\n{}")
+                c.close()
+        th = threading.Thread(target=serve, daemon=True)
+        th.start()
+        try:
+            yield seen
+        finally:
+            stop.set()
+            th.join()
+            lsn.close()
+
+    def agent_py(self, cwd, *args, state):
+        env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg), "PYTHONDONTWRITEBYTECODE": "1"}
+        env.pop("CONSOLE_KIT_AGENT", None)
+        env.pop("CONSOLE_KIT_SESSION", None)
+        return subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(state), *args],
+                              capture_output=True, text=True, env=env, timeout=120, cwd=cwd)
+
+    def test_a_token_file_others_can_read_is_refused_and_nothing_is_sent(self):
+        # Catches: dropping the mode (or owner) check on the token file. A token another user could read is
+        # treated as no token: read_token and agent.py both refuse, naming the FILE, and no request is made.
+        from unittest import mock
+        A = self.p["alpha"]
+        f = self.cfg / "console-kit" / "tokens" / "alpha"
+        with self.fake_door() as seen:
+            r = self.agent_py(A["root"], "health", state=A["state"])
+            self.assertEqual(r.returncode, 0, r.stderr)                   # the control: 0600 is sent
+            self.assertEqual(len(seen), 1)
+            os.chmod(f, 0o644)
+            with self.assertRaises(self.SF.ServerFileError) as cm:
+                self.SF.read_token("alpha", self.sfile)
+            self.assertIn(str(f), str(cm.exception))
+            self.assertNotIn(self.tokens["alpha"], str(cm.exception))
+            for args in (("health",), ("view",), ("reply", "PUSHED", "hi")):
+                r = self.agent_py(A["root"], *args, state=A["state"])
+                self.assertEqual(r.returncode, 1, (args, r.stderr))
+                self.assertIn(str(f), r.stderr)
+                self.assertIn("mode 0600", r.stderr)
+                self.assertNotIn(self.tokens["alpha"], r.stdout + r.stderr)
+            self.assertEqual(len(seen), 1)                                # nothing more reached the socket
+        # Owned by another uid: chown needs root, so the owner half is checked by making this process another
+        # user as far as read_token can tell.
+        os.chmod(f, 0o600)
+        with mock.patch.object(self.SF.os, "getuid", return_value=os.getuid() + 1):
+            with self.assertRaises(self.SF.ServerFileError) as cm:
+                self.SF.read_token("alpha", self.sfile)
+        self.assertIn("you own", str(cm.exception))
+        self.assertEqual(self.SF.read_token("alpha", self.sfile), self.tokens["alpha"])
+
+    def test_the_one_servers_post_routes_are_the_base_handlers(self):
+        # Catches: a route the base handler serves missing from POST_ROUTES (the one server would 404 it), or a
+        # name there the base does not serve.
+        import ast
+        import inspect
+        import textwrap
+        tree = ast.parse(textwrap.dedent(inspect.getsource(SV.AgentHandler.do_POST)))
+        served = {n.comparators[0].value for n in ast.walk(tree)
+                  if isinstance(n, ast.Compare) and isinstance(n.left, ast.Attribute) and n.left.attr == "path"
+                  and isinstance(n.comparators[0], ast.Constant)}
+        self.assertEqual(MS.POST_ROUTES, served | set(SV.AGENT_ROUTES))
+        self.assertEqual(set(OneServerTests.AGENT_POSTS) - {"/items", "/no-such-route"}, MS.POST_ROUTES)
+
+    def test_a_refused_request_is_answered_at_once_and_its_body_drained_within_the_base_deadline(self):
+        # Catches: a refusal that waits on the body before answering, and a drain bounded only by the per-read
+        # timeout (a client trickling a byte at a time resets it). The base `_Handler.finish` answers FIRST and
+        # drains after, within server.DRAIN_SECONDS in all; this holds for the one server's /p/ 403, 503 and 404.
+        import socket as so
+        (self.p["beta"]["state"] / "store.jsonl").write_text('{"not": "a record"}\n')   # beta: a 503
+        self.spawn()
+        cases = (("403", "/p/alpha/question", ()), ("403 unknown", "/p/gamma/question", ()),
+                 ("503", "/p/beta/question", self.bearer(self.tokens["beta"])),
+                 ("404", "/p/alpha/no-such-route", self.bearer(self.tokens["alpha"])))
+        for label, path, headers in cases:
+            for mode in ("silent", "trickle"):
+                head = (f"POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+                        + "".join(f"{k}: {v}\r\n" for k, v in headers) + "Content-Length: 1000000\r\n\r\n").encode()
+                sock = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+                sock.settimeout(SV.DRAIN_SECONDS + 5)
+                sock.connect(str(self.sock))
+                stop = threading.Event()
+
+                def trickle():
+                    while not stop.wait(0.1):
+                        try:
+                            sock.sendall(b" ")
+                        except OSError:
+                            return
+                th = threading.Thread(target=trickle, daemon=True)
+                t0 = time.monotonic()
+                sock.sendall(head)
+                if mode == "trickle":
+                    th.start()
+                try:
+                    first = sock.recv(4096)
+                except so.timeout:
+                    first = b""
+                answered = time.monotonic() - t0
+                rest = b""
+                try:
+                    while True:                                           # then the close, after the drain
+                        chunk = sock.recv(4096)
+                        if not chunk:
+                            break
+                        rest += chunk
+                except (so.timeout, OSError):
+                    pass
+                closed = time.monotonic() - t0
+                stop.set()
+                if th.is_alive():
+                    th.join()
+                sock.close()
+                code = label.split()[0]
+                self.assertTrue(first.startswith(f"HTTP/1.0 {code}".encode()), (label, mode, first[:60]))
+                self.assertLess(answered, 1.0, (label, mode))           # well under the deadline: answered first
+                self.assertLess(closed, SV.DRAIN_SECONDS + 1.5, (label, mode))
+        self.assertEqual(self.agent("GET", "/p/alpha/view")[0], 200)     # and the server still serves
+
+    def test_a_two_write_client_reads_every_refusal_never_a_broken_pipe(self):
+        # Catches: a /p/ 403, 503 or 404 closed with the body unread, so a client that sends its body in a second
+        # write (http.client, i.e. agent.py) gets EPIPE in place of the answer. Made deterministic: the body is
+        # written only AFTER the answer has been read, which succeeds only while the server is still draining.
+        import socket as so
+        (self.p["beta"]["state"] / "store.jsonl").write_text('{"not": "a record"}\n')
+        self.spawn()
+        body = b'{"text": "late"}'
+        for code, path, headers in (("403", "/p/alpha/question", ()), ("403", "/p/gamma/question", ()),
+                                    ("503", "/p/beta/question", self.bearer(self.tokens["beta"])),
+                                    ("404", "/p/alpha/no-such-route", self.bearer(self.tokens["alpha"]))):
+            sock = so.socket(so.AF_UNIX, so.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect(str(self.sock))
+            sock.sendall((f"POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+                          + "".join(f"{k}: {v}\r\n" for k, v in headers)
+                          + f"Content-Length: {len(body)}\r\n\r\n").encode())
+            first = sock.recv(4096)
+            self.assertTrue(first.startswith(f"HTTP/1.0 {code}".encode()), (path, first[:60]))
+            time.sleep(0.2)                                               # the second write, well after the answer
+            try:
+                sock.sendall(body)
+            except OSError as e:
+                self.fail(f"{path}: the body's second write failed ({e!r}): the server closed without draining")
+            finally:
+                sock.close()
+        for _ in range(20):                                               # and the real two-write client
+            self.assertEqual(SV.agent_request(self.sock, "POST", "/p/alpha/question", {}), (403, MS.FORBIDDEN))
+
+    def test_the_sweep_never_runs_in_a_tokens_dir_linked_into_a_root(self):
+        # Catches: sweeping tokens/ before checking it, which deletes .token.*.tmp files in a repository that a
+        # symlinked tokens/ points into.
+        import shutil
+        A, SF = self.p["alpha"], self.SF
+        cfg2 = self.t / "cfg-link" / "console-kit"
+        cfg2.mkdir(parents=True)
+        shutil.copy(self.reg, cfg2 / "projects.json")
+        shutil.copy(self.sfile, cfg2 / "server.json")
+        (A["root"] / "tok").mkdir()
+        planted = A["root"] / "tok" / ".token.repo-file.tmp"
+        (cfg2 / "tokens").symlink_to(A["root"] / "tok")
+        for run in (lambda: SF.rotate("alpha", cfg2 / "server.json", self.reg),
+                    lambda: SF.add("alpha", A["state"], "alpha.example.com", AUD, 4901, TEAM, registry=self.reg,
+                                   path=cfg2 / "server.json")):
+            planted.write_text("a file of the repository's\n")
+            with self.assertRaises(SF.ServerFileError) as cm:
+                run()
+            self.assertIn("inside the registered project root", str(cm.exception))
+            self.assertEqual(planted.read_text(), "a file of the repository's\n")
+        # A link to a directory outside every root is refused too, and left unswept.
+        outside = self.t / "outside-tok"
+        outside.mkdir()
+        (outside / ".token.x.tmp").write_text("kept\n")
+        (cfg2 / "tokens").unlink()
+        (cfg2 / "tokens").symlink_to(outside)
+        with self.assertRaises(SF.ServerFileError) as cm:
+            SF.rotate("alpha", cfg2 / "server.json", self.reg)
+        self.assertIn("must be a directory you own", str(cm.exception))
+        self.assertTrue((outside / ".token.x.tmp").exists())
+
+    def test_two_interleaved_writers_cannot_resurrect_a_revoked_hash(self):
+        # Catches: load-modify-write with no lock. An add that loaded server.json before a rotation would write
+        # the revoked hash back; the add is held between its load and its write while the rotation runs.
+        from unittest import mock
+        A, SF = self.p["alpha"], self.SF
+        old_hash = json.loads(self.sfile.read_text())["projects"]["alpha"]["token_sha256"]
+        loaded, go = threading.Event(), threading.Event()
+        real_load = SF.load
+
+        def slow_load(path=None):
+            doc = real_load(path)
+            if threading.current_thread().name == "adder" and not loaded.is_set():
+                loaded.set()
+                go.wait(10)
+            return doc
+        errs = []
+
+        def run(fn):
+            try:
+                fn()
+            except Exception as e:   # noqa: BLE001 - reported below
+                errs.append(e)
+        with mock.patch.object(SF, "load", slow_load):
+            adder = threading.Thread(name="adder", target=run, args=(lambda: SF.add(
+                "alpha", A["state"], "alpha.example.com", AUD, 4901, TEAM, registry=self.reg, path=self.sfile),))
+            rotator = threading.Thread(name="rotator", target=run,
+                                       args=(lambda: SF.rotate("alpha", self.sfile, self.reg),))
+            adder.start()
+            self.assertTrue(loaded.wait(10))
+            rotator.start()
+            time.sleep(0.5)                                               # the rotation runs now, if it can
+            go.set()
+            adder.join(30)
+            rotator.join(30)
+        self.assertEqual(errs, [])
+        stored = json.loads(self.sfile.read_text())["projects"]["alpha"]["token_sha256"]
+        self.assertNotEqual(stored, old_hash)
+        self.assertEqual(stored, SF.token_hash(SF.read_token("alpha", self.sfile)))
+
+    def test_add_and_rotate_sweep_stale_plaintext_temp_files(self):
+        # Catches: a crash between mkstemp and rename leaving a plaintext token in tokens/.token.*.tmp for ever.
+        A, SF = self.p["alpha"], self.SF
+        tdir = self.cfg / "console-kit" / "tokens"
+        stale = "ck1_" + "S" * 43
+        for run in (lambda: SF.rotate("alpha", self.sfile, self.reg),
+                    lambda: SF.add("alpha", A["state"], "alpha.example.com", AUD, 4901, TEAM, registry=self.reg,
+                                   path=self.sfile)):
+            (tdir / ".token.dead1234.tmp").write_text(stale + "\n")
+            (tdir / "keep-me.txt").write_text("not a temp file\n")
+            run()
+            self.assertEqual(sorted(p.name for p in tdir.iterdir()), ["alpha", "beta", "keep-me.txt"])
+            self.assertNotIn(stale, "".join(p.read_text() for p in tdir.iterdir()))
+
+    def test_a_server_json_nested_too_deeply_refuses_every_token_and_says_so_once(self):
+        # Catches: RecursionError escaping the loader (it is not a ValueError), which would 500 every request or
+        # crash agent.py instead of refusing alike.
+        SF = self.SF
+        ms = MS.MultiServer(self.sfile)
+        try:
+            self.assertIsNotNone(ms.token_hash("alpha"))
+            self.sfile.write_text("[" * 200_000)
+            with self.assertRaises(SF.ServerFileError):
+                SF.load(self.sfile)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                got = [ms.token_hash(n) for n in ("alpha", "beta", "alpha")]
+            self.assertEqual(got, [None, None, None])
+            lines = err.getvalue().splitlines()
+            self.assertEqual(len(lines), 1, lines)
+            self.assertIn("every agent token is refused", lines[0])
+            self.assertNotRegex(lines[0], TOKEN_SHAPE)
+            for tok in self.tokens.values():
+                self.assertNotIn(tok, lines[0])
+        finally:
+            ms.close()
+        r = self.agent_py(self.p["alpha"]["root"], "view", state=self.p["alpha"]["state"])
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("nested too deeply", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
 
 
 if __name__ == "__main__":

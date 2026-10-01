@@ -63,7 +63,10 @@
                        [--root DIR] [--page PATH] [--slug SLUG ...]
                                                 host this console on the one console server (K3): writes
                                                 server.json beside your registry, never the registry (you
-                                                run this, never a session)
+                                                run this, never a session); it also writes the project's
+                                                agent token to tokens/NAME beside server.json (K4)
+    agent.py --state DIR server token rotate NAME
+                                                a new token for the project; the old one is refused at once
     agent.py --state DIR register --project DIR [--steward NAME]
                                                 switch the plugin on for a project (you run this, never a session)
     agent.py --state DIR steward [NAME | --clear]
@@ -88,6 +91,16 @@ agent's cursor moves only through `synced --through`, and never backwards, so
 a signal that arrives while the agent works is not marked processed.
 
 The server stamps every write from this door `by: agent`.
+
+**The one server and project tokens (K4).** When the console is hosted on the
+one console server (`server add`), agent.py takes its project from the
+directory it runs in: the registered root holding it names the console, and
+server.json names that console's project and its token file,
+tokens/NAME beside server.json. --state must name that same console, or
+nothing is sent; there is no --token and no --project flag. The token file is
+read on every call, so `server token rotate` needs no session restart, and the
+token is never printed. A console server.json does not host keeps its own
+STATE/agent.sock, as before.
 
 **Agent names (0.8.2).** When several sessions share one console, each may
 say who it is: `agent.py --as agent-6 ...` (before the subcommand), or
@@ -138,12 +151,90 @@ from console_kit import view as V  # noqa: E402
 from console_kit.server import agent_request  # noqa: E402
 
 
+class DoorRefused(Exception):
+    """agent.py will not send anything: the project it runs in and the one it was told do not agree (K4)."""
+
+
+class _Door:
+    """Where this call goes: a per-project server's STATE/agent.sock, or the one server's `/p/<project>`.
+
+    On the one server the token is read from its file on EVERY call (K4, AC4.3),
+    so a rotation needs no session restart; it is sent as a bearer header and
+    never printed, logged or put in a message.
+    """
+
+    def __init__(self, sock: Path, project: str | None = None) -> None:
+        self.sock, self.project = sock, project
+
+    def request(self, method: str, path: str, body=None, agent: str | None = None):
+        if self.project is None:
+            return agent_request(self.sock, method, path, body, agent=agent)
+        from console_kit import serverfile as SF
+        try:
+            tok = SF.read_token(self.project)
+        except SF.ServerFileError as e:
+            raise DoorRefused(f"refused, nothing sent: {e}") from None
+        return agent_request(self.sock, method, f"/p/{self.project}{path}", body, agent=agent, token=tok)
+
+
+_DOOR: _Door | None = None   # set by main() once the working directory has chosen the project
+
+
+def _door(state: Path) -> _Door:
+    return _DOOR if _DOOR is not None else _Door(Path(state) / "agent.sock")
+
+
+def _req(state: Path, method: str, path: str, body=None, agent: str | None = None):
+    return _door(state).request(method, path, body, agent=agent)
+
+
+def _where(state: Path) -> str:
+    d = _door(state)
+    return f"{d.sock} (project {d.project})" if d.project else str(d.sock)
+
+
+def resolve_door(state: Path) -> _Door:
+    """Pick the door from WHERE this process runs, never from what it was asked (K4, spec §3.5, AC4.5).
+
+    The registered root holding the working directory names a console (the
+    registry lookup the plugin already does); server.json maps that console to
+    a project, and the project to its token file. When either the working
+    directory's console or --state's is hosted on the one server: run outside
+    every registered root, or with --state naming another console, this
+    refuses, naming both, before anything is sent. There is no --token and no
+    --project flag. A console no server.json entry hosts keeps its own
+    per-project socket, STATE/agent.sock, exactly as before the one server.
+    """
+    from console_kit import serverfile as SF
+    from console_kit.multiserver import socket_path
+    s = os.path.realpath(state)
+    try:
+        hosted = {os.path.realpath(e["state"]): n for n, e in SF.load()["projects"].items()
+                  if isinstance(e, dict) and isinstance(e.get("state"), str)}
+    except SF.ServerFileError as e:
+        raise DoorRefused(f"refused, nothing sent: {e}") from None
+    cwd = Path.cwd()
+    here = R.enclosing(cwd)
+    here_state = os.path.realpath(here[1]["state"]) if here and isinstance(here[1].get("state"), str) else None
+    if s not in hosted and here_state not in hosted:
+        return _Door(Path(state) / "agent.sock")
+    if here is None:
+        raise DoorRefused(f"refused, nothing sent: {cwd} is inside no registered project root. agent.py takes its "
+                          f"project from the directory it runs in; run it from inside your project's checkout")
+    if here_state != s:
+        raise DoorRefused(f"refused, nothing sent: --state {s} is not this project's console. {cwd} is in "
+                          f"{here[0]}, registered on the console at {here_state}; agent.py takes its project from "
+                          f"the directory it runs in, so pass that console's --state or run it from the other "
+                          f"project's checkout")
+    return _Door(socket_path(SF.location()), hosted[s])
+
+
 def _get_view(state: Path):
     """The view and items from the agent door, or an exit code after saying why not."""
     try:
-        code, out = agent_request(state / "agent.sock", "GET", "/view", None)
+        code, out = _req(state, "GET", "/view", None)
     except OSError as e:
-        print(f"cannot reach the console server at {state / 'agent.sock'}: {e}", file=sys.stderr)
+        print(f"cannot reach the console server at {_where(state)}: {e}", file=sys.stderr)
         return None, 2
     if code != 200:
         sys.stdout.write(_json(out))
@@ -195,7 +286,7 @@ def _slim_view(state: Path, since: bool = False):
             V.check_since(out["view"])
     except V.ViewTooOld as e:
         try:
-            _code, health = agent_request(state / "agent.sock", "GET", "/health", None)
+            _code, health = _req(state, "GET", "/health", None)
             ver = health.get("version", "unknown") if isinstance(health, dict) else "unknown"
         except OSError:
             ver = "unknown"
@@ -273,9 +364,9 @@ def _fork_context(state: Path, fork: str) -> int:
 
 def _check(state: Path, as_json: bool) -> int:
     try:
-        code, out = agent_request(state / "agent.sock", "GET", "/check", None)
+        code, out = _req(state, "GET", "/check", None)
     except OSError as e:
-        print(f"cannot reach the console server at {state / 'agent.sock'}: {e}", file=sys.stderr)
+        print(f"cannot reach the console server at {_where(state)}: {e}", file=sys.stderr)
         return 2
     if code != 200 or as_json:
         sys.stdout.write(_json(out))
@@ -297,9 +388,9 @@ def _check(state: Path, as_json: bool) -> int:
 def _reanchor(state: Path, dry_run: bool, as_json: bool) -> int:
     """Ask the server to re-anchor; print what changed (or would), and what stays stale and why."""
     try:
-        code, out = agent_request(state / "agent.sock", "POST", "/reanchor", {"dry_run": dry_run})
+        code, out = _req(state, "POST", "/reanchor", {"dry_run": dry_run})
     except OSError as e:
-        print(f"cannot reach the console server at {state / 'agent.sock'}: {e}", file=sys.stderr)
+        print(f"cannot reach the console server at {_where(state)}: {e}", file=sys.stderr)
         return 2
     if code != 200 or as_json:
         sys.stdout.write(_json(out))
@@ -326,9 +417,9 @@ def _reanchor(state: Path, dry_run: bool, as_json: bool) -> int:
 
 def _call(state: Path, method: str, path: str, body=None, agent: str | None = None) -> int:
     try:
-        code, out = agent_request(state / "agent.sock", method, path, body, agent=agent)
+        code, out = _req(state, method, path, body, agent=agent)
     except OSError as e:
-        print(f"cannot reach the console server at {state / 'agent.sock'}: {e}", file=sys.stderr)
+        print(f"cannot reach the console server at {_where(state)}: {e}", file=sys.stderr)
         return 2
     sys.stdout.write(_json(out))
     return 0 if code == 200 else 1
@@ -398,9 +489,9 @@ def _visual_export(state: Path, project: Path, ids: list[str]) -> int:
               f"visuals_dir is a path from the repository's top", file=sys.stderr)
         return 1
     try:
-        code, out = agent_request(state / "agent.sock", "POST", "/visual-export", {"ids": ids})
+        code, out = _req(state, "POST", "/visual-export", {"ids": ids})
     except OSError as e:
-        print(f"cannot reach the console server at {state / 'agent.sock'}: {e}", file=sys.stderr)
+        print(f"cannot reach the console server at {_where(state)}: {e}", file=sys.stderr)
         return 2
     if code != 200:
         print(f"refused: {out.get('error', out)}", file=sys.stderr)
@@ -467,16 +558,15 @@ def _items_push(a) -> int:
     """`items-push` (K3): the adapter runs in THIS process; the one server receives its three results as data."""
     from console_kit import fold as FO
     from console_kit import serverfile as SF
-    from console_kit.multiserver import socket_path
     state = os.path.realpath(a.state)
+    door = _door(a.state)
     try:
         found = R.enclosing(a.project)
         if found is None or found[1].get("state") != state:
             raise FO.FoldError(f"{Path(a.project).resolve()} is not a project registered on the console at {state}")
         root = Path(found[0])
-        names = [n for n, e in SF.load()["projects"].items() if isinstance(e, dict) and e.get("state") == state]
-        if len(names) != 1:
-            raise FO.FoldError(f"server.json hosts {len(names)} projects on the console at {state}; "
+        if door.project is None:
+            raise FO.FoldError(f"server.json hosts no project on the console at {state}; "
                                f"run `agent.py --state {state} server add NAME …` first")
         adapter = FO.load_adapter(FO.inside(root, a.adapter, "--adapter"))
         board = getattr(adapter, "board", None)
@@ -485,11 +575,10 @@ def _items_push(a) -> int:
     except (FO.FoldError, SF.ServerFileError) as e:
         print(f"refused, nothing sent: {e}", file=sys.stderr)
         return 1
-    sock = socket_path(SF.location())
     try:
-        code, out = agent_request(sock, "POST", f"/p/{names[0]}/items", body, agent=a.agent)
+        code, out = door.request("POST", "/items", body, agent=a.agent)
     except OSError as e:
-        print(f"the console server is not answering on {sock}: {e}; nothing was sent", file=sys.stderr)
+        print(f"the console server is not answering on {door.sock}: {e}; nothing was sent", file=sys.stderr)
         return 2
     if code != 200:
         print(f"refused ({code}): {out.get('error')}", file=sys.stderr)
@@ -500,9 +589,7 @@ def _items_push(a) -> int:
 
 def _history_push(a) -> int:
     """`history-push` (Q23 part 2): git runs HERE; the server gets past versions and spec times as data."""
-    from console_kit import serverfile as SF
     from console_kit import stewardgit as SG
-    from console_kit.multiserver import socket_path
     state = os.path.realpath(a.state)
     found = R.enclosing(a.project)
     if found is None or found[1].get("state") != state:
@@ -510,35 +597,24 @@ def _history_push(a) -> int:
               f"{state}", file=sys.stderr)
         return 1
     root = Path(found[0])
-    # The server that holds this console: its own socket, else the one server (K3) that hosts it.
-    sock, prefix = Path(state) / "agent.sock", ""
-    if not sock.is_socket():
-        try:
-            names = [n for n, e in SF.load()["projects"].items() if isinstance(e, dict) and e.get("state") == state]
-        except SF.ServerFileError as e:
-            print(f"no console server answers for {state}: no {sock}, and {e}", file=sys.stderr)
-            return 2
-        if len(names) != 1:
-            print(f"no console server answers for {state}: no {sock}, and server.json hosts {len(names)} projects "
-                  f"there", file=sys.stderr)
-            return 2
-        sock, prefix = socket_path(SF.location()), f"/p/{names[0]}"
+    # The door the working directory chose (K4): this console's own socket, or the one server with its token.
+    door = _door(a.state)
     try:
-        code, want = agent_request(sock, "GET", f"{prefix}/history-wants", None, agent=a.agent)
+        code, want = door.request("GET", "/history-wants", None, agent=a.agent)
         if code != 200:
             print(f"refused ({code}): {want.get('error')}", file=sys.stderr)
             return 1
         blobs, specs = SG.collect(root, want)
         refused = []
         for b in blobs:
-            code, out = agent_request(sock, "POST", f"{prefix}/history-blob", b, agent=a.agent)
+            code, out = door.request("POST", "/history-blob", b, agent=a.agent)
             if code != 200:
                 refused.append(f"{b['sha256'][:12]}: {out.get('error')}")
-        code, out = agent_request(sock, "POST", f"{prefix}/history-specs", {"specs": specs}, agent=a.agent)
+        code, out = door.request("POST", "/history-specs", {"specs": specs}, agent=a.agent)
         if code != 200:
             refused.append(f"spec times: {out.get('error')}")
     except OSError as e:
-        print(f"the console server is not answering on {sock}: {e}", file=sys.stderr)
+        print(f"the console server is not answering on {door.sock}: {e}", file=sys.stderr)
         return 2
     asked = len(want.get("blobs") or [])
     sys.stdout.write(_json({"blobs": {"asked": asked, "sent": len(blobs) - len(refused), "not_in_history":
@@ -667,6 +743,11 @@ def main(argv=None) -> int:
     s.add_argument("--page", default="index.html", help="the host page, a path under the root")
     s.add_argument("--slug", action="append", dest="slugs", metavar="SLUG",
                    help="an extra transcript slug for the cost collector; repeat for more")
+    s = ss.add_parser("token", description="The project's agent token (K4): `rotate NAME` writes a new token "
+                      "file and hash; the old token is refused from the next request. The token itself is never "
+                      "printed.")
+    s.add_argument("token_cmd", choices=("rotate",))
+    s.add_argument("project_name", metavar="NAME")
     a = ap.parse_args(argv)
     # The agent name: --as, then this session's /console-kit:as (0.8.4), then CONSOLE_KIT_AGENT (0.8.2);
     # an empty variable counts as unset.
@@ -681,11 +762,24 @@ def main(argv=None) -> int:
             print(f"agent.py: steward: {N.problem(given)}; nothing was written", file=sys.stderr)
             return 2
     bell = a.state / "inbox.jsonl"
+    global _DOOR
     try:
+        # The user's own commands write the user's files; every other command reaches (or, for watch, inbox and
+        # synced, reads) ONE project's console, and that project is the one the working directory is in (K4).
+        if a.cmd not in USER_COMMANDS:
+            _DOOR = resolve_door(a.state)
         return _run(a, bell)
     except R.RegistryError as e:  # an unsafe or unreadable console file, named
         print(str(e), file=sys.stderr)
         return 1
+    except DoorRefused as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    finally:
+        _DOOR = None
+
+
+USER_COMMANDS = ("register", "steward", "server", "costs", "next-step")
 
 
 def steward_refusal(state: Path, agent: str | None, what: str) -> str | None:
@@ -730,6 +824,16 @@ def _run(a, bell: Path) -> int:
         return _items_push(a)
     if a.cmd == "history-push":
         return _history_push(a)
+    if a.cmd == "server" and a.server_cmd == "token":
+        from console_kit import serverfile as SF
+        try:
+            f = SF.rotate(a.project_name)
+        except SF.ServerFileError as err:
+            print(f"refused, nothing written: {err}", file=sys.stderr)
+            return 1
+        print(f"server: project {a.project_name} has a new token in {f} (mode 0600); the old one is refused from "
+              f"the next request, and agent.py reads the new one on its next call")
+        return 0
     if a.cmd == "server":
         from console_kit import serverfile as SF
         try:   # the name is the user's word on this command line, never a key of the repository's config
@@ -739,7 +843,8 @@ def _run(a, bell: Path) -> int:
             print(f"refused, nothing written: {err}", file=sys.stderr)
             return 1
         print(f"server: project {a.project_name} on port {e['port']} ({e['hostname']}), state {e['state']}, "
-              f"root {e['root']} in {SF.location()}")
+              f"root {e['root']} in {SF.location()}; its agents' token is in {SF.token_file(a.project_name)} "
+              f"(mode 0600)")
         return 0
     if a.cmd in ("watch", "synced"):
         why = steward_refusal(a.state, a.agent, f"`{a.cmd}`")

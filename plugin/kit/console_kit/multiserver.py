@@ -2,10 +2,14 @@
 
     python3 server.py --all          (reads server.json beside the user's registry)
 
-**K3 ALONE MUST NEVER BE DEPLOYED.** Its agent door admits any caller on its
-user-only socket (`authorize`, below), the trust today's per-project
-`agent.sock` already has; K4 replaces that one function with the project
-token check, and K7 is the cut-over, after K4.
+**The agent door admits by project token (K4, spec §3.5).** `authorize`,
+below, is the one admission point: a request on `/p/<project>/…` is served
+only when its `Authorization: Bearer ck1_…` hashes to the `token_sha256`
+server.json holds for THAT project, compared in constant time. The hashes are
+re-read whenever server.json changes on disk, so `token rotate` refuses the
+old token from the next request with no restart. Every refusal (no token, a
+malformed one, another project's, a rotated one, a project not hosted) is the
+one 403 with the one body, naming nothing.
 
 What this process holds, and the rules it keeps:
 
@@ -30,6 +34,8 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -63,6 +69,12 @@ MAX_ITEM_COUNT = 10_000
 MAX_PAGE = 4 << 20
 PROJECT_PATH = re.compile(r"^/p/([a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31})(/[^?#]*)\Z")
 FORBIDDEN = {"error": "forbidden"}   # one body for every refusal at the agent door: it names nothing (§3.5)
+# The agent POST routes the base handler serves; anything else is the 404 below. `_Handler.finish` drains the
+# unread body of that 404, and of every 403 and 503 here, within its own total deadline.
+POST_ROUTES = {"/cursor", "/working", "/reanchor", "/visual", "/visual-export", "/history-blob", "/history-specs",
+               *SV.AGENT_ROUTES}
+BEARER = re.compile(r"^Bearer (ck1_[A-Za-z0-9_-]{43})\Z")
+NO_HASH = "0" * 64   # compared against when a project has no hash, so an unknown project costs the same compare
 
 
 ITEM_FIELDS = {"title": (str,), "parent": (str, type(None)), "status": (str, type(None))}
@@ -318,6 +330,10 @@ class MultiServer:
 
     def __init__(self, path: Path | None = None) -> None:
         path = Path(path or SF.location())
+        self.path = path
+        self._hash_lock = threading.Lock()
+        self._hash_seen: tuple | None = None
+        self._hashes: dict[str, str] = {}
         doc = SF.load(path)
         self.team_domain = doc["team_domain"] or ""
         try:   # the registry beside server.json: the pair always travels together
@@ -327,6 +343,34 @@ class MultiServer:
         self.projects: dict[str, Hosted] = {}
         for name in sorted(doc["projects"]):
             self.projects[name] = open_project(name, doc["projects"][name], self.team_domain, registry)
+
+    def token_hash(self, project: str) -> str | None:
+        """The token hash server.json holds for `project` NOW: re-read whenever the file changes (K4, AC4.3).
+
+        The file's (inode, mtime, size) is checked on every call, so a rotation
+        (written by rename, hence a new inode) is seen by the very next request;
+        nothing is cached across a change. A file that cannot be read or parsed
+        holds no hash for anyone: every token is refused until it is fixed.
+        """
+        with self._hash_lock:
+            try:
+                st = os.stat(self.path)
+                key = (st.st_ino, st.st_mtime_ns, st.st_size, st.st_ctime_ns)
+            except OSError:
+                key = None
+            if key is None or key != self._hash_seen:
+                hashes: dict[str, str] = {}
+                if key is not None:
+                    try:
+                        for name, e in SF.load(self.path)["projects"].items():
+                            h = e.get(SF.TOKEN_KEY) if isinstance(e, dict) else None
+                            if isinstance(name, str) and isinstance(h, str) and SF.TOKEN_HASH.match(h):
+                                hashes[name] = h
+                    except (SF.ServerFileError, R.RegistryError, OSError, RecursionError) as err:
+                        sys.stderr.write(f"console-server: {self.path} cannot be read, so every agent token is "
+                                         f"refused until it is fixed: {err}\n")
+                self._hashes, self._hash_seen = hashes, key
+            return self._hashes.get(project)
 
     def served(self) -> list[str]:
         return [n for n, h in self.projects.items() if h.fault is None]
@@ -344,15 +388,23 @@ class MultiServer:
 
 # -- the doors ---------------------------------------------------------------------------------
 
-def authorize(project: str, headers) -> bool:
-    """THE ONE ADMISSION POINT of the agent door: may this request act on `project`?
+def authorize(ms: "MultiServer", project: str, headers) -> bool:
+    """THE ONE ADMISSION POINT of the agent door: may this request act on `project`? (K4, §3.5)
 
-    K3: yes for any caller on the user-only socket, which is the trust today's
-    per-project agent.sock has. K4 replaces this function, and only this
-    function, with the project token check (§3.5). Every /p/ route passes here
-    first; a test pins that refusing here refuses every route of every project.
+    Yes only when the request carries exactly one `Authorization: Bearer
+    ck1_…` whose SHA-256 equals the hash server.json holds for `project`, the
+    PATH's project: never the project the token belongs to. The comparison is
+    `hmac.compare_digest`, and a project with no hash (unknown, or not hosted)
+    is compared against a dummy, so the time taken says nothing about which.
+    Every /p/ route passes here first; a test pins that refusing here refuses
+    every route of every project.
     """
-    return True
+    values = headers.get_all("Authorization") or []
+    m = BEARER.match(values[0]) if len(values) == 1 and isinstance(values[0], str) else None
+    presented = hashlib.sha256((m.group(1) if m else "").encode("ascii")).hexdigest()
+    want = ms.token_hash(project)
+    same = hmac.compare_digest(presented.encode("ascii"), (want or NO_HASH).encode("ascii"))
+    return bool(m) and want is not None and same
 
 
 class MultiAgentHandler(SV.AgentHandler):
@@ -364,7 +416,7 @@ class MultiAgentHandler(SV.AgentHandler):
         m = PROJECT_PATH.match(self.path)
         name = m.group(1) if m else None
         h = self.multi.projects.get(name) if name else None
-        if name is None or not authorize(name, self.headers) or h is None:
+        if name is None or not authorize(self.multi, name, self.headers) or h is None:
             self._send(403, FORBIDDEN)   # an unknown project and a refused one look the same
             return None
         if h.fault is not None:
@@ -388,6 +440,8 @@ class MultiAgentHandler(SV.AgentHandler):
                 return self._send(200, self.console.push_items(self._body()))
             except SV.RequestError as e:
                 return self._send(e.code, {"error": str(e)})
+        if self.path not in POST_ROUTES:
+            return self._send(404, {"error": "not found"})
         super().do_POST()
 
 
@@ -539,8 +593,8 @@ def start(server_file: Path | None = None, sock: Path | None = None,
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="The one console server: every project in server.json (K3). "
-                                 "K3 alone must never be deployed; K4 adds the token check.")
+    ap = argparse.ArgumentParser(description="The one console server: every project in server.json, each "
+                                 "project's agents admitted by that project's own token (K3, K4).")
     ap.add_argument("--all", action="store_true", required=True, help="serve every project in server.json")
     ap.add_argument("--server-file", type=Path, help="default: server.json beside your registry")
     ap.add_argument("--socket", type=Path, help="the agent socket (default: server.sock beside server.json)")

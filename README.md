@@ -410,6 +410,31 @@ shows the spec's file time and says the last-commit time is unavailable.
 - **`onboard.py`** and **`deploy/`** onboard a project and install the
   services.
 
+### What a project token protects
+
+One console server can host several projects. Each project's agents reach it
+with that project's own token, kept in `~/.config/console-kit/tokens/NAME`
+(mode 0600, outside every repository; `server.json` holds only its hash).
+`agent.py` picks the project from the directory it runs in and reads that one
+token file, and `agent.py server token rotate NAME` (you run it) refuses the
+old token from the next request.
+
+- **What it stops:** cross-talk through the kit, and mistakes. A wrong
+  `--state`, a skill bug or an agent carrying another project's habits cannot
+  read or write another project's console through `agent.py` or the server.
+  It also holds against an agent whose file jail leaves out the tokens folder.
+- **What it does not stop:** an agent running as the same OS user that sets
+  out to cross over. Such an agent can read `tokens/` and every other
+  project's state directory directly, without the server. Real isolation
+  between agents needs a sandbox or a separate user that covers both the
+  tokens folder and the state directories.
+- **An old per-project server is a way around it.** While a hosted project's
+  old server still listens on `STATE/agent.sock`, that socket answers without
+  a token. Stop and disable those servers before relying on the token.
+- **A broken `server.json` stops every agent.** If it cannot be read,
+  every `agent.py` command refuses, read-only ones included, and the server
+  refuses every token until the file is fixed.
+
 ## Trust
 
 - The plugin's hook runs in every project you open. It acts only in projects
