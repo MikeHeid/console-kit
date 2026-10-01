@@ -281,8 +281,8 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
 
 - **`agent.py todo`.** Prints only what waits for the agent: forks, threads,
   chat, visuals, inbox and seq. It is computed from the view's own rules, so it
-  can never disagree with `view`. On a 116-question console it is under 200
-  bytes, where `view` is about 500 KB.
+  can never disagree with `view`. Measured once on a 116-question console:
+  `todo` printed 184 bytes where `view` would have printed 501,167.
 - **Narrower reads.** `view --item ID` prints one item and everything under it
   (`@chat` for the chat). `--since SEQ` on `view` and `answers` keeps only
   questions touched after that seq; a later lock or re-anchor counts as a
@@ -298,8 +298,8 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   Code's own transcripts, only this project's, and only the usage, message id
   and agent type, plus the first 64 characters of a subagent's description to
   find its `ck-fork:<id>` tag. Writes `costs.jsonl` beside the store, never
-  into it. Steward-only. Symlinks are refused, and lines and files are
-  size-capped.
+  into it. `collect` is steward-only; `show` only reads. Symlinks are
+  refused, and lines and files are size-capped.
 
 ## How it fits together
 
