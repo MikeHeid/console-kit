@@ -334,7 +334,7 @@ class Store:
                              f"Start a new deliberation instead")
 
     def _check_about(self, rec: dict) -> None:
-        """A fork about one question names a question in the fork's scope (0.4.0; an open one after 0.8.7).
+        """A fork about one question names a question in the fork's scope (0.4.0; an open one since 0.8.8).
 
         The page is untrusted, so each of these is checked here, not assumed
         from the button: the question exists, and it sits on the fork's item or

@@ -259,6 +259,24 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
 - **claude-hud's snapshot still works.** A file with `five_hour` / `seven_day`
   at the top level is read exactly as in 0.8.6, and only from there.
 
+### Deliberate before answering (0.8.8)
+
+- **A committee before you answer.** A question you have not locked yet has a
+  **⑂ Deliberate before answering** button: pick one to three seats, a mode and
+  an optional note, and the form shows the cost first (about 100k tokens a
+  seat). The round never answers or locks; it replies on the question with
+  `Result: ★ <option>` and its reasons, or, only when the seats show the
+  options themselves are wrong, posts a replacement question and replies
+  `Result: replaced by <qid>`. Roar, refine and drill still need a locked
+  answer.
+- **One rule for "done".** A deliberation is finished when a `Result:` reply to
+  it exists, or, for every kind except a before-answering round, when its
+  questions exist, so rounds finished before 0.8.8 stay finished. A progress
+  note never closes a round, and a crash between a replacement question and
+  its result leaves the round waiting rather than lost.
+- **Your picks survive a refresh.** Seat ticks, the other seat and the mode are
+  kept across a re-render, in this form and in "Follow up on this answer".
+
 ## How it fits together
 
 ```
