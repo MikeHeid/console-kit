@@ -1122,6 +1122,51 @@ class AnswerFollowUpStoreTests(Tmp):
         with self.assertRaisesRegex(StoreError, "outside this fork's scope"):
             st.append(about(qid="LANE/Q1"))
 
+    def test_a_fork_is_done_only_when_its_final_result_is_back(self):
+        # Review round 1 of build_reply. Catches: any agent reply to the fork counting as done
+        # (a progress note would hide a deliberation still to run), a replacement question with
+        # no result reply yet counting as done, and a follow-up done on its reply alone.
+        st = self.store()
+        st.append(question())
+
+        def fk(fid):
+            return V.build(st, ITEMS, V.make_evaluator(self.dir, {}))["forks"][fid]
+
+        f = st.append(about(roles=("analyst",)))
+        self.assertEqual((fk(f["id"])["kind"], fk(f["id"])["done"]), ("open", False))
+        st.append(message(by="agent", text="Working on it: two seats running.", reply_to=f["id"]))
+        self.assertFalse(fk(f["id"])["done"])
+        st.append(question(qid="LANE.1/Q2", forked_from=f["id"], star_by="analyst"))  # a replacement, first
+        self.assertFalse(fk(f["id"])["done"])
+        st.append(message(by="agent", text="  Result: replaced by LANE.1/Q2\nbecause ...", reply_to=f["id"]))
+        self.assertTrue(fk(f["id"])["done"])
+        self.assertTrue(fk(f["id"])["result"]["text"].lstrip().startswith("Result: replaced by LANE.1/Q2"))
+        # A Result: line that does not START the reply is not a result.
+        g = st.append(about(roles=("ux",)))
+        st.append(message(by="agent", text="note\nResult: ★ a", reply_to=g["id"]))
+        self.assertFalse(fk(g["id"])["done"])
+        st.append(message(by="agent", text="Result: ★ a\nreasons", reply_to=g["id"]))
+        self.assertTrue(fk(g["id"])["done"])
+        # The kind is the fork's own, fixed when asked: locking later does not relabel it.
+        a = st.append(answer())
+        st.append(lock(a))
+        self.assertEqual(fk(f["id"])["kind"], "open")
+        # Any other fork: its questions AND the result reply, unless it was refused.
+        h = st.append(about(roles=("devops",)))
+        self.assertEqual(fk(h["id"])["kind"], "follow_up")
+        st.append(message(by="agent", text="Result: 1 questions (LANE.1/Q3)", reply_to=h["id"]))
+        self.assertFalse(fk(h["id"])["done"])
+        st.append(question(qid="LANE.1/Q3", forked_from=h["id"], star_by="devops"))
+        self.assertTrue(fk(h["id"])["done"])
+        i = st.append(fork())
+        self.assertEqual(fk(i["id"])["kind"], "item")
+        st.append(message(by="agent", text="Result: refused: bundle too large", reply_to=i["id"]))
+        self.assertTrue(fk(i["id"])["done"])
+        # An owner message starting "Result:" is not the agent's result.
+        j = st.append(fork())
+        st.append(message(text="Result: ★ a", reply_to=j["id"]))
+        self.assertFalse(fk(j["id"])["done"])
+
     def test_a_roar_refine_or_drill_still_needs_a_locked_answer(self):
         # Counter-check on the relaxation: only seats deliberate before an answer.
         st = self.store()

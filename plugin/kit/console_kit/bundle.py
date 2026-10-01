@@ -62,10 +62,11 @@ def about_qid(chain: list[dict]) -> str | None:
 
 
 OPEN_RESULT = ("The question is not locked, so the seats deliberate BEFORE the owner answers. The round "
-               "returns ONE reply on this question's item, replying to the fork: a ★ recommendation (one option "
-               "id) with its reasons and what the seats found. Only if the seats show the options themselves "
-               "are wrong does it also ask a replacement question (the next free qid, forked from this fork), "
-               "and the reply names it. The round never answers or locks: those are the owner's.")
+               "returns ONE reply on this question's item, replying to the fork and posted LAST, its first line "
+               "`Result: ★ <option id>`: a recommendation with its reasons and what the seats found. Only if the "
+               "seats show the options themselves are wrong does it first ask a replacement question (the next "
+               "free qid, forked from this fork), and the reply's first line is then `Result: replaced by <qid>`. "
+               "Progress notes never reply to the fork. The round never answers or locks: those are the owner's.")
 
 
 def _is_open(view: dict, qid: str, fork: dict) -> bool:
