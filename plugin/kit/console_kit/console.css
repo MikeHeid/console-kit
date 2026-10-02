@@ -1260,3 +1260,52 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 .ck-pr-checks[data-checks="none"] { color: var(--c-fg-muted); }
 .ck-pr-items { display: flex; flex-wrap: wrap; gap: 6px; }
 .ck-pr-row .ck-btn-quiet { margin-top: 6px; }
+
+/* --- Inbox UX (owner rulings CONSOLE-kit/Q33-Q37, motion from Q38) --- */
+/* Q33: the one-tap lock's countdown. Its text changes every second, so it is no live region; the page
+   announces the start, the Undo and the outcome once each. */
+.ck-lock-countdown {
+  display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 6px 10px; border: 1px solid var(--c-accent); border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--c-accent) 8%, transparent); font-size: 13px; color: var(--c-fg);
+}
+.ck-lock-left { font-variant-numeric: tabular-nums; font-weight: 600; }
+.ck-lock-error { margin: 8px 0 0; }
+/* Q37: a settled question is one line that opens on click. */
+.ck-question-rolled { margin-bottom: 8px; }
+.ck-q-line {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-height: 40px; box-sizing: border-box;
+  padding: 8px 12px; border: 0; background: var(--c-surface); color: var(--c-fg); font: inherit;
+  font-size: 13px; text-align: left; cursor: pointer;
+}
+.ck-question:not(.ck-question-rolled) > .ck-q-line { border-bottom: 1px solid var(--c-border-light); }
+.ck-q-line:hover { background: var(--c-surface-alt); }
+.ck-q-line:focus-visible { outline: 2px solid var(--c-accent); outline-offset: -2px; }
+.ck-q-line-caret { color: var(--c-fg-muted); width: 1em; flex-shrink: 0; }
+.ck-q-line-pick { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ck-q-line .ck-q-state { flex-shrink: 0; }
+/* Q36: the send bar. A row of the panel itself, under its header: it never scrolls away, and no host
+   header can cover it, because the panel (z-index 1000, docked 997) stacks above any host's (100). */
+.ck-send-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex-shrink: 0;
+  padding: 8px 16px; border-bottom: 1px solid var(--c-border);
+  background: color-mix(in srgb, var(--c-accent) 10%, var(--c-surface)); font-size: 13px; color: var(--c-fg);
+}
+.ck-send-bar-count { flex: 1; min-width: 0; font-weight: 600; }
+/* Q35: loose questions from one agent, offered as one round. */
+.ck-cluster {
+  padding: 10px 12px; margin-bottom: 8px; border: 1px solid var(--c-border);
+  border-left: 3px solid var(--c-accent); border-radius: var(--radius-sm); background: var(--c-surface);
+}
+.ck-cluster-head { font-size: 13px; color: var(--c-fg); margin-bottom: 8px; }
+.ck-cluster-rows { margin-top: 8px; }
+/* Q38 (console half): short motion for the bar appearing, a round moving on and a question rolling up,
+   only for a viewer who has not asked for less. */
+@media (prefers-reduced-motion: no-preference) {
+  .ck-send-bar-in { animation: ck-slide-down .18s ease-out; }
+  .ck-advance-in { animation: ck-slide-left .2s ease-out; }
+  .ck-rolling { animation: ck-roll-up .22s ease-out; }
+  @keyframes ck-slide-down { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+  @keyframes ck-slide-left { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
+  @keyframes ck-roll-up { from { opacity: .4; transform: scaleY(1.6); transform-origin: top; } to { opacity: 1; transform: none; } }
+}
