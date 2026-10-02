@@ -552,10 +552,10 @@ skill inside the repository.
   a few minutes are shown as a group. Locking the group still goes through
   your own answer and lock, one question at a time, then sends one process
   request; if one is refused it stops and says "Locked k of n".
-- **A send bar that stays put.** Once answers are in, a "send to agent" bar
-  appears at the top of the inbox and stays visible under the page's own
-  sticky header. It comes from the data, so it returns when there is
-  something to send.
+- **A send bar you can always see.** Once answers are in, a "send to agent"
+  bar appears as a row under the item panel's header, and the panel sits
+  above the page's own sticky header, so nothing covers it. It comes from the
+  data, so it returns when there is something to send.
 - **Locked answers roll up** to one line (question, pick, state); open the
   line for the rest. A stale answer stays whole.
 - **Motion** (panels sliding, rows settling) runs only under
@@ -564,8 +564,10 @@ skill inside the repository.
 ## Smaller fixes (0.8.16)
 
 - A retry that reuses a nonce but names a different `replaces` (or none) is
-  refused by name (409), never taken as the earlier ask. An identical retry
-  still succeeds.
+  refused by name (409), instead of being taken as the earlier ask. An
+  identical retry still succeeds. One case cannot be checked: when the
+  earlier ask's link was never written, nothing kept the `replaces` it named,
+  so the retry's link is written as the recovery.
 - The slim read's pointer says what it left out and names the reads that
   print it: `view --item X` or `answers --item X --json`.
 - The unit template no longer passes `--page` or `--adapter`; the server read
