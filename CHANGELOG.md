@@ -487,3 +487,23 @@ skill inside the repository.
 - **Not in the Feed.** The Feed lists the console's own records, paged by
   their sequence number; a pull request has none, so the Feed's footer points
   to the PRs tab instead.
+
+## Footer version and the stale-board bar (unreleased)
+
+- **The footer names the kit version** (owner, 2026-10-01: "version number
+  should be in footer"). It reads "console-kit 0.8.13", say, taken from the
+  page's config, which the server fills from `console_kit.__version__`: the
+  same value `/health` reports, never typed into `console.js`. It shares the
+  usage footer's bar, so the page keeps one bottom bar that already makes
+  room for itself, and the bar now shows even when the usage footer is off or
+  has nothing to say. It is set as text, never markup.
+- **The stale-board bar no longer offers Reload** (owner, 2026-10-01: "the
+  'board has changed since page loaded' message is not going away"). The page
+  is a published snapshot, so a reload served the same page and the bar came
+  straight back. It now says the dashboard has changed since the page was
+  published, so its live numbers are paused, and names what fixes it: when a
+  page is staged and waiting, the proposal's "Use this page", with a button
+  that takes you to it; otherwise the steward staging a new page
+  (`agent.py page-snapshot`). It stays a status message fixed at the bottom
+  and cannot be dismissed, because polling has stopped and it is the only
+  sign the numbers on the page are frozen.

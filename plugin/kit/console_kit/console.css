@@ -627,7 +627,7 @@
    Open, the column takes HALF the screen (owner, 2026-09-29: "on big monitors
    can you make it 50% of the screen until closed"). It docks only at 1024px
    and wider, so that is never under 512px. --ck-col is the one width: the
-   column, the page's margin and the Reload bar's inset all read it, so they
+   column, the page's margin and the stale bar's inset all read it, so they
    cannot disagree. */
 .ck-dock-strip { display: none; }
 @media (min-width: 1024px) {
@@ -809,8 +809,11 @@
 .ck-sheet-answers li { margin: 6px 0; }
 .ck-sheet-foot { margin-top: 16px; padding-top: 10px; border-top: 1px solid var(--c-border-light); }
 
-/* AB-2/Q4: the board changed shape under an open tab; offer a reload rather
-   than patch a tree that no longer matches. Polling has stopped by now, so
+/* AB-2/Q4: the board changed shape under an open tab; say so, and what fixes
+   it (a staged page's "Use this page", or the steward staging one), rather
+   than patch a tree that no longer matches. A reload is never offered: the
+   page is a published snapshot, so it would serve the same page (2026-10-01).
+   Polling has stopped by now, so
    this bar is the only sign the page is stale and must be visible at every
    scroll position. The kit cannot know what a host page makes sticky (the
    lane board's header is sticky at top: 0, z-index 100), so the bar is
@@ -825,7 +828,7 @@
   background: var(--c-accent); color: var(--c-accent-fg);
   font: 14px/1.4 system-ui, sans-serif;
 }
-.ck-board-reload {
+.ck-board-show-proposal {
   font: inherit; padding: 4px 12px; border-radius: 6px; cursor: pointer;
   border: 1px solid currentColor; background: transparent; color: inherit;
 }

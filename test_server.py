@@ -536,6 +536,21 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertIn('id="console-kit-config"', page)
 
+    def test_the_page_config_carries_the_running_kit_version(self):
+        # Owner, 2026-10-01: "version number should be in footer". Catches: a footer version typed into
+        # console.js (it would drift from the release), or one the page has no way to learn.
+        import re
+        from console_kit import __version__
+        code, page = self.req("GET", "/", tok=token())
+        self.assertEqual(code, 200)
+        m = re.search(r'<script type="application/json" id="console-kit-config">(.*?)</script>', page, re.S)
+        self.assertIsNotNone(m, "no config block in the served page")
+        self.assertEqual(json.loads(m.group(1)).get("version"), __version__)
+        health = SV.agent_request(self.cfg.socket, "GET", "/health")[1]
+        self.assertEqual(health.get("version"), __version__)   # the same value /health reports
+        js = (KIT / "console_kit" / "console.js").read_text(encoding="utf-8")
+        self.assertNotIn(__version__, js)   # never hardcoded in the page's script
+
     def test_every_other_method_meets_the_gate(self):
         # Catches: only GET and POST gated, so PUT/OPTIONS/... reach a default handler unchecked
         # (Sourcery on #165).

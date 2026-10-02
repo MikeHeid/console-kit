@@ -643,7 +643,7 @@ class LiveBoardTests(unittest.TestCase):
                 self.assertEqual(page.evaluate("window.__boardChanged"), 0)
                 self.assertEqual(page.evaluate(SIGNATURE), before)
 
-    def test_a_different_shape_offers_a_reload_and_stops(self):
+    def test_a_different_shape_says_what_fixes_it_and_stops(self):
         for kind in BROWSERS:
             with self.subTest(browser=kind):
                 _Handler.board_hits = 0
@@ -651,26 +651,28 @@ class LiveBoardTests(unittest.TestCase):
                 page = self._board_page(kind, "/board-a", other)
                 page.wait_for_selector(".ck-board-stale", timeout=5000)
                 self.assertEqual(page.evaluate("window.__boardChanged"), 0)  # nothing patched
-                self.assertIn("Reload", page.inner_text(".ck-board-stale"))
+                # A published snapshot reloads as itself, so no Reload; nothing staged here, so the steward.
+                self.assertNotIn("Reload", page.inner_text(".ck-board-stale"))
+                self.assertIn("agent.py page-snapshot", page.inner_text(".ck-board-stale"))
                 hits = _Handler.board_hits
                 page.evaluate("window.ConsoleKit.refreshBoard()")
                 page.wait_for_timeout(300)
                 self.assertEqual(_Handler.board_hits, hits)  # polling stopped
 
-    # Catches: a Reload bar that exists but cannot be seen. Polling stops when it
+    # Catches: a stale bar that exists but cannot be seen. Polling stops when it
     # appears, so a covered bar is a stale board with no sign of it. The real
     # lane board has a sticky header at top: 0, z-index 100, which covered a
     # sticky bar once the page scrolled (PR #177 review). Checked scrolled, at
     # the overlay width and at both docked states, by what the browser would
-    # actually hit at the button's centre.
-    HIT = """() => { const b = document.querySelector('.ck-board-reload'), r = b.getBoundingClientRect();
+    # actually hit at the bar's message (it carries no button with nothing staged).
+    HIT = """() => { const b = document.querySelector('.ck-board-stale span'), r = b.getBoundingClientRect();
       const x = r.left + r.width / 2, y = r.top + r.height / 2;
       const bar = document.querySelector('.ck-board-stale'), s = bar.getBoundingClientRect(), my = s.top + s.height / 2;
       const ends = [s.left + 4, s.right - 4].map(px => bar.contains(document.elementFromPoint(px, my)));
       return { inView: r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth,
                hit: b.contains(document.elementFromPoint(x, y)), barEnds: ends, scrolled: scrollY }; }"""
 
-    def test_the_reload_offer_is_visible_on_a_scrolled_board(self):
+    def test_the_stale_bar_is_visible_on_a_scrolled_board(self):
         other = {"shape": "0" * 16, "values": dict(BOARD_B["values"])}
         for kind in BROWSERS:
             for width, dock_open in ((800, False), (1400, False), (1400, True)):
@@ -1817,7 +1819,9 @@ class LiveConsoleTests(unittest.TestCase):
                 url = self.serve()
                 page = self.page(kind, 1280, url)
                 page.evaluate("window.ConsoleKit.refreshUsage()")
-                self.assertEqual(page.locator(".ck-footer").count(), 0)  # off unless configured
+                from console_kit import __version__
+                # No usage file: the footer carries the kit version alone, never usage it was not given.
+                self.assertEqual(page.locator(".ck-footer").text_content(), f"console-kit {__version__}")
                 d = self.cfg.root
                 write_usage(d)
                 (d / "acct.json").write_text(json.dumps(
@@ -1828,7 +1832,8 @@ class LiveConsoleTests(unittest.TestCase):
                 page.evaluate("window.ConsoleKit.refreshUsage()")
                 page.wait_for_selector(".ck-footer")
                 text = page.locator(".ck-footer").text_content()
-                for want in ("5-hour 42% (resets", "7-day 18%", "as of just now", "owner@example.com"):
+                for want in ("5-hour 42% (resets", "7-day 18%", "as of just now", "owner@example.com",
+                             f"console-kit {__version__}"):
                     self.assertIn(want, text)
                 self.assertNotIn("planted", text)
                 self.assertEqual(page.locator(".ck-footer").get_attribute("data-stale"), "false")
@@ -1846,6 +1851,72 @@ class LiveConsoleTests(unittest.TestCase):
                                      " document.querySelector('.ck-footer').offsetHeight]")
                 self.assertAlmostEqual(room[0], room[1], delta=1)
                 self.assert_not_reloaded(page)
+
+    def test_the_footer_names_the_running_kit_version_with_no_usage_at_all(self):
+        # Owner, 2026-10-01: "version number should be in footer". Catches: a version shown only when the
+        # usage footer is on; one typed into console.js rather than read from the server; and one put in
+        # as markup.
+        from console_kit import __version__
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                page = self.page(kind, 1280, url)
+                page.wait_for_selector(".ck-footer")
+                self.assertEqual(page.locator(".ck-footer").text_content(), f"console-kit {__version__}")
+                self.assertEqual(page.locator(".ck-footer").evaluate("e => e.children.length"), 0)  # text only
+                room = page.evaluate("[parseFloat(getComputedStyle(document.body).paddingBottom),"
+                                     " document.querySelector('.ck-footer').offsetHeight]")
+                self.assertAlmostEqual(room[0], room[1], delta=1)   # it covers no line of the page
+                self.assert_not_reloaded(page)
+
+    # -- the board-stale bar (owner, 2026-10-01: "the 'board has changed since page loaded' message is not
+    # going away"). The served page is a PUBLISHED SNAPSHOT (Q28/Q29), so reloading serves the same page with
+    # the same shape and the bar comes straight back: it may never offer an action that cannot fix it.
+
+    STALE_HOST = LIVE_HOST.replace("<input id=\"board-input\"",
+                                   '<p data-live-shape="page-shape">Open: <span data-live="open">3</span></p>\n'
+                                   '<input id="board-input"')
+    MISMATCH = {"items": dict(LIVE_ITEMS), "seed_questions": [],
+                "board": {"shape": "board-shape", "values": {"open": "4"}}}
+
+    def _stale_page(self, kind, staged):
+        url = self.serve(snapshot=True, page=self.STALE_HOST)
+        if staged:   # the steward staged a newer page; the owner has not pressed "Use this page" yet
+            from test_server import page_body
+            self.console.push_page_snapshot(page_body(self.STALE_HOST.replace("page-shape", "board-shape"),
+                                                      commit="beef" + "0" * 36))
+        code, out = self.SV.agent_request(self.cfg.socket, "POST", "/items", self.MISMATCH)
+        self.assertEqual(code, 200, out)
+        page = self.page(kind, 1280, url)
+        page.wait_for_selector(".ck-board-stale", timeout=10000)
+        bar = page.locator(".ck-board-stale")
+        self.assertEqual(bar.get_attribute("role"), "status")
+        self.assertEqual(page.locator("[data-live='open']").text_content(), "3")   # nothing was patched
+        self.assertEqual(page.locator(".ck-board-reload").count(), 0)   # a reload serves the same snapshot
+        text = bar.text_content()
+        self.assertNotIn("Reload", text)
+        self.assertIn("since this page was published", text)
+        self.assertIn("live numbers are paused", text)
+        return page, bar, text
+
+    def test_a_stale_board_with_nothing_staged_names_page_snapshot_and_offers_no_reload(self):
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                page, bar, text = self._stale_page(kind, staged=False)
+                self.assertIn("agent.py page-snapshot", text)
+                self.assertNotIn("Use this page", text)
+                self.assertEqual(bar.locator("button").count(), 0)   # nothing here can fix it
+                self.assert_not_reloaded(page)
+
+    def test_a_stale_board_with_a_staged_page_points_at_use_this_page(self):
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                page, bar, text = self._stale_page(kind, staged=True)
+                self.assertIn('"Use this page"', text)
+                self.assertNotIn("page-snapshot", text)
+                bar.locator("button").click()
+                self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-page-use')"))
+                self.assert_not_reloaded(page)   # showing the proposal publishes nothing
 
 
 # -- 0.8.0: the Next step menu, tag chips, roar, and visuals, against the REAL server ------
