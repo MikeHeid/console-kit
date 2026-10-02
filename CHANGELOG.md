@@ -594,7 +594,8 @@ skill inside the repository.
   once the steward answered it after the scan, or you settled it (withdraw,
   keep, confirm, a replacement, a new answer or a re-lock). A done scan never
   reopens. A ruling whose cited text came back while the scan was open still
-  gets an answer: the steward may advise Keep on it, and only then.
+  gets an answer: the steward may advise on it (most often Keep), but only
+  while that scan is open and waiting on it.
 - **Where it is kept.** Scans and advice are two new record kinds in
   `refactor.jsonl`, beside the other stale-answer records; `store.jsonl` is
   untouched, so an older kit still starts on the same state. An older kit
