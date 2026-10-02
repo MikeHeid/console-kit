@@ -1188,3 +1188,26 @@ html.ck-footer-on .ck-board-stale { bottom: calc(var(--ck-footer-h, 28px) + 8px)
   background: #fffbea; color: #3a2f00; font: 14px/1.4 system-ui, sans-serif; }
 .ck-page-proposed iframe { width: 100%; height: 60vh; border: 1px solid #ccc; background: #fff; }
 .ck-page-use-error { color: #a40000; }
+
+/* --- Pull requests (the steward's prs-push): text only, links only to GitHub --- */
+.ck-prs-note { color: var(--c-fg-muted); padding: 12px 0; }
+.ck-prs-pushed { margin: 0 0 8px; font-size: 12px; overflow-wrap: anywhere; }
+.ck-prs-heading { font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
+.ck-pr-link { color: var(--c-fg); text-decoration: none; overflow-wrap: anywhere; }
+a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-decoration: underline; }
+.ck-pr-num { font-weight: 600; color: var(--c-fg-muted); }
+.ck-pr-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 3px; font-size: 12px; }
+.ck-pr-branch { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--c-fg-muted); overflow-wrap: anywhere; }
+.ck-pr-badge {
+  font-size: 11px; padding: 1px 7px; border-radius: 10px; white-space: nowrap;
+  background: var(--c-bg); color: var(--c-fg-muted);
+}
+.ck-pr-badge[data-kind="merged"] { background: var(--c-built-bg); color: var(--c-built); }
+.ck-pr-badge[data-kind="closed"] { background: var(--c-blocked-bg); color: var(--c-blocked); }
+.ck-pr-checks { white-space: nowrap; }
+.ck-pr-checks[data-checks="success"] { color: var(--c-built); }
+.ck-pr-checks[data-checks="failure"] { color: var(--c-blocked); font-weight: 600; }
+.ck-pr-checks[data-checks="pending"] { color: var(--c-claimed); }
+.ck-pr-checks[data-checks="none"] { color: var(--c-fg-muted); }
+.ck-pr-items { display: flex; flex-wrap: wrap; gap: 6px; }
+.ck-pr-row .ck-btn-quiet { margin-top: 6px; }

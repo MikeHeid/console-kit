@@ -17,6 +17,11 @@ never a silent blank.
 Agent-side callers (`agent.py`, run by an agent inside its own jail, and the
 module functions called from any process that is not the server) find the seam
 open and use git as before.
+
+`gh`, the GitHub CLI, goes through this door too (`gh`, below), for `agent.py
+prs-push`: gh runs git to find the repository's remote, so it obeys the same
+config, and the server never talks to GitHub anyway. Closed, it starts nothing
+and returns `NO_GIT`, exactly as `run` does.
 """
 
 from __future__ import annotations
@@ -75,3 +80,26 @@ def run(args: Sequence[str], cwd: Path | str, *, timeout: float, data: bytes | N
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None
+
+
+GH_SECONDS = 120
+
+
+def gh(args: Sequence[str], cwd: Path | str, *, timeout: float = GH_SECONDS) -> tuple[int, str, str] | Unavailable:
+    """`gh ARGS` in `cwd`, never prompting: (exit code, stdout, stderr); 127 when gh is not installed.
+
+    With the seam closed (in the server) it starts nothing and returns `NO_GIT`.
+    """
+    if not _OPEN:
+        return NO_GIT
+    quiet = {"GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1", "NO_COLOR": "1", "GH_PAGER": "", "PAGER": ""}
+    try:
+        r = subprocess.run(["gh", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False,
+                           env={**env(), **quiet})
+    except FileNotFoundError:
+        return 127, "", "gh (the GitHub CLI) is not installed or not on PATH"
+    except subprocess.TimeoutExpired:
+        return 124, "", f"gh did not finish within {timeout:g} s"
+    except (OSError, subprocess.SubprocessError) as e:
+        return 126, "", f"gh could not start: {e}"
+    return r.returncode, r.stdout, r.stderr

@@ -5094,5 +5094,129 @@ class MultiStoreTests(unittest.TestCase):
         self.assertEqual(bad.read_text(), '{"not": "a record"}\n')      # never repaired or rewritten
 
 
+class PrsFromGhTests(Tmp):
+    """`agent.py prs-push`'s parser: gh's JSON into the closed shape the server checks (no real gh is run)."""
+
+    @staticmethod
+    def gh_row(n, **over):
+        row = {"number": n, "title": f"PR {n}", "state": "OPEN", "isDraft": False, "headRefName": f"lane-{n}",
+               "baseRefName": "main", "author": {"id": "x", "is_bot": False, "login": "octo", "name": "O"},
+               "createdAt": "2026-09-30T10:00:00Z", "updatedAt": "2026-09-30T11:00:00Z", "mergedAt": None,
+               "closedAt": None, "url": f"https://github.com/octo/repo/pull/{n}", "mergeCommit": None,
+               "statusCheckRollup": []}
+        row.update(over)
+        return row
+
+    def build(self, open_rows, recent_rows, days=30):
+        from console_kit import prs as PR
+        return PR.from_gh({"nameWithOwner": "octo/repo"}, open_rows, recent_rows, days)
+
+    def test_a_fake_gh_output_becomes_the_closed_shape_open_first_then_newest_done(self):
+        # Catches: reading the wrong gh field, losing the draft flag, a merge commit on a PR that never merged,
+        # and an order that puts a merged PR above an open one.
+        from console_kit import prs as PR
+        body = self.build(
+            [self.gh_row(3), self.gh_row(5, isDraft=True, mergeCommit={"oid": "c" * 40},
+                                         statusCheckRollup=[{"__typename": "CheckRun", "status": "QUEUED",
+                                                             "conclusion": ""}])],
+            [self.gh_row(2, state="CLOSED", closedAt="2026-09-20T00:00:00Z", mergedAt="0001-01-01T00:00:00Z"),
+             self.gh_row(4, state="MERGED", mergedAt="2026-09-25T00:00:00Z", closedAt="2026-09-25T00:00:00Z",
+                         mergeCommit={"oid": "d" * 40}, author=None,
+                         statusCheckRollup=[{"__typename": "StatusContext", "state": "ERROR"}])])
+        self.assertIsNone(PR.snapshot_problem(body))
+        self.assertEqual((body["repo"], body["window_days"]), ("octo/repo", 30))
+        self.assertEqual([(p["number"], p["state"]) for p in body["prs"]],
+                         [(5, "open"), (3, "open"), (4, "merged"), (2, "closed")])
+        five, _, four, two = body["prs"]
+        self.assertEqual((five["draft"], five["checks"], five["merge_commit"]), (True, "pending", None))
+        self.assertEqual((four["author"], four["checks"], four["merge_commit"]), (None, "failure", "d" * 40))
+        self.assertEqual((two["merged_at"], two["closed_at"], two["checks"]), (None, "2026-09-20T00:00:00Z", "none"))
+        self.assertEqual(set(five), PR.PR_FIELDS)
+
+    def test_a_pr_in_both_lists_is_kept_once(self):
+        body = self.build([self.gh_row(7)], [self.gh_row(7, state="MERGED", mergedAt="2026-09-25T00:00:00Z",
+                                                         closedAt="2026-09-25T00:00:00Z")])
+        self.assertEqual([(p["number"], p["state"]) for p in body["prs"]], [(7, "open")])
+
+    def test_check_rollup(self):
+        from console_kit import prs as PR
+        run = lambda status, conclusion="": {"__typename": "CheckRun", "status": status, "conclusion": conclusion}
+        ctx = lambda state: {"__typename": "StatusContext", "state": state}
+        for checks, want in (([], "none"), (None, "none"), ([run("COMPLETED", "SUCCESS")], "success"),
+                             ([run("COMPLETED", "SKIPPED"), ctx("SUCCESS")], "success"),
+                             ([run("COMPLETED", "SUCCESS"), run("IN_PROGRESS")], "pending"),
+                             ([ctx("PENDING"), run("COMPLETED", "SUCCESS")], "pending"),
+                             ([run("IN_PROGRESS"), run("COMPLETED", "FAILURE")], "failure"),
+                             ([run("COMPLETED", "TIMED_OUT")], "failure"), ([ctx("ERROR")], "failure"),
+                             ([run("COMPLETED", "STALE")], "pending")):
+            with self.subTest(checks=checks):
+                self.assertEqual(PR.rollup(checks), want)
+
+    def test_malformed_gh_output_is_named_never_guessed(self):
+        # Catches: a gh too old to have a field read as "no checks" or "no author" instead of refused.
+        from console_kit import prs as PR
+        row = self.gh_row(1)
+        del row["statusCheckRollup"]
+        for open_rows, recent, repo, needle in (([row], [], {"nameWithOwner": "octo/repo"}, "statusCheckRollup"),
+                                                ({}, [], {"nameWithOwner": "octo/repo"}, "not a list"),
+                                                ([self.gh_row(1, createdAt="yesterday")], [],
+                                                 {"nameWithOwner": "octo/repo"}, "not a time"),
+                                                ([], [], {}, "nameWithOwner")):
+            with self.subTest(needle=needle):
+                with self.assertRaises(PR.PushError) as cm:
+                    PR.from_gh(repo, open_rows, recent, 30)
+                self.assertIn(needle, str(cm.exception))
+
+    def test_a_hostile_title_is_carried_as_text_and_only_a_github_link_passes(self):
+        # The parser does not sanitize text (the page renders it as text); it is the URL that is pinned.
+        from console_kit import prs as PR
+        hostile = '<img src=x onerror="alert(1)"></a><script>alert(2)</script>'
+        body = self.build([self.gh_row(1, title=hostile, headRefName="x\"><b>y")], [])
+        self.assertIsNone(PR.snapshot_problem(body))
+        self.assertEqual(body["prs"][0]["title"], hostile)
+        bad = self.build([self.gh_row(1, url="javascript:alert(1)")], [])
+        self.assertIn("url must be https://github.com/octo/repo/pull/1", PR.snapshot_problem(bad))
+
+    def test_an_over_cap_gh_output_is_refused_by_name_not_truncated(self):
+        from console_kit import prs as PR
+        body = self.build([self.gh_row(1, title="t" * (PR.MAX_TITLE + 1))], [])
+        self.assertEqual(body["prs"][0]["title"], "t" * (PR.MAX_TITLE + 1))
+        self.assertIn(f"title is over {PR.MAX_TITLE}", PR.snapshot_problem(body))
+
+    def test_the_gh_command_lines(self):
+        import datetime as dt
+        from console_kit import prs as PR
+        repo, opened, recent = PR.gh_lists(30, 50, today=dt.date(2026, 10, 1))
+        self.assertEqual(repo, ["repo", "view", "--json", "nameWithOwner"])
+        self.assertEqual(opened[:6], ["pr", "list", "--state", "open", "--limit", "50"])
+        self.assertEqual(recent[:6], ["pr", "list", "--state", "closed", "--search", "closed:>=2026-09-01"])
+        for argv in (opened, recent):
+            self.assertEqual(argv[argv.index("--json") + 1], PR.GH_FIELDS)
+
+    def test_store_and_load_round_trip(self):
+        from console_kit import prs as PR
+        state = self.dir / "state"
+        state.mkdir()
+        self.assertEqual(PR.load(state), {"pushed": False, "note": PR.NOT_PUSHED})
+        body = self.build([self.gh_row(1)], [])
+        PR.store_snapshot(state, body, "agent-5", at="2026-10-01T00:00:00Z")
+        got = PR.load(state)
+        self.assertEqual((got["pushed"], got["by"], got["pushed_at"], got["prs"]),
+                         (True, "agent-5", "2026-10-01T00:00:00Z", body["prs"]))
+
+    def test_the_gh_door_starts_nothing_once_closed(self):
+        # Catches: a gh call that goes around the seam, or a closed seam that still tries.
+        from unittest import mock
+        from console_kit import gitseam as G
+        was = G._OPEN
+        self.addCleanup(setattr, G, "_OPEN", was)
+        G.close()
+        with mock.patch("subprocess.run", side_effect=AssertionError("gh was started")):
+            self.assertIs(G.gh(["pr", "list"], self.dir), G.NO_GIT)
+        G._OPEN = True
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError()):
+            self.assertEqual(G.gh(["pr", "list"], self.dir)[0], 127)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
