@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import sys
 import threading
 from pathlib import Path
 
@@ -31,6 +33,10 @@ STATE_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC   # STATE itself is th
 # What the board says before the steward's first push: never fake items, never a silent blank (F63).
 NOT_PUSHED = ("No items yet: the server never runs the project's adapter, so items appear when the "
               "steward pushes them (agent.py items-push).")
+# ... and what it says when a stored items.json cannot be read (the single server tolerates it, below).
+UNREADABLE = ("The stored items cannot be read, so none are shown: the steward should push them again "
+              "(agent.py items-push).")
+SET_ASIDE = ".items.json.set-aside."   # a directory found where items.json goes is renamed to this + hex, never removed
 
 
 def snapshot_problem(doc: object) -> str | None:
@@ -78,6 +84,10 @@ def store_snapshot(state: Path, body: dict) -> None:
     """Write a CHECKED snapshot to STATE/items.json, whole or not at all.
 
     Raises ValueError, naming the cap, when it is over MAX_ITEMS; nothing is written then.
+
+    The rename replaces whatever is at items.json without following it (a bad file, a symlink, a FIFO), so a
+    push is the way back from an unreadable one. A directory cannot be renamed over, so it is first renamed
+    aside, unread and kept, to SET_ASIDE + hex.
     """
     items, seeds, board = body["items"], body.get("seed_questions") or [], body.get("board")
     data = json.dumps({"items": items, "seed_questions": seeds, "board": board}, sort_keys=True).encode()
@@ -85,6 +95,14 @@ def store_snapshot(state: Path, body: dict) -> None:
         raise ValueError(f"the pushed items are over {MAX_ITEMS} bytes")
     sfd = os.open(state, STATE_FLAGS)
     try:
+        try:
+            st = os.stat(ITEMS, dir_fd=sfd, follow_symlinks=False)
+        except FileNotFoundError:
+            st = None
+        if st is not None and stat.S_ISDIR(st.st_mode):
+            aside = SET_ASIDE + os.urandom(8).hex()
+            os.rename(ITEMS, aside, src_dir_fd=sfd, dst_dir_fd=sfd)
+            sys.stderr.write(f"console items: a directory at {Path(state, ITEMS)} was set aside as {aside}\n")
         AF.write_at(sfd, ITEMS, data)
     finally:
         os.close(sfd)
@@ -96,44 +114,67 @@ class SnapshotAdapter:
     Absent until the first `items-push`: no items, no seeds, no board, and
     `pushed()` False, so the board can say so. The file is re-read only when it
     changes, so a request costs a stat.
+
+    A stored file that fails its check raises StoreError, which the one server
+    turns into refusing that project. `tolerant=True` (the single server, which
+    has only this one project) instead serves no items, keeps the reason in
+    `problem` for the board's note and /health, logs it once to stderr, and
+    reads the file again on the next request, so a fresh push recovers live.
     """
 
-    def __init__(self, state: Path) -> None:
+    def __init__(self, state: Path, tolerant: bool = False) -> None:
         self.state = Path(state)
         self.path = self.state / ITEMS   # named in errors only: every read goes through a STATE descriptor
+        self.tolerant = tolerant
+        self.problem: str | None = None   # why the stored file cannot be served (tolerant only); never served itself
         self._lock = threading.Lock()
         self._seen: tuple[int, int] | None = None
         self._doc: dict = {"items": {}, "seed_questions": [], "board": None}
 
     def _load(self) -> dict:
         with self._lock:
-            sfd = os.open(self.state, STATE_FLAGS)
             try:
-                try:
-                    st = os.stat(ITEMS, dir_fd=sfd, follow_symlinks=False)
-                except FileNotFoundError:
-                    self._seen, self._doc = None, {"items": {}, "seed_questions": [], "board": None}
-                    return self._doc
-                key = (st.st_mtime_ns, st.st_size)
-                if key != self._seen:
-                    raw = AF.read_at(sfd, ITEMS, MAX_ITEMS)
-                    if raw is None:
-                        raise StoreError(f"{self.path} is not a plain file")
-                    if len(raw) > MAX_ITEMS:
-                        raise StoreError(f"{self.path} is over {MAX_ITEMS} bytes")
-                    try:
-                        doc = json.loads(raw.decode("utf-8"))
-                    except (ValueError, RecursionError) as e:   # UnicodeDecodeError, JSONDecodeError, deep nesting
-                        raise StoreError(f"{self.path} is not JSON: {e}") from None
-                    why = snapshot_problem(doc)
-                    if why:
-                        raise StoreError(f"{self.path}: {why}")
-                    self._doc = {"items": doc["items"], "seed_questions": doc.get("seed_questions") or [],
-                                 "board": doc.get("board")}
-                    self._seen = key
+                doc = self._read()
+            except StoreError as e:
+                if not self.tolerant:
+                    raise
+                if str(e) != self.problem:   # once per distinct problem, not once per request
+                    sys.stderr.write(f"console items: {e}; serving no items until the steward pushes again\n")
+                self.problem, self._seen = str(e), None
+                self._doc = {"items": {}, "seed_questions": [], "board": None}
                 return self._doc
-            finally:
-                os.close(sfd)
+            self.problem = None
+            return doc
+
+    def _read(self) -> dict:
+        """The stored snapshot, re-read only when its (mtime, size) changed; StoreError when it fails its check."""
+        sfd = os.open(self.state, STATE_FLAGS)
+        try:
+            try:
+                st = os.stat(ITEMS, dir_fd=sfd, follow_symlinks=False)
+            except FileNotFoundError:
+                self._seen, self._doc = None, {"items": {}, "seed_questions": [], "board": None}
+                return self._doc
+            key = (st.st_mtime_ns, st.st_size)
+            if key != self._seen:
+                raw = AF.read_at(sfd, ITEMS, MAX_ITEMS)
+                if raw is None:
+                    raise StoreError(f"{self.path} is not a plain file")
+                if len(raw) > MAX_ITEMS:
+                    raise StoreError(f"{self.path} is over {MAX_ITEMS} bytes")
+                try:
+                    doc = json.loads(raw.decode("utf-8"))
+                except (ValueError, RecursionError) as e:   # UnicodeDecodeError, JSONDecodeError, deep nesting
+                    raise StoreError(f"{self.path} is not JSON: {e}") from None
+                why = snapshot_problem(doc)
+                if why:
+                    raise StoreError(f"{self.path}: {why}")
+                self._doc = {"items": doc["items"], "seed_questions": doc.get("seed_questions") or [],
+                             "board": doc.get("board")}
+                self._seen = key
+            return self._doc
+        finally:
+            os.close(sfd)
 
     def pushed(self) -> bool:
         """True once a push has been kept, a restart included: the board's empty state reads this."""

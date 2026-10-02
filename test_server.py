@@ -3569,7 +3569,9 @@ class FaultIsolationTests(_OneServer, unittest.TestCase):
 
     def test_a_bad_stored_items_file_refuses_that_project_only(self):
         # Catches: open_project catching too few exception types ({"items": [1]} raised TypeError out of
-        # MultiServer()), and a snapshot read without the push's own check.
+        # MultiServer()), and a snapshot read without the push's own check. KEPT on purpose (lane 5 fix 3):
+        # the one server refuses just that project, the others serve; only the SINGLE server, which has no
+        # other project to keep serving, tolerates the file instead (SingleServerStartTests).
         for doc in ({"items": [1]}, {"items": {"X": {"title": 5, "parent": None}}},
                     {"items": {"X": {"title": "x", "parent": ["q"]}}}, "not an object", {"items": {}, "seed_questions": "q"},
                     {"items": {}, "seed_questions": [{"text": "no qid"}]}):
@@ -5338,7 +5340,7 @@ class _SingleServer:
         return self.scfg
 
     def start_single(self):
-        self.sconsole = SV.Console(self.scfg, IT.SnapshotAdapter(self.scfg.state))   # what `serve` builds
+        self.sconsole = SV.Console(self.scfg, IT.SnapshotAdapter(self.scfg.state, tolerant=True))   # as `serve` does
         self.sconsole.seed()
         self.ssrv = SV.agent_server(self.sconsole)
         threading.Thread(target=self.ssrv.serve_forever, daemon=True).start()
@@ -5354,6 +5356,99 @@ class _SingleServer:
         code, out = SV.agent_request(self.scfg.socket, "GET", "/view")
         self.assertEqual(code, 200, out)
         return out
+
+
+class SingleServerStartTests(unittest.TestCase):
+    """Lane 5 review (MEDIUM, live safety): a stored items.json the single server cannot read never stops it.
+
+    `serve` used to turn that StoreError into SystemExit, so one bad file planted in STATE kept the console
+    down. Now it starts, logs one stderr line, answers /health not-ok, shows the board's UNREADABLE note, and
+    the next items-push replaces the file and recovers live. The ONE server is unchanged and keeps refusing
+    only that project, the others fine: FaultIsolationTests.test_a_bad_stored_items_file_refuses_that_project_only.
+    """
+
+    def serve(self, plant):
+        """The real `serve`, in a thread, over a STATE where `plant(items_path, base)` put something unreadable."""
+        from unittest import mock
+        seam_closed(self)   # `serve` closes the git seam for the whole process: restored after the test
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = base = Path(os.path.realpath(tmp.name))
+        root, state = base / "root", base / "state"
+        root.mkdir()
+        state.mkdir(mode=0o700)
+        (root / "page.html").write_text(PAGE)
+        plant(state / IT.ITEMS, base)
+        cfg = SV.Config(root=root, page=root / "page.html", state=state, adapter=root / "adapter.py",
+                        team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="single")
+        owners, real = [], SV.owner_server
+
+        def capture(*a, **k):
+            owners.append(real(*a, **k))
+            return owners[-1]
+        self.err = io.StringIO()
+        for p in (mock.patch.object(SV, "owner_server", capture), mock.patch("sys.stderr", self.err)):
+            p.start()
+            self.addCleanup(p.stop)
+        t = threading.Thread(target=SV.serve, args=(cfg, lambda _tok: {"email": "owner@example.com"}), daemon=True)
+        t.start()
+        deadline = time.monotonic() + 15
+        while not (owners and cfg.socket.exists()) and t.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(owners and cfg.socket.exists(), f"the server did not start: {self.err.getvalue()[-600:]}")
+
+        def stop():
+            owners[0].shutdown()
+            t.join(10)
+            owners[0].server_close()
+        self.addCleanup(stop)
+        return cfg
+
+    def check_starts_unreadable_then_recovers(self, plant, problem):
+        cfg = self.serve(plant)
+        code, health = SV.agent_request(cfg.socket, "GET", "/health")
+        self.assertEqual((code, health["ok"], health["register"]), (503, False, "error"))
+        self.assertNotIn(str(self.base), json.dumps(health))
+        code, view = SV.agent_request(cfg.socket, "GET", "/view")
+        self.assertEqual((code, view["items"], view["view"]["items_note"]), (200, {}, IT.UNREADABLE))
+        self.assertNotIn(str(self.base), json.dumps(view))
+        logged = [ln for ln in self.err.getvalue().splitlines() if ln.startswith("console items: ")]
+        self.assertEqual(len(logged), 1, logged)   # one line, not one per request
+        self.assertIn(problem, logged[0])
+        self.assertEqual(SV.agent_request(cfg.socket, "POST", "/items", LANE_ITEMS)[0], 200)
+        code, health = SV.agent_request(cfg.socket, "GET", "/health")
+        self.assertEqual((code, health["ok"]), (200, True))
+        code, view = SV.agent_request(cfg.socket, "GET", "/view")
+        self.assertEqual((code, view["items"], view["view"]["items_note"]), (200, LANE_ITEMS["items"], None))
+        st = os.lstat(cfg.state / IT.ITEMS)
+        self.assertTrue(stat.S_ISREG(st.st_mode))
+        return cfg
+
+    def test_a_file_that_is_not_json_does_not_stop_the_start(self):
+        self.check_starts_unreadable_then_recovers(lambda p, _b: p.write_bytes(b"{not json"), "is not JSON")
+
+    def test_a_file_that_fails_the_check_does_not_stop_the_start(self):
+        self.check_starts_unreadable_then_recovers(lambda p, _b: p.write_text(json.dumps({"items": [1]})),
+                                                   "items is an object")
+
+    def test_a_symlink_does_not_stop_the_start_and_its_target_is_untouched(self):
+        def plant(p, base):
+            (base / "outside.json").write_text(json.dumps({"items": {"OUTSIDE": {"title": "not pushed"}}}))
+            p.symlink_to(base / "outside.json")
+        self.check_starts_unreadable_then_recovers(plant, "not a plain file")
+        self.assertIn("OUTSIDE", (self.base / "outside.json").read_text())
+
+    def test_a_fifo_does_not_stop_the_start(self):
+        self.check_starts_unreadable_then_recovers(lambda p, _b: planted_fifo(self, p), "not a plain file")
+
+    def test_a_directory_does_not_stop_the_start_and_is_set_aside_not_removed(self):
+        def plant(p, _base):
+            p.mkdir()
+            (p / "kept").write_text("whatever was here")
+        cfg = self.check_starts_unreadable_then_recovers(plant, "not a plain file")
+        aside = [n for n in os.listdir(cfg.state) if n.startswith(IT.SET_ASIDE)]
+        self.assertEqual(len(aside), 1, os.listdir(cfg.state))
+        self.assertEqual((cfg.state / aside[0] / "kept").read_text(), "whatever was here")
 
 
 class SingleServerItemsTests(_SingleServer, unittest.TestCase):
@@ -5443,11 +5538,10 @@ class SingleServerItemsTests(_SingleServer, unittest.TestCase):
         (self.scfg.state / IT.ITEMS).symlink_to(outside)
         with self.assertRaises(SV.StoreError):
             IT.SnapshotAdapter(self.scfg.state).items()
-        try:   # refused: today the view's request ends without an answer (as on the one server), never with them
-            raw = raw_agent(self.scfg.socket, "GET", "/view")[1]
-        except http.client.RemoteDisconnected:
-            raw = b""
+        code, raw = raw_agent(self.scfg.socket, "GET", "/view")   # the single server tolerates it: no items shown
+        self.assertEqual(code, 200)
         self.assertNotIn(b"OUTSIDE", raw)
+        self.assertEqual(json.loads(raw)["view"]["items_note"], IT.UNREADABLE)
         self.assertEqual(SV.agent_request(self.scfg.socket, "POST", "/items", LANE_ITEMS)[0], 200)
         self.assertIn("OUTSIDE", outside.read_text())                    # the target is untouched
         self.assertFalse((self.scfg.state / IT.ITEMS).is_symlink())      # the link itself was replaced

@@ -29,9 +29,15 @@ def read_at(folder: int, name: str, limit: int) -> bytes | None:
         if e.errno not in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
             raise
         return None   # absent, or a symlink planted in its place: never followed
+    try:
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)   # on the raw fd: fdopen itself raises for a directory
+    except BaseException:
+        os.close(fd)
+        raise
+    if not regular:
+        os.close(fd)
+        return None
     with os.fdopen(fd, "rb") as fh:
-        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
-            return None
         return fh.read(limit + 1)
 
 

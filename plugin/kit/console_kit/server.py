@@ -480,7 +480,10 @@ class Console:
         view["tags"] = self.tags(view, items)
         view["config"] = {"specs_dir": self.project.specs_dir, "visuals_dir": self.project.visuals_dir}
         pushed = getattr(self.adapter, "pushed", None)
-        view["items_note"] = IT.NOT_PUSHED if callable(pushed) and not pushed() else None   # F63: never a blank
+        if getattr(self.adapter, "problem", None):   # the items() above already read (and logged) it
+            view["items_note"] = IT.UNREADABLE
+        else:
+            view["items_note"] = IT.NOT_PUSHED if callable(pushed) and not pushed() else None   # F63: never a blank
         return {"view": view, "items": items, "cursor": self.read_cursor()}
 
     def page_payload(self) -> dict:
@@ -1021,6 +1024,8 @@ class Console:
             self.adapter.items()
         except Exception as e:  # a register caught mid-write, or a broken adapter
             sys.stderr.write(f"console health: register: {type(e).__name__}: {e}\n")
+            ok = False
+        if getattr(self.adapter, "problem", None):   # the single server serves on, but the register is not ok
             ok = False
         agent = D.listening(self.cfg.state)["state"]
         return ok, {"ok": ok, "version": __version__, "store_seq": len(self.store.records()),
@@ -1590,10 +1595,12 @@ def serve(cfg: Config, verify: Callable[[str | None], dict] | None = None) -> No
     # CONSOLE-kit/Q24 ("items_push_now"): this process never imports or runs the project's adapter either.
     # It is project code an agent can write; it runs in the steward (`agent.py items-push`), and only its
     # output reaches here, as data, kept in STATE/items.json. `cfg.adapter` is not read.
+    # A stored items.json that fails its check does not stop this server (tolerant): it starts, logs one
+    # line, shows the board's UNREADABLE note and a not-ok /health, and the next push recovers it live.
     try:
-        console = Console(cfg, IT.SnapshotAdapter(cfg.state))
+        console = Console(cfg, IT.SnapshotAdapter(cfg.state, tolerant=True))
         added = console.seed()
-    except (PC.ConfigError, N.NamesError, StoreError) as e:   # a stored items.json that fails its check
+    except (PC.ConfigError, N.NamesError, StoreError) as e:   # the register itself, or the project's config
         raise SystemExit(f"console: {e}") from None
     sys.stderr.write(f"console: {len(added)} seed question(s) added; store {cfg.store}\n")
     agent = agent_server(console)
