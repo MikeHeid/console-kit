@@ -1175,10 +1175,11 @@ class LiveConsoleTests(unittest.TestCase):
 
     # -- the real server ------------------------------------------------------------
 
-    def serve(self, snapshot=False, page=LIVE_HOST):
+    def serve(self, snapshot=False, page=LIVE_HOST, publish=True):
         """The real Console and doors; `snapshot` gives it what `serve` gives it since Q24 (pushed items only).
 
-        `page` is pushed as the steward's page snapshot (Q28), the only page the server serves.
+        `page` is staged as the steward's page snapshot (Q28) and, with `publish`, published as the owner's
+        "Use this page" would (Q29): only a published page is served.
         """
         import tempfile
         from console_kit import items as IT
@@ -1190,7 +1191,9 @@ class LiveConsoleTests(unittest.TestCase):
         cfg = SV.Config(root=root, page=None, state=root / "state", adapter=root / "unused.py",
                         team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="live-test")
         console = SV.Console(cfg, IT.SnapshotAdapter(cfg.state) if snapshot else _LiveAdapter())
-        console.push_page_snapshot(page_body(page))   # Q28: the page is the steward's snapshot in STATE
+        staged = console.push_page_snapshot(page_body(page))   # Q28: the page is the steward's snapshot in STATE
+        if publish:   # Q29: what the owner's "Use this page" does
+            console.publish_page({"commit": staged["staged"]})
         verify = SV.access_verifier(TEAM, AUD, key_for=lambda _t: KEY.public_key())
         owner = SV.owner_server(console, verify, 0)
         threading.Thread(target=owner.serve_forever, daemon=True).start()
@@ -1288,7 +1291,55 @@ class LiveConsoleTests(unittest.TestCase):
                 page = self.page(kind, 1280, url)
                 page.wait_for_function("document.body.dataset.pageScript === 'ran'", timeout=10000)
                 self.open_inbox(page, 1280)   # the console's own script built its dock and inbox
-                self.assertIn("(from the steward)", page.locator(".ck-page-source").text_content())
+                self.assertIn("(staged by the steward, published by you)",
+                              page.locator(".ck-page-source").text_content())
+
+    def test_a_staged_pages_script_never_runs_until_the_owner_publishes_it(self):
+        # Q29 point 3, the browser proof. The staged page's script tries to mark its own frame and the console's
+        # page. Catches: the preview frame given allow-scripts or allow-same-origin, the preview route served under
+        # a CSP that runs script, the staged page served before the click, and a button that does not publish.
+        html = LIVE_HOST.replace("</body>", '<p id="staged-mark">STAGED-PAGE</p><script>'
+                                 'document.body.dataset.pageScript = "ran";'
+                                 'try { top.document.body.dataset.leaked = "yes"; } catch (e) {}</script></body>')
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve(page=html, publish=False)
+                page = self.page(kind, 1280, url)
+                self.assertEqual(page.locator(".ck-page-proposed-line").count(), 1)
+                self.assertEqual(page.locator("#staged-mark").count(), 0)   # proposed, not served
+                page.click(".ck-page-preview summary")
+                frame_el = page.wait_for_selector(".ck-page-preview iframe")
+                self.assertEqual(frame_el.get_attribute("sandbox"), "")
+                frame = frame_el.content_frame()
+                frame.wait_for_selector("#staged-mark")   # the preview rendered the staged markup
+                page.wait_for_timeout(500)   # time for a script that was going to run
+                self.assertTrue(frame.evaluate("document.body.dataset.pageScript === undefined"),
+                                "the staged page's script ran in the preview")
+                self.assertTrue(page.evaluate("document.body.dataset.leaked === undefined"),
+                                "the staged page's script reached the console's page")
+                self.assertTrue(page.evaluate("document.body.dataset.pageScript === undefined"))
+                with page.expect_navigation():
+                    page.click(".ck-page-use")
+                page.wait_for_function("document.body.dataset.pageScript === 'ran'", timeout=10000)
+                self.assertEqual(page.locator("#staged-mark").count(), 1)   # published: served, its script runs
+                self.assertEqual(page.locator(".ck-page-proposed-line").count(), 0)
+                self.assertIn("published by you", page.locator(".ck-page-source").text_content())
+
+    def test_a_refused_publish_names_why_and_publishes_nothing(self):
+        # Q29 point 2, the button's other half. Catches: a refusal swallowed (the owner thinks it published), the
+        # page reloaded on a refusal, and a stale button publishing a newer staging it never showed.
+        from test_server import page_body
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve(publish=False)
+                page = self.page(kind, 1280, url)
+                newer = page_body(LIVE_HOST.replace("</body>", "<p>NEWER</p></body>"), commit="beef" + "1" * 36)
+                self.console.push_page_snapshot(newer)   # staged after the page loaded
+                page.click(".ck-page-use")
+                err = page.wait_for_selector(".ck-page-use-error:not([hidden])")
+                self.assertIn("Not published: the staged page is now beef11111111", err.text_content())
+                self.assert_not_reloaded(page)
+                self.assertFalse((self.cfg.state / "page-snapshot.json").exists())
 
     def test_a_new_question_appears_without_reload_and_the_chip_counts_it(self):
         # Catches: a page that only refreshes on open or on Refresh (the owner sees nothing
@@ -1783,7 +1834,8 @@ class NextStepAndVisualTests(unittest.TestCase):
         cfg = SV.Config(root=root, page=None, state=root / "state", adapter=root / "unused.py",
                         team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="p4-test")
         console = SV.Console(cfg, _LiveAdapter())
-        console.push_page_snapshot(page_body(LIVE_HOST))   # Q28: the page is the steward's snapshot in STATE
+        staged = console.push_page_snapshot(page_body(LIVE_HOST))   # Q28: the page is the steward's snapshot
+        console.publish_page({"commit": staged["staged"]})   # Q29: and the owner published it
         verify = SV.access_verifier(TEAM, AUD, key_for=lambda _t: KEY.public_key())
         owner = SV.owner_server(console, verify, 0)
         threading.Thread(target=owner.serve_forever, daemon=True).start()
