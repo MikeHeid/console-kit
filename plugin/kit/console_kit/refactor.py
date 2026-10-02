@@ -24,11 +24,19 @@ rulings on what else can happen to one:
                       owner's own Withdraw or Keep does
 
 A scan's ruling is ANSWERED once a proposal, an advice or a `replaces` names
-it and that lock, written AFTER the scan; it is SETTLED once it is no longer
-stale (withdrawn, kept, superseded, re-anchored, re-locked or holding again).
-The scan is done when every ruling it names is one or the other. Whether an
-answer is stale is the view's to say (it reads the files), so `scan_status`
-takes that from the caller.
+it and that lock, written AFTER the scan; it is SETTLED once a record took it
+out of the steward's hands: the owner withdrew, kept or re-anchored that lock,
+a replacement was asked for it, or the lock is no longer the answer's (a new
+answer or a re-lock). The scan is done when every ruling it names is one or
+the other.
+
+**Records only, never the files.** A ruling whose cited text comes back (a
+revert, a branch switch) does NOT settle: done-ness that followed the files
+would undo itself when they moved again, reopening a scan whose doorbell line
+the steward has already marked, so nothing would wake it. Every condition
+above is a record, and records are only appended, so a done scan stays done.
+The steward is never left without a move: advice is accepted on a ruling that
+holds again while an open scan names it (`Console.advise`).
 
 Every record names the lock it acted on, so a later supersede and re-lock of
 the same question makes it stop applying (a new lock is a new ruling).
@@ -59,7 +67,6 @@ import os
 import sys
 import threading
 from pathlib import Path
-from typing import Callable
 
 from . import atfile as AF
 from . import schema as S
@@ -384,22 +391,30 @@ def scan_answer(store, scan: dict, qid: str, lock: str) -> dict | None:
     return None
 
 
-def scan_status(store, scan: dict, stale: Callable[[str], bool]) -> dict:
-    """Where each ruling `scan` names stands, and whether the scan is `done`.
+def _settled(store, qid: str, lock: str) -> bool:
+    """A record took `qid`'s `lock` out of the steward's hands. Monotone: true once, true for good."""
+    lk = current_lock(store, qid)
+    if lk is None or lk["id"] != lock:   # a new answer or a re-lock: a lock id is never current again
+        return True
+    log = _log(store)
+    return log is not None and any(
+        (r["type"] in ("withdraw", "untrack", "confirm") and r["qid"] == qid and r["lock"] == lock)
+        or (r["type"] == "replaces" and r["replaces"] == qid and r["lock"] == lock) for r in log._records)
+
+
+def scan_status(store, scan: dict) -> dict:
+    """Where each ruling `scan` names stands, and whether the scan is `done`, from records alone.
 
     `rulings` maps each qid to {"answered": record id, "by": its type},
-    {"settled": True}, or {} while it waits. `stale(qid)` says whether the
-    ruling is stale NOW (the view reads the files). A ruling no longer stale,
-    or locked again under a new lock, is settled: nothing is left to find.
+    {"settled": True}, or {} while it waits on the steward.
     """
     rulings = {}
     for qid, lock in zip(scan["qids"], scan["locks"]):
-        lk = current_lock(store, qid)
-        if lk is None or lk["id"] != lock or not stale(qid):
-            rulings[qid] = {"settled": True}
-            continue
         a = scan_answer(store, scan, qid, lock)
-        rulings[qid] = {"answered": a["id"], "by": a["type"]} if a is not None else {}
+        if a is not None:
+            rulings[qid] = {"answered": a["id"], "by": a["type"]}
+        else:
+            rulings[qid] = {"settled": True} if _settled(store, qid, lock) else {}
     return {"rulings": rulings, "done": all(rulings.values())}
 
 
@@ -409,9 +424,18 @@ def scans(store) -> list[dict]:
     return [] if log is None else [r for r in log._records if r["type"] == "scan"]
 
 
-def open_scans(store, stale: Callable[[str], bool]) -> list[dict]:
+def open_scans(store) -> list[dict]:
     """The scans not yet done, oldest first."""
-    return [s for s in scans(store) if not scan_status(store, s, stale)["done"]]
+    return [s for s in scans(store) if not scan_status(store, s)["done"]]
+
+
+def waiting_scan(store, qid: str, lock: str) -> dict | None:
+    """The open scan in which `qid` under `lock` still waits on the steward, if any."""
+    for sc in open_scans(store):
+        if qid in sc["qids"] and sc["locks"][sc["qids"].index(qid)] == lock and \
+                not scan_status(store, sc)["rulings"][qid]:
+            return sc
+    return None
 
 
 def outcome(store, qid: str) -> dict | None:

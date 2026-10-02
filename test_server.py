@@ -7208,8 +7208,11 @@ class ScanTests(_Live, unittest.TestCase):
                          {"star": "withdraw",
                           "evidence": "RULE-ALPHA was dropped in the rules rewrite; nothing replaced it"})
         code, out = self.advise(self.QID, star="drop")
-        self.assertEqual(code, 409, out)   # the log refuses the shape: not one of withdraw, keep
+        self.assertEqual(code, 400, out)   # the request's shape, not a rule of the log
         self.assertIn("star 'drop'", out["error"])
+        code, out = self.advise(self.QID, evidence="e" * (SV.S.MAX_TEXT + 1))
+        self.assertEqual(code, 400, out)
+        self.assertIn(f"the limit is {SV.S.MAX_TEXT}", out["error"])
         code, out = SV.agent_request(self.cfg.socket, "POST", "/refactor", {"action": "scan", "qids": [self.QID],
                                                                              "locks": [self.lock_id], "nonce": "x" * 9})
         self.assertEqual(code, 404, out)
@@ -7217,6 +7220,67 @@ class ScanTests(_Live, unittest.TestCase):
                                                               "nonce": "rxownadv01"}, tok=token())
         self.assertIn(code, (403, 404), out)
         self.assertEqual([r["type"] for r in self.rx_lines()], ["advice"])
+
+    # -- review MEDIUM: a done scan never reopens, and the steward always has a move ---------------------
+
+    def test_a_ruling_that_holds_again_waits_for_an_answer_and_a_done_scan_never_reopens(self):
+        # The reviewer's case. Catches: a done-rule that follows the files (a revert closes the scan, the steward
+        # marks its rx, and when the text goes again the scan reopens with nothing to wake anyone, refusing every
+        # new scan), and the opposite failure: a ruling that holds for good leaving the scan open with no move.
+        from console_kit import doorbell as D
+        RefactorTests.go_stale(self)
+        code, sc = self.scan([self.QID], [self.lock_id])
+        self.assertEqual(code, 200, sc)
+        D.write_cursor(self.cfg.state, self.console.store.seq(), sc["record"]["seq"])   # the steward saw the line
+        (self.cfg.root / "rules.md").write_text(RULES)                    # reverted: the ruling holds again
+        self.assertEqual(self.view_q()[1]["state"], "locked")
+        self.assertEqual(self.todo()["scans"][0]["waiting"], [self.QID])   # still the steward's, not silently done
+        code, adv = self.advise(self.QID, star="keep", evidence="The cited line is back word for word; it holds.")
+        self.assertEqual(code, 200, adv)                                   # the move a holding ruling has
+        self.assertEqual(self.todo()["scans"], [])
+        RefactorTests.go_stale(self)                                        # the text goes again, same lock
+        self.assertEqual(self.view_q()[1]["state"], "stale")
+        self.assertEqual(self.todo()["scans"], [])                          # done stays done
+        self.assertEqual(self.scan([self.QID], [self.lock_id])[0], 200)     # and nothing blocks the next scan
+
+    def test_a_ruling_whose_lock_is_gone_or_replaced_does_not_hold_a_scan_open(self):
+        # Catches: a scan held open by a ruling the owner answered again (its lock is no longer current, so no
+        # advice or proposal can name it) or by one a replacement was asked for before the scan.
+        self.second_ruling()
+        self.stale_both()
+        q = {"qid": "LANE.1/Q4", "item": "LANE.1", "text": "What is the beta rule now?", "kind": "single",
+             "options": [{"id": "a", "label": "Runs tests"}, {"id": "b", "label": "Runs nothing"}], "star": "a",
+             "valid_if": [], "source": "rules.md:4", "replaces": self.QID3, "nonce": "rxrepl00034"}
+        self.assertEqual(self.agent_post("/question", q)[0], 200)          # asked BEFORE the scan
+        code, sc = self.scan([self.QID, self.QID3], [self.lock_id, self.lock3])
+        self.assertEqual(code, 200, sc)
+        sid = sc["record"]["id"]
+        self.assertEqual(self.todo()["scans"][0]["waiting"], [self.QID])
+        head = self.console.store.head(self.QID)["id"]
+        code, a = self.req("POST", "/api/answer", self.answer(qid=self.QID, picks=["b"], nonce="rxreans02",
+                                                              supersedes=head, reason="the rule changed"), tok=token())
+        self.assertEqual(code, 200, a)                                      # answered again: its lock is gone
+        self.assertEqual(self.todo()["scans"], [])
+        view, _ = self.view_q()
+        self.assertEqual(view["scans"][sid]["rulings"], {self.QID: {"settled": True}, self.QID3: {"settled": True}})
+
+    def test_an_older_agent_py_that_drops_rx_through_costs_one_wake(self):
+        # Catches: a cursor an older agent.py rewrites as {"through": N} making the scan line wake on every
+        # watch for good, rather than once until the steward marks it again.
+        from console_kit import doorbell as D
+        RefactorTests.go_stale(self)
+        code, sc = self.scan([self.QID], [self.lock_id])
+        rx = sc["record"]["seq"]
+        D.write_cursor(self.cfg.state, self.console.store.seq(), rx)
+        self.assertEqual(D.watch(self.cfg.inbox, D.read_cursor(self.cfg.state),
+                                 rx_since=D.read_rx_cursor(self.cfg.state), timeout=0), [])
+        (self.cfg.state / D.CURSOR_FILE).write_text(json.dumps({"through": self.console.store.seq()}) + "\n")
+        again = D.watch(self.cfg.inbox, D.read_cursor(self.cfg.state), rx_since=D.read_rx_cursor(self.cfg.state),
+                        timeout=0)
+        self.assertEqual([b["rx"] for b in again], [rx])                    # the one extra wake
+        D.write_cursor(self.cfg.state, D.read_cursor(self.cfg.state), rx)   # the steward marks it again
+        self.assertEqual(D.watch(self.cfg.inbox, D.read_cursor(self.cfg.state),
+                                 rx_since=D.read_rx_cursor(self.cfg.state), timeout=0), [])
 
     # -- Q41: an older kit -------------------------------------------------------------------------------
 

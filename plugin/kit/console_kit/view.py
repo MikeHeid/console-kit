@@ -147,12 +147,10 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
             questions[r["qid"]]["lock"] = RX.current_lock(store, r["qid"])["id"]
 
     # CONSOLE-kit/Q40, Q41: the owner's scans for a resolve, each with where every ruling it names stands. The
-    # done-rule is refactor.scan_status's; stale is what this view just said, so the page, `view` and `todo` agree.
-    def stale(qid: str) -> bool:
-        return questions.get(qid, {}).get("state") == "stale"
+    # done-rule is refactor.scan_status's, from records alone, so the page, `view` and `todo` agree with the server.
     scans = {}
     for sc in RX.scans(store):
-        st = RX.scan_status(store, sc, stale)
+        st = RX.scan_status(store, sc)
         scans[sc["id"]] = {**{k: sc[k] for k in ("id", "seq", "ts", "by", "qids", "locks")}, **st}
 
     threads: dict[str, list[dict]] = {}

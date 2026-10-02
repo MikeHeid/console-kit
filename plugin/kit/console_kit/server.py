@@ -1025,8 +1025,8 @@ class Console:
                 if missed:
                     raise RequestError(409, f"{', '.join(missed)} went stale after the page loaded; reload, so the "
                                             f"scan names every stale ruling")
-            for o in RX.open_scans(self.store, stale):
-                st = RX.scan_status(self.store, o, stale)["rulings"]
+            for o in RX.open_scans(self.store):
+                st = RX.scan_status(self.store, o)["rulings"]
                 left = [q for q, v in st.items() if not v]
                 raise RequestError(409, f"scan {o['id'][:8]} asked on {o['ts']} is still open: {len(left)} of "
                                         f"{len(st)} rulings wait on the steward ({', '.join(left)}). It answers "
@@ -1055,14 +1055,34 @@ class Console:
         """
         if not isinstance(body, dict) or set(body) != {"qid", "star", "evidence", "nonce"}:
             raise RequestError(400, 'refactor-advice takes {"qid", "star": "withdraw"|"keep", "evidence", "nonce"}')
+        errs = ([] if body["star"] in RX.ADVICE_STARS else
+                [f"star {body['star']!r} is not one of {', '.join(RX.ADVICE_STARS)}"]) + S._text(body, "evidence")
+        if errs:   # the shape is the request's fault (400), before any rule of the log is asked (409)
+            raise RequestError(400, "; ".join(errs))
         self._refactor_problem()
         with self._lock:
             items = self.items()
-            q, lk, _conds, _tree = self._stale_lock(body["qid"], items, "advised on")
+            q, lk = self._advisable(body["qid"], items)
             rec = self._rx_append({"type": "advice", "by": "agent", "qid": q["qid"], "lock": lk["id"],
                                    "star": body["star"], "evidence": body["evidence"], "nonce": body["nonce"]})
             self._name(rec, agent)
         return {"record": rec}
+
+    def _advisable(self, qid: object, items: dict[str, dict]) -> tuple[dict, dict]:
+        """(question, current lock) of a ruling the steward may advise on: a stale one, or one an open scan names.
+
+        A ruling whose cited text came back holds again, so it is not stale, but a
+        scan that names it waits on it until a record answers or settles it (the
+        done-rule follows records, never the files). Advice is the steward's move
+        there, most often "keep: it holds again"; refusing it would leave that
+        scan open with no legal move at all.
+        """
+        q = self.store.question(qid) if isinstance(qid, str) else None
+        lk = RX.current_lock(self.store, qid) if q is not None else None
+        if lk is not None and RX.outcome(self.store, qid) is None and RX.waiting_scan(self.store, qid, lk["id"]):
+            return q, lk
+        q, lk, _conds, _tree = self._stale_lock(qid, items, "advised on")
+        return q, lk
 
     def _confirm_check(self, body: dict, q: dict, lk: dict, conds: list[dict], tree: A.Tree) -> None:
         """Property 4: the proposal still holds against the files as they are NOW, and was made against these anchors."""

@@ -230,10 +230,15 @@ A worked shape, six stale rulings in one scan:
 
 A ruling is answered once one of these names it, written after the scan, for
 the lock the scan names. One the owner settles meanwhile (withdraws, keeps,
-re-anchors, re-locks), or that holds again, needs nothing more. The scan is
-done when every ruling it names is answered or settled; `A todo` then stops
-listing it, and the owner may scan again. A second scan is refused while one
-is open, so answer every ruling of the open one.
+re-anchors, answers again or re-locks), or one a replacement was already asked
+for, needs nothing more. **A ruling whose cited text came back still needs an
+answer**: whether a scan is done follows the records, never the files, so a
+revert or a branch switch never closes it (and the files moving back could not
+reopen it). Answer it `A advise QID --star keep --evidence "the cited text is
+back: …"`, which is accepted on a ruling that holds while a scan names it.
+The scan is done when every ruling it names is answered or settled; `A todo`
+then stops listing it, and the owner may scan again. A second scan is refused
+while one is open, so answer every ruling of the open one.
 
 ## 5. Mark the console synced
 
