@@ -332,6 +332,10 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
 
       python3 <kit>/agent.py --state <state dir> items-push --project <project> --adapter <adapter path>
 
+  Run it from inside the project's checkout, with `--adapter` inside that
+  project. The command picks its server from the directory it runs in, and
+  refuses an adapter outside the project.
+
   The server checks what arrives against a closed schema (each item is
   `title`, `parent`, `status`; unknown keys are refused). It keeps the last
   push in the state dir, so a restart shows it. The single server and the
@@ -340,7 +344,10 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
 - **What you see.** Until the first push, the inbox says the items appear when
   the steward pushes them. It never shows a blank or invented items. Push
   again whenever the register changes. `--adapter` is still accepted, so an
-  existing unit keeps starting, but it is ignored.
+  existing unit keeps starting, but it is ignored. If the stored items cannot
+  be read, the single server still starts. It shows no items, the inbox says
+  why, and `health` is not ok until the next `items-push` replaces the file.
+  The one server refuses just that project.
 - **How it is held.** A test runs the real server under an audit hook, with an
   adapter configured whose import leaves a marker. The test fails if the
   server imports, opens, compiles or runs that file.

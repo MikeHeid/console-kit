@@ -183,7 +183,20 @@ is up, and again whenever the register changes:
 
     python3 <current>/plugin/kit/agent.py --state <state> items-push --project <project> --adapter <adapter path>
 
+Run it from inside the project's checkout, with an `--adapter` path inside
+that project. The command picks the server to send to from the directory it
+runs in, and refuses an adapter outside the project.
+
 Until then the inbox says that items appear when the steward pushes them.
+
+If the stored items cannot be read (a damaged `items.json` in the state dir,
+or something other than a plain file in its place), the single server still
+starts. It logs one line, shows no items, and the inbox says the stored items
+cannot be read. `health` reports the register as not ok. To recover, run
+`items-push` again: it replaces the file, and the board comes back without a
+restart. A directory found there is renamed aside to `.items.json.set-aside.*`,
+never deleted. The one server (`--all`) still refuses just that project and
+keeps serving the others.
 
 Check it:
 
@@ -344,7 +357,8 @@ Two consequences for the cut-over:
 the adapter (CONSOLE-kit/Q24). So after the first upgrade past that change,
 the board has no items until the `items-push` line above runs. The inbox says
 so instead of going blank. The push is kept in the state dir, so later
-restarts keep the items.
+restarts keep the items. Run the push from inside the project's checkout,
+with `--adapter` inside that project.
 
 Read the release's notes in `INSTALL.md` ("Upgrading to …") first. Some
 releases ask for a step of their own, such as `reanchor` or a
