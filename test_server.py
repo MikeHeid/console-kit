@@ -4217,6 +4217,16 @@ class StewardGitTests(_Live, unittest.TestCase):
         (self.blob_dir() / self.v1).symlink_to(outside)
         self.assertEqual(self.condition()[1]["history"], NOGIT)
 
+    def test_a_fifo_planted_where_a_blob_goes_is_refused_at_once(self):
+        # Catches (lane 5 review, MEDIUM): the blob read waiting forever on a FIFO in the blob's place (no
+        # O_NONBLOCK), stalling the check; and a second check queued behind the first.
+        self.push()
+        (self.blob_dir() / self.v1).unlink()
+        planted_fifo(self, self.blob_dir() / self.v1)
+        for attempt in ("first", "second"):
+            got = within(self, lambda: self.condition()[1]["history"], seconds=10)
+            self.assertEqual(got.get("value"), NOGIT, attempt)
+
     def test_a_symlink_planted_where_the_steward_folder_goes_is_refused_and_never_read(self):
         # Catches: opening STATE/steward-git (or blobs/) with the link followed. The link's target holds the TRUE
         # blob and index, so only O_NOFOLLOW on the folder stands between them and the panel, and a push must not
@@ -5229,6 +5239,39 @@ def raw_agent(sock: Path, method: str, path: str, data: bytes | None = None,
     return r.status, raw
 
 
+def within(test: unittest.TestCase, fn, seconds: float = 5.0) -> dict:
+    """Run `fn` on a thread and fail if it is still running after `seconds`: a hang becomes a failure, not a stall.
+
+    The result is {"value": ...} or {"error": exception}.
+    """
+    out: dict = {}
+
+    def run():
+        try:
+            out["value"] = fn()
+        except BaseException as e:   # noqa: BLE001: whatever it raised is the answer
+            out["error"] = e
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(seconds)
+    test.assertFalse(t.is_alive(), f"blocked for more than {seconds} s")
+    return out
+
+
+def planted_fifo(test: unittest.TestCase, path: Path) -> None:
+    """A FIFO where a file is read. Cleanup opens it for writing once, which releases any reader stuck in open()."""
+    os.mkfifo(path)
+
+    def release():
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)   # ENXIO when no reader waits: nothing to release
+        except OSError:
+            return
+        os.close(fd)
+    test.addCleanup(release)
+
+
 class _SingleServer:
     """One project's single server (`serve`'s Console and agent door), in this process, adapter configured."""
 
@@ -5358,6 +5401,16 @@ class SingleServerItemsTests(_SingleServer, unittest.TestCase):
         self.assertIn("OUTSIDE", outside.read_text())                    # the target is untouched
         self.assertFalse((self.scfg.state / IT.ITEMS).is_symlink())      # the link itself was replaced
         self.assertEqual(self.sview()["items"], LANE_ITEMS["items"])
+
+    def test_a_fifo_at_items_json_is_refused_at_once_and_blocks_nothing_after_it(self):
+        # Catches (lane 5 review, MEDIUM): opening a FIFO planted as items.json without O_NONBLOCK, which waits
+        # for a writer forever, holding the adapter's lock, so every later view, pushed() and push stalls too.
+        planted_fifo(self, self.scfg.state / IT.ITEMS)
+        adapter = IT.SnapshotAdapter(self.scfg.state)
+        for attempt in ("first", "second"):   # the second would queue behind a first one stuck holding the lock
+            got = within(self, adapter.items)
+            self.assertIsInstance(got.get("error"), SV.StoreError, attempt)
+            self.assertIn("not a plain file", str(got["error"]))
 
     def test_every_items_file_operation_is_dir_relative_and_follows_no_link(self):
         # AC 4, the syscall half: under strace, a push, a re-read and a view touch STATE/items.json only as one

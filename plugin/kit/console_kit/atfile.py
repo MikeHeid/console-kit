@@ -12,11 +12,17 @@ import errno
 import os
 import stat
 
-FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+# O_NONBLOCK: opening a FIFO planted in the file's place returns at once instead of waiting for a writer
+# (an open with a lock held would stall every later request); the fstat below then refuses it. A regular
+# file never blocks, so the flag changes nothing for what is read.
+FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 
 
 def read_at(folder: int, name: str, limit: int) -> bytes | None:
-    """At most `limit` + 1 bytes of the REGULAR file `name` in `folder`; None when absent or not a plain file."""
+    """At most `limit` + 1 bytes of the REGULAR file `name` in `folder`; None when absent or not a plain file.
+
+    Anything else in its place (a symlink, a FIFO, a directory, a device) is refused without being read.
+    """
     try:
         fd = os.open(name, FILE_FLAGS, dir_fd=folder)
     except OSError as e:
