@@ -6024,6 +6024,25 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
         self.assertIn("EDITED-IN-THE-WORKING-TREE", html)
         self.assertIn("(unreviewed ref)", html)
 
+    def test_the_cli_reads_head_from_the_commit_even_with_a_dirty_tree(self):
+        # Code review LOW (M3 survived): the page read from the working tree when the ref is HEAD, the one ref a
+        # dirty checkout makes look the same as "what is here". HEAD is a commit like any other: with an
+        # uncommitted edit (unstaged, then staged), the snapshot carries HEAD's committed bytes, never the edit.
+        root = self.cli_project()
+        head = git(root, "rev-parse", "HEAD").stdout.strip()
+        dirty = DASH.replace("DASHBOARD-V1", "DIRTY-WORKING-TREE")
+        for staged in (False, True):
+            with self.subTest(staged=staged):
+                (root / "docs" / "index.html").write_text(dirty)
+                if staged:
+                    git(root, "add", "docs/index.html")
+                r = self.cli("--from-ref", "HEAD", "--path", "docs/index.html", "--unreviewed")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(json.loads(r.stdout), {"stored": head, "ref": "HEAD", "reviewed": False})
+                doc, _ = PS.load(self.scfg.state)
+                self.assertEqual(PS.page_text(doc["content"]), DASH)   # the committed bytes, exactly
+                self.assertNotIn("DIRTY-WORKING-TREE", self.page())
+
     def test_the_cli_refuses_a_link_in_the_commit_an_absent_page_and_no_origin_main(self):
         # AC 3. Catches: a page that is a symlink in the commit (git stores the link's target as its blob), a
         # missing --path, and the ancestor check passing when origin/main was never fetched.
