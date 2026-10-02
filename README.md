@@ -54,7 +54,8 @@ to run next. `INSTALL.md` (also in the zip) has the whole guide.
 - **Next step ▾** beside every locked answer:
   - **Follow up**: chosen seats look at that answer again.
   - **Roar**: a three-round panel, at most once per lock.
-  - **Refine** or **Drill**: runs your project's own skill.
+  - **Refine** or **Drill**: runs the skill your project names, by default
+    the plugin's own `console-kit:refine` and `console-kit:drill`.
 
   Each step comes back as questions for you to lock. Nothing is written into
   the project before you lock.
@@ -148,7 +149,9 @@ server cannot check it.
 - **`fold.py`** writes locked answers, and what became of them, into your
   project through its adapter, in the steward's process.
 - **`plugin/`** holds the Claude Code plugin: the hook, the skills, and the
-  committee agents.
+  committee agents. Its skills include `roar`, `refine`, `drill` and
+  `deliberate`, which a console round uses and which also run on their own
+  (`/console-kit:roar` and so on).
 - **`onboard.py`** and **`deploy/`** onboard a project and install the
   services.
 

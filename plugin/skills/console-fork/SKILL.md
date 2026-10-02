@@ -268,7 +268,9 @@ is that fork's questions). The kit knows nothing about how a project refines
 or drills; it names the kind and the project names the skill.
 
 - **Which skill.** `.console-kit.json`'s `next_step` (e.g.
-  `{"refine": "refine", "drill": "drill"}`) names a skill, as data. The
+  `{"refine": "console-kit:refine", "drill": "console-kit:drill"}`, the
+  plugin's own skills and the onboarding default, or a user's own
+  `{"refine": "refine"}`) names a skill, as data. The
   repository chooses that NAME, so it must never also choose what the name
   runs: **resolve it only against the user's installed skills** (the
   user-level skills folder, `~/.claude/skills/<name>/`, or an installed

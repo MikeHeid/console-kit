@@ -79,7 +79,7 @@ starts, and nothing ever runs a path taken from them.
 {
   "specs_dir": "architect/40-specs/",
   "visuals_dir": "architect/visuals/",
-  "next_step": {"refine": "refine", "drill": "drill"}
+  "next_step": {"refine": "console-kit:refine", "drill": "console-kit:drill"}
 }
 ```
 
@@ -134,6 +134,16 @@ starts, and nothing ever runs a path taken from them.
   runs. `agent.py next-step KIND --project DIR` does that lookup and refuses,
   naming the reason, a name that is not an installed user skill or that
   resolves into the project; the session stops there.
+
+  The plugin ships a `refine` and a `drill` skill of its own, and onboarding
+  writes `{"refine": "console-kit:refine", "drill": "console-kit:drill"}`
+  when the project names none, so Refine and Drill work on a fresh install.
+  They follow the "App Architect" layout (`digest.md`, `30-segments.md`,
+  `40-specs/`) where a project has it, and `specs_dir` and the project's
+  `CLAUDE.md` where it does not. A project with its own skills names them
+  instead, as plain names (`"refine": "refine"`, a user-level skill) or as
+  another plugin's `<plugin>:<name>`; onboarding never replaces a kind
+  already named.
 
   The fourth kind of follow-up, **roar**, needs no entry: it is a panel of the
   kit's own seats, run at most **once per lock** (a second roar while the same

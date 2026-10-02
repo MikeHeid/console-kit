@@ -173,6 +173,25 @@ back to 0.8.2, clear the steward** (`agent.py steward --clear`): a 0.8.2
 SessionStart hook reads an entry with a `steward` key as malformed and says
 "not checked" instead of listing the owner's requests.
 
+**Plugin-shipped skills (the release after 0.8.12).** Nothing to migrate.
+The plugin now ships `roar`, `refine`, `drill` and `deliberate`, so
+Refine and Drill no longer need a skill installed by hand. An existing
+project may switch its `.console-kit.json` to the plugin's names, by pull
+request, then restart the server:
+
+    "next_step": {"refine": "console-kit:refine", "drill": "console-kit:drill"}
+
+A project that keeps `{"refine": "refine", "drill": "drill"}` keeps working
+for as long as those user-level skills are installed: the lookup and its
+rules are unchanged (installed user or plugin skills only, never a skill
+inside the repository). Re-running onboarding adds the plugin's names only
+for a kind the config does not already name. Before going back to an older
+kit, switch `next_step` back to user-level skills: an older plugin ships no
+`refine` or `drill`, so once the newer plugin is no longer in Claude's plugin
+cache, `console-kit:refine` resolves to nothing and Refine and Drill refuse,
+naming the skill. While a newer copy is still cached they keep resolving to
+it.
+
 **Going back to an older kit.** A 0.8.0 kit reads a store 0.8.1 wrote, but
 it looks for each visual 0.8.1 stored in its own checkout: it refuses the
 path by name (`not under visuals_dir`), or, if its `visuals_dir` is
