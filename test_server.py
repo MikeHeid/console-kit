@@ -6621,6 +6621,30 @@ class RefactorTests(_Live, unittest.TestCase):
         log = (self.cfg.state / "refactor.jsonl").read_text().splitlines()
         self.assertEqual([json.loads(ln)["type"] for ln in log], ["replaces"])
 
+    def test_a_reused_nonce_with_another_replaces_is_refused_by_name(self):
+        # Review LOW. `replaces` is kept beside the store, so the question record two asks dedupe on does not
+        # carry it. Catches: a retry naming another ruling (or none) taken as the earlier ask and answered with
+        # the earlier link, which tells the agent its new link was made when it was not.
+        self.go_stale()
+        self.assertEqual(self.replacement()[0], 200)
+        for other, said in (("LANE.1/Q1", "LANE.1/Q1"), (None, "no ruling")):
+            with self.subTest(replaces=other):
+                if other:
+                    code, out = self.replacement(replaces=other)
+                else:   # the same ask with `replaces` left out
+                    q = {"qid": "LANE.1/Q3", "item": "LANE.1", "text": "What is the review rule now?",
+                         "kind": "single", "options": [{"id": "a", "label": "One review"}, {"id": "b", "label": "Two"}],
+                         "star": "a", "valid_if": [], "source": "rules.md:3", "nonce": "rxrepl0003"}
+                    code, out = self.agent_post("/question", q)
+                self.assertEqual(code, 409, out)
+                self.assertIn("rxrepl0003", out["error"])
+                self.assertIn(self.QID, out["error"])
+                self.assertIn(said, out["error"])
+        log = (self.cfg.state / "refactor.jsonl").read_text().splitlines()
+        self.assertEqual([(json.loads(ln)["type"], json.loads(ln)["replaces"]) for ln in log],
+                         [("replaces", self.QID)])
+        self.assertEqual(self.replacement()[0], 200)   # the same ask, the same replaces: still a plain retry
+
     def test_a_retry_does_not_link_a_question_the_owner_already_answered(self):
         self.go_stale()
         real = self.console._rx_append

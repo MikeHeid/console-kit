@@ -1224,6 +1224,12 @@ class Console:
                 again = self.store.existing({**body, "type": kind, "by": by})
                 if again is not None:   # a retry of an ask that landed: refused nothing then, refuses nothing now
                     link = RX.replaces_of(self.store, again["qid"])
+                    # `replaces` is not in the record the retry matched on: a different one is a different ask.
+                    if link is not None and replaces != link["replaces"]:
+                        raise RequestError(409, f"nonce {again['nonce']} was already used by {again['qid']}, which "
+                                                f"replaces {link['replaces']}; this ask names "
+                                                f"{replaces if replaces is not None else 'no ruling'} to replace. "
+                                                f"A different ask needs a new nonce")
                     if replaces is not None and link is None:
                         # The ask landed and its link did not (the named 500 below): the retry writes it, while
                         # nobody has answered the question yet. Once answered, the owner answered it unlinked.
