@@ -1362,8 +1362,8 @@ class LiveConsoleTests(unittest.TestCase):
                 page = self.page(kind, 1280, url)
                 self.assertEqual(page.locator(".ck-page-proposed-line").count(), 1)
                 self.assertEqual(page.locator("#staged-mark").count(), 0)   # proposed, not served
-                page.click(".ck-page-preview summary")
-                frame_el = page.wait_for_selector(".ck-page-preview iframe")
+                self.open_page_dialog(page)
+                frame_el = page.wait_for_selector("dialog.ck-page-dialog[open] .ck-page-preview iframe")
                 self.assertEqual(frame_el.get_attribute("sandbox"), "")
                 frame = frame_el.content_frame()
                 frame.wait_for_selector("#staged-mark")   # the preview rendered the staged markup
@@ -1374,10 +1374,11 @@ class LiveConsoleTests(unittest.TestCase):
                                 "the staged page's script reached the console's page")
                 self.assertTrue(page.evaluate("document.body.dataset.pageScript === undefined"))
                 with page.expect_navigation():
-                    page.click(".ck-page-use")
+                    page.click("dialog.ck-page-dialog[open] .ck-page-use")   # the dialog's own button publishes
                 page.wait_for_function("document.body.dataset.pageScript === 'ran'", timeout=10000)
                 self.assertEqual(page.locator("#staged-mark").count(), 1)   # published: served, its script runs
                 self.assertEqual(page.locator(".ck-page-proposed-line").count(), 0)
+                self.assertEqual(page.locator(".ck-page-waiting, dialog.ck-page-dialog").count(), 0)   # nothing left
                 self.assertIn("published by you", page.locator(".ck-page-source").text_content())
 
     def test_a_refused_publish_names_why_and_publishes_nothing(self):
@@ -1390,11 +1391,127 @@ class LiveConsoleTests(unittest.TestCase):
                 page = self.page(kind, 1280, url)
                 newer = page_body(LIVE_HOST.replace("</body>", "<p>NEWER</p></body>"), commit="beef" + "1" * 36)
                 self.console.push_page_snapshot(newer)   # staged after the page loaded
-                page.click(".ck-page-use")
-                err = page.wait_for_selector(".ck-page-use-error:not([hidden])")
+                self.open_page_dialog(page)
+                page.click("dialog.ck-page-dialog[open] .ck-page-use")
+                err = page.wait_for_selector("dialog.ck-page-dialog[open] .ck-page-use-error:not([hidden])")
                 self.assertIn("Not published: the staged page is now beef11111111", err.text_content())
                 self.assert_not_reloaded(page)
                 self.assertFalse((self.cfg.state / "page-snapshot.json").exists())
+
+    # -- the review dialog (owner, 2026-10-02: "can you create a modal rather than place on bottom (button hides
+    # under header)"). A staged page is reviewed in a modal <dialog>, opened only by a button the owner presses.
+
+    # A host page like the real lane board: a sticky header at top: 0, z-index 100, over a page that scrolls.
+    HEADER_HOST = LIVE_HOST.replace(
+        "<body>\n", '<body>\n<header id="host-header" style="position:sticky;top:0;z-index:100;height:72px;'
+        'background:#ddd">Host header</header>\n', 1).replace("</body>", '<div style="height:3000px"></div></body>')
+    CHIP_HIT = """() => { const c = document.querySelector('.ck-page-waiting'), r = c.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = r.top + r.height / 2, at = document.elementFromPoint(x, y);
+      return { visible: r.width > 0 && r.height > 0 && getComputedStyle(c).visibility === 'visible',
+               inView: r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth,
+               hit: c.contains(at), at: at ? at.tagName + '#' + at.id + '.' + at.className : null,
+               tag: c.tagName, scrolled: scrollY }; }"""
+    IN_DIALOG = ("(() => { const d = document.querySelector('dialog.ck-page-dialog');"
+                 " return !!d && d.contains(document.activeElement); })()")
+
+    def open_page_dialog(self, page):
+        page.click(".ck-page-waiting")
+        page.wait_for_selector("dialog.ck-page-dialog[open]")
+
+    def staged_page(self, kind, width, host=LIVE_HOST):
+        """`host` published and served, and a newer page staged over it, waiting for the owner."""
+        from test_server import page_body
+        url = self.serve(page=host)
+        self.console.push_page_snapshot(page_body(host.replace("</body>", "<p>NEWER</p></body>"),
+                                                  commit="beef" + "2" * 36))
+        self.published = (self.cfg.state / "page-snapshot.json").read_bytes()
+        return self.page(kind, width, url)
+
+    def test_a_staged_page_shows_a_waiting_button_no_header_covers_and_it_opens_a_modal(self):
+        # Catches: the proposal left where a sticky header or the page's length hides it (the owner's report), an
+        # indicator that is not a button, one covered at either width or scroll position, and a "dialog" that is
+        # not modal (no focus trap, no Esc, no backdrop) or that leaves focus outside it.
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    page = self.staged_page(kind, width, self.HEADER_HOST)
+                    for top in (0, 1500, 99999):
+                        page.evaluate(f"window.scrollTo({{top: {top}, behavior: 'instant'}})")
+                        page.wait_for_timeout(100)
+                        got = page.evaluate(self.CHIP_HIT)
+                        self.assertEqual(got["tag"], "BUTTON", got)
+                        self.assertTrue(got["visible"] and got["inView"] and got["hit"], got)
+                    self.assertGreater(got["scrolled"], 1000)   # the page really scrolled
+                    chip = page.locator(".ck-page-waiting")
+                    self.assertIn("New dashboard page waiting", chip.text_content())
+                    self.assertEqual(chip.get_attribute("aria-haspopup"), "dialog")
+                    self.open_page_dialog(page)
+                    self.assertEqual(page.locator("dialog[open]").count(), 1)
+                    self.assertTrue(page.evaluate("document.querySelector('dialog.ck-page-dialog').matches(':modal')"))
+                    self.assertTrue(page.evaluate(self.IN_DIALOG))
+                    dlg = page.locator("dialog.ck-page-dialog")
+                    name_id = dlg.get_attribute("aria-labelledby")
+                    self.assertEqual(page.locator(f"#{name_id}").text_content(), "New dashboard page")
+                    self.assertIn("Proposed dashboard:", dlg.locator(".ck-page-proposed-line").text_content())
+                    for b in (".ck-page-use", ".ck-page-not-now"):
+                        self.assertTrue(dlg.locator(b).is_visible(), b)
+                    self.assertEqual(dlg.locator("iframe").get_attribute("sandbox"), "")
+                    self.assertFalse(page.evaluate(OVERFLOW))
+                    self.assert_not_reloaded(page)
+
+    def test_esc_and_not_now_close_the_dialog_publish_nothing_and_return_focus(self):
+        # Catches: closing the dialog publishing (or reloading), focus dropped on <body> after close, and an Esc
+        # that also closes the inbox behind it.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                page = self.staged_page(kind, 1280)
+                for close in ("Escape", "Not now"):
+                    self.open_page_dialog(page)
+                    if close == "Escape":
+                        page.keyboard.press("Escape")
+                    else:
+                        page.click("dialog.ck-page-dialog[open] .ck-page-not-now")
+                    page.wait_for_function("!document.querySelector('dialog.ck-page-dialog').open")
+                    self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-page-waiting')"),
+                                    close)
+                    self.assertEqual((self.cfg.state / "page-snapshot.json").read_bytes(), self.published,
+                                     close)   # nothing published
+                    self.assertTrue((self.cfg.state / "page-staged.json").exists(), close)      # still offered
+                    self.assert_not_reloaded(page)
+                self.open_inbox(page, 1280)
+                self.open_page_dialog(page)
+                page.keyboard.press("Escape")
+                page.wait_for_function("!document.querySelector('dialog.ck-page-dialog').open")
+                self.assertEqual(page.locator(".ck-panel").get_attribute("data-open"), "true")   # inbox untouched
+
+    def test_the_review_dialog_never_opens_on_load(self):
+        # Catches: a modal that steals focus the moment the page loads.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                page = self.staged_page(kind, 1280)
+                page.wait_for_timeout(500)
+                self.assertEqual(page.locator("dialog.ck-page-dialog").count(), 1)
+                self.assertEqual(page.locator("dialog[open]").count(), 0)
+                self.assertFalse(page.evaluate(self.IN_DIALOG))
+                self.assertFalse(page.locator(".ck-page-proposed-line").is_visible())   # held until asked for
+                self.assertTrue(page.locator(".ck-page-waiting").is_visible())
+
+    def test_without_the_console_script_the_proposal_is_still_shown(self):
+        # Catches: a proposal reachable only through JavaScript (a closed <dialog> is display: none).
+        browser = getattr(self.pw, BROWSERS[0]).launch()
+        self.addCleanup(browser.close)
+        url = self.serve(publish=False)
+        ctx = browser.new_context(viewport={"width": 1280, "height": 900}, java_script_enabled=False)
+        page = ctx.new_page()
+        page.route("**/*", lambda route: route.continue_(
+            headers={**route.request.headers, "cf-access-jwt-assertion": self.tok}))
+        page.goto(url)
+        self.assertTrue(page.locator(".ck-page-proposed-line").is_visible())
+        self.assertTrue(page.locator(".ck-page-use").is_visible())
+        self.assertTrue(page.locator(".ck-page-preview iframe").is_visible())
+        self.assertEqual(page.locator("dialog[open]").count(), 0)
+        self.assertFalse(page.locator(".ck-page-waiting").is_visible())   # it would do nothing without the script
+        self.assertFalse(page.locator(".ck-page-not-now").is_visible())
 
     def test_a_new_question_appears_without_reload_and_the_chip_counts_it(self):
         # Catches: a page that only refreshes on open or on Refresh (the owner sees nothing
@@ -1914,9 +2031,21 @@ class LiveConsoleTests(unittest.TestCase):
                 page, bar, text = self._stale_page(kind, staged=True)
                 self.assertIn('"Use this page"', text)
                 self.assertNotIn("page-snapshot", text)
-                bar.locator("button").click()
-                self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-page-use')"))
-                self.assert_not_reloaded(page)   # showing the proposal publishes nothing
+                for sel in (".ck-board-stale span", ".ck-page-waiting"):   # stacked, neither covers the other
+                    self.assertTrue(page.evaluate(
+                        f"(() => {{ const e = document.querySelector('{sel}'), r = e.getBoundingClientRect();"
+                        f" return e.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2));"
+                        f" }})()"), sel)
+                review = bar.locator("button")
+                self.assertEqual(review.text_content(), "Review the new page")
+                review.click()
+                page.wait_for_selector("dialog.ck-page-dialog[open]")   # the same review dialog the chip opens
+                self.assertTrue(page.evaluate("document.querySelector('dialog.ck-page-dialog').matches(':modal')"))
+                self.assertTrue(page.evaluate(LiveConsoleTests.IN_DIALOG))
+                page.keyboard.press("Escape")
+                page.wait_for_function("!document.querySelector('dialog.ck-page-dialog').open")
+                self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-board-show-proposal')"))
+                self.assert_not_reloaded(page)   # reviewing the proposal publishes nothing
 
 
 # -- 0.8.0: the Next step menu, tag chips, roar, and visuals, against the REAL server ------

@@ -6225,6 +6225,15 @@ class PageStagePublishTests(_Live, unittest.TestCase):
         self.assertIn(f'<button type="button" class="ck-page-use" data-commit="{self.C1}">Use this page</button>',
                       html)
         self.assertIn(PREVIEW_IFRAME, html)
+        # Owner, 2026-10-02: reviewed in a modal dialog, never opened by the server (nothing opens on load); the
+        # waiting button is hidden until console.js can open the dialog, which shows inline until then.
+        import re
+        self.assertEqual(re.findall(r"<dialog\b[^>]*>", html[:html.index(P.BEGIN)]),   # console.js has its own
+                         ['<dialog class="ck-page-dialog" aria-labelledby="ck-page-dialog-title" tabindex="-1">'])
+        self.assertIn('<h2 class="ck-page-dialog-title" id="ck-page-dialog-title">New dashboard page</h2>', html)
+        self.assertIn(f'<button type="button" class="ck-page-waiting" aria-haspopup="dialog" hidden>{PS.WAITING}'
+                      '</button>', html)
+        self.assertIn('<button type="button" class="ck-page-not-now">Not now</button>', html)
         self.stage(commit=self.C2, ref="feature/x", reviewed=False)   # a second staging replaces the proposal
         html = self.page()
         self.assertIn(f"Proposed dashboard: feature/x @ {self.C2[:12]} · {size} bytes · unreviewed", html)
