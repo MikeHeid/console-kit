@@ -3229,9 +3229,10 @@
     for (const m of text.matchAll(PR_ID_TOKEN)) {
       const tok = m[0].replace(/[._\-]+$/, '');
       let item = null;
-      if (view && view.questions && view.questions[tok]) item = (view.questions[tok].question || {}).item || tok.split('/Q')[0];
-      else if (!tok.includes('/') && items && items[tok]) item = tok;
-      if (item && items && items[item] && !found.some(f => f.id === tok)) found.push({ id: tok, item: item });
+      // Own keys only: a title word like "constructor" must not match Object.prototype.
+      if (view && view.questions && Object.hasOwn(view.questions, tok)) item = (view.questions[tok].question || {}).item || tok.split('/Q')[0];
+      else if (!tok.includes('/') && items && Object.hasOwn(items, tok)) item = tok;
+      if (item && items && Object.hasOwn(items, item) && !found.some(f => f.id === tok)) found.push({ id: tok, item: item });
       if (found.length >= PR_MAX_LINKS) break;
     }
     return found;

@@ -1296,8 +1296,8 @@ class LiveConsoleTests(unittest.TestCase):
                                 "checks": "success"}, **o}
         push = {"repo": "octo/repo", "window_days": 30, "prs": [
             pr(4, title=hostile, head="<b>x</b>", draft=True, checks="failure"),
-            pr(3, state="merged", merged_at="2026-09-29T08:00:00Z", closed_at="2026-09-29T08:00:00Z",
-               merge_commit="a" * 40)]}
+            pr(3, title="constructor toString __proto__ hasOwnProperty", head="valueOf", state="merged",
+               merged_at="2026-09-29T08:00:00Z", closed_at="2026-09-29T08:00:00Z", merge_commit="a" * 40)]}
         for kind in BROWSERS:
             for width in (1280, 375):
                 with self.subTest(browser=kind, width=width):
@@ -1326,6 +1326,8 @@ class LiveConsoleTests(unittest.TestCase):
                     self.assertIn("draft", first.text_content())
                     self.assertIn("checks fail", first.text_content())
                     self.assertIn("merged", page.locator(".ck-pr-row[data-number='3']").text_content())
+                    # Object.prototype names are not items: no Open button for them.
+                    self.assertEqual(page.locator(".ck-pr-row[data-number='3'] button").count(), 0)
                     self.assertIn("by the steward (agent-5)", page.locator(".ck-prs-pushed").text_content())
                     self.assertFalse(page.evaluate(OVERFLOW))
                     first.locator("button", has_text="Open LANE.1/Q1").click()

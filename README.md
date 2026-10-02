@@ -116,7 +116,7 @@ server cannot check it.
   only one that processes your requests and folds your answers. The others
   post their questions to your inbox instead of asking you directly.
 - The **PRs** tab lists the project's open pull requests, then those
-  merged or closed in the last 30 days, with checks, draft and merged
+  merged or closed in the last 30 days (`--days` changes it), with checks, draft and merged
   badges, a link to each on GitHub, and an **Open** button for any item or
   question a title or branch names. The steward pushes the list
   (`agent.py prs-push`), and the tab says when it last did.
