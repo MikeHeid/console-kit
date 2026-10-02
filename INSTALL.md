@@ -161,7 +161,7 @@ beside it, in `<state>/names.jsonl`, and a 0.8.1 kit shows every agent as
 "agent" (`kit/docs/DEPLOY.md`, "Rollback").
 
 **Upgrading to 0.8.3.** Nothing to migrate, and nothing changes until you
-name a steward: `agent.py --state <state> steward agent-5` (README, "One
+name a steward: `agent.py --state <state> steward agent-5` (CHANGELOG, "One
 steward, many sessions"). Then only the session started with
 `CONSOLE_KIT_AGENT=agent-5` may `watch`, `synced` or fold, and the plugin's
 new PreToolUse hook blocks `AskUserQuestion` in every other session of that
