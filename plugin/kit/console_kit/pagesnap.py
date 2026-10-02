@@ -104,33 +104,42 @@ def load(state: Path) -> tuple[dict | None, str | None]:
     """(the stored snapshot, None), or (None, the note to show instead). Never raises for the file itself.
 
     Absent: the "no snapshot yet" note. Anything else that cannot be served
-    (not a plain file, too large, not JSON, failing the check) is logged with
-    its reason and shows the "cannot be read" note: the console still works.
+    (not a plain file, not readable, too large, not JSON, failing the check)
+    is logged with its reason and shows the "cannot be read" note: the console
+    still works.
     """
     sfd = os.open(state, STATE_FLAGS)
     try:
-        raw = AF.read_at(sfd, SNAPSHOT, MAX_FILE)
-        if raw is None:
-            try:
-                os.stat(SNAPSHOT, dir_fd=sfd, follow_symlinks=False)
-            except FileNotFoundError:
-                return None, NO_SNAPSHOT
-            why = "not a plain file"
-        elif len(raw) > MAX_FILE:
-            why = f"over {MAX_FILE} bytes"
-        else:
-            try:
-                doc = json.loads(raw.decode("utf-8"))
-            except (ValueError, RecursionError) as e:   # UnicodeDecodeError, JSONDecodeError, deep nesting
-                doc, why = None, f"not JSON: {e}"
-            else:
-                why = snapshot_problem(doc)
-            if why is None:
-                return doc, None
+        doc, why = _read(sfd)
     finally:
         os.close(sfd)
+    if why is None:
+        return doc, None
+    if why is NO_SNAPSHOT:
+        return None, NO_SNAPSHOT
     sys.stderr.write(f"console page: {Path(state, SNAPSHOT)} is {why}\n")
     return None, UNREADABLE
+
+
+def _read(sfd: int) -> tuple[dict | None, str | None]:
+    """(the checked snapshot, None), (None, NO_SNAPSHOT) when absent, or (None, why it cannot be served)."""
+    try:
+        raw = AF.read_at(sfd, SNAPSHOT, MAX_FILE)
+        if raw is None:
+            os.stat(SNAPSHOT, dir_fd=sfd, follow_symlinks=False)   # FileNotFoundError: there is none yet
+            return None, "not a plain file"
+    except FileNotFoundError:
+        return None, NO_SNAPSHOT
+    except OSError as e:   # EACCES, EIO...: as unreadable as a bad file, never an error out of the page
+        return None, f"not readable: {e.strerror or type(e).__name__}"
+    if len(raw) > MAX_FILE:
+        return None, f"over {MAX_FILE} bytes"
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError) as e:   # UnicodeDecodeError, JSONDecodeError, deep nesting
+        return None, f"not JSON: {e}"
+    why = snapshot_problem(doc)
+    return (None, why) if why else (doc, None)
 
 
 def source_line(doc: dict) -> str:

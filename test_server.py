@@ -5887,10 +5887,14 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
         planted = json.dumps(page_body(SENTINEL_PAGE))   # a VALID snapshot: only a followed link would serve it
         outside.write_text(planted)
         snap = self.scfg.state / PS.SNAPSHOT
-        for kind in ("link", "fifo", "dir", "unchecked"):
+        kinds = ("link", "fifo", "dir", "unchecked") + (("no access",) if os.geteuid() != 0 else ())
+        for kind in kinds:
             with self.subTest(kind=kind):
                 if kind == "link":
                     snap.symlink_to(outside)
+                elif kind == "no access":   # EACCES out of read_at: the note, never an error out of page()
+                    snap.write_text(planted)
+                    os.chmod(snap, 0)
                 elif kind == "unchecked":   # a plain file written past the route: re-checked when it is read
                     snap.write_text(json.dumps(page_body(SENTINEL_PAGE, ref="<script>")))
                 elif kind == "fifo":
