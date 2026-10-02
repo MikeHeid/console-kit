@@ -6621,6 +6621,30 @@ class RefactorTests(_Live, unittest.TestCase):
         log = (self.cfg.state / "refactor.jsonl").read_text().splitlines()
         self.assertEqual([json.loads(ln)["type"] for ln in log], ["replaces"])
 
+    def test_a_reused_nonce_with_another_replaces_is_refused_by_name(self):
+        # Review LOW. `replaces` is kept beside the store, so the question record two asks dedupe on does not
+        # carry it. Catches: a retry naming another ruling (or none) taken as the earlier ask and answered with
+        # the earlier link, which tells the agent its new link was made when it was not.
+        self.go_stale()
+        self.assertEqual(self.replacement()[0], 200)
+        for other, said in (("LANE.1/Q1", "LANE.1/Q1"), (None, "no ruling")):
+            with self.subTest(replaces=other):
+                if other:
+                    code, out = self.replacement(replaces=other)
+                else:   # the same ask with `replaces` left out
+                    q = {"qid": "LANE.1/Q3", "item": "LANE.1", "text": "What is the review rule now?",
+                         "kind": "single", "options": [{"id": "a", "label": "One review"}, {"id": "b", "label": "Two"}],
+                         "star": "a", "valid_if": [], "source": "rules.md:3", "nonce": "rxrepl0003"}
+                    code, out = self.agent_post("/question", q)
+                self.assertEqual(code, 409, out)
+                self.assertIn("rxrepl0003", out["error"])
+                self.assertIn(self.QID, out["error"])
+                self.assertIn(said, out["error"])
+        log = (self.cfg.state / "refactor.jsonl").read_text().splitlines()
+        self.assertEqual([(json.loads(ln)["type"], json.loads(ln)["replaces"]) for ln in log],
+                         [("replaces", self.QID)])
+        self.assertEqual(self.replacement()[0], 200)   # the same ask, the same replaces: still a plain retry
+
     def test_a_retry_does_not_link_a_question_the_owner_already_answered(self):
         self.go_stale()
         real = self.console._rx_append
@@ -6937,6 +6961,33 @@ class RefactorTests(_Live, unittest.TestCase):
         code, owner = self.req("GET", "/api/view", tok=token())                # the owner's page keeps it whole
         self.assertEqual(owner["view"]["questions"]["LANE.1/Q41"]["refactor"]["proposal"]["anchors"][0]["text"],
                          (self.cfg.root / "max.md").read_text().splitlines()[4])
+
+    def test_every_read_the_slim_pointer_names_prints_what_it_left_out(self):
+        # kit-lows review MEDIUM. Catches: a pointer naming a read that does not print the text (the markdown
+        # `answers --item` says only that a proposal waits), for a proposal and for a confirmed basis alike.
+        import re
+        import subprocess
+
+        def cli(*args):
+            r = subprocess.run([sys.executable, AGENT_PY, "--state", str(self.cfg.state), *args],
+                               capture_output=True, text=True, timeout=60, env=GIT_ENV)
+            self.assertEqual(r.returncode, 0, (args, r.stderr))
+            return r.stdout
+
+        def pointed_reads(key):
+            text = json.loads(cli("view"))["view"]["questions"][self.QID]["refactor"][key]["text"]
+            reads = re.findall(r"`([^`]+)`", text)
+            self.assertGreaterEqual(len(reads), 1, text)
+            return reads
+        self.go_stale(extra="RULE-BETA: a release ships after one review.\n")
+        code, out = self.propose(basis="BASIS-MARKER-P: RULE-BETA carries the ruling now")
+        self.assertEqual(code, 200, out)
+        for read in pointed_reads("proposal"):
+            self.assertIn("BASIS-MARKER-P", cli(*read.split()), read)
+        code, out = self.act({"action": "confirm", "qid": self.QID, "proposal": out["record"]["id"]})
+        self.assertEqual(code, 200, out)
+        for read in pointed_reads("confirmed"):
+            self.assertIn("BASIS-MARKER-P", cli(*read.split()), read)
 
     def test_six_stale_answers_with_proposals_stay_under_the_slim_read_cap(self):
         # agent-5: `view` / `todo` / `answers` merge refactor state, so they must stay under 64 KiB with the live

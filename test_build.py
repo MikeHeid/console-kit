@@ -142,6 +142,25 @@ class NeutralTests(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
 
 
+class UnitTemplateTests(unittest.TestCase):
+    """The rendered unit passes the server only flags it defines, and not `--page` (Q28) or `--adapter` (Q24): never read."""
+
+    KIT = B.ROOT / "plugin" / "kit"
+
+    def test_the_unit_passes_only_flags_the_server_defines_and_not_the_page(self):
+        # Catches: a dead `--page` left in the template (every start then logs "--page ... is not read"), and a
+        # flag removed from the server's parser but still in the template, which would stop the unit starting.
+        unit = (self.KIT / "deploy" / "console.service.in").read_text()
+        start = unit.split("ExecStart=", 1)[1].split("\nRestart", 1)[0]
+        flags = re.findall(r"(?<!\S)(--[a-z][a-z-]*)", start)
+        self.assertIn("--root", flags)   # the parse found the ExecStart at all
+        self.assertNotIn("--page", flags)
+        self.assertNotIn("--adapter", flags)   # IGNORED since Q24: the steward pushes items, nothing runs it
+        parser = (self.KIT / "console_kit" / "server.py").read_text()
+        for f in flags:
+            self.assertIn(f'ap.add_argument("{f}"', parser, f)
+
+
 @unittest.skipUnless(shutil.which("claude"), "`claude` is not on PATH")
 class ValidateTests(Base):
     def test_claude_validates_the_marketplace_and_the_plugin_strictly(self):

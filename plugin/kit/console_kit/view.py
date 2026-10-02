@@ -336,16 +336,23 @@ def slim_refactor(view: dict) -> dict:
         if not rx or not ("proposal" in rx or "confirmed" in rx):
             qs[qid] = q
             continue
-        where = f"left out of this read; `view --item {q['question']['item']}` has it (--full past 64 KiB)"
+        it = q["question"]["item"]
+
+        def where(what: str) -> str:
+            # Every read named here is run by test_server's pointer test: the markdown `answers --item` does
+            # not print the text (refactor_lines says only that a proposal waits), so it is named with --json.
+            return (f"{what} left out of this read (digest is its sha256). `view --item {it}` or "
+                    f"`answers --item {it} --json` prints it; add --full if that read is over 64 KiB")
         rx = dict(rx)
         if "proposal" in rx:
             p = rx["proposal"]
             rx["proposal"] = {**{k: p[k] for k in SLIM_PROPOSAL if k in p},
-                              "digest": _digest(p, ("base", "anchors", "basis")), "text": where}
+                              "digest": _digest(p, ("base", "anchors", "basis")),
+                              "text": where("The proposal's base, anchors and basis are")}
         if "confirmed" in rx:
             c = rx["confirmed"]
             rx["confirmed"] = {**{k: v for k, v in c.items() if k != "basis"},
-                               "digest": _digest(c, ("basis",)), "text": where}
+                               "digest": _digest(c, ("basis",)), "text": where("The confirmed basis is")}
         qs[qid] = {**q, "refactor": rx}
     return {**view, "questions": qs}
 
