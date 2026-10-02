@@ -143,7 +143,7 @@ class NeutralTests(unittest.TestCase):
 
 
 class UnitTemplateTests(unittest.TestCase):
-    """The rendered unit passes the server only flags it defines, and not `--page`, which it never reads (Q28)."""
+    """The rendered unit passes the server only flags it defines, and not `--page` (Q28) or `--adapter` (Q24): never read."""
 
     KIT = B.ROOT / "plugin" / "kit"
 
@@ -155,6 +155,7 @@ class UnitTemplateTests(unittest.TestCase):
         flags = re.findall(r"(?<!\S)(--[a-z][a-z-]*)", start)
         self.assertIn("--root", flags)   # the parse found the ExecStart at all
         self.assertNotIn("--page", flags)
+        self.assertNotIn("--adapter", flags)   # IGNORED since Q24: the steward pushes items, nothing runs it
         parser = (self.KIT / "console_kit" / "server.py").read_text()
         for f in flags:
             self.assertIn(f'ap.add_argument("{f}"', parser, f)

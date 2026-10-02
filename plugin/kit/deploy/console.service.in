@@ -12,7 +12,6 @@ WorkingDirectory=@PROJECT@
 ExecStart=@PYTHON@ @KIT@/server.py \
   --root @PROJECT@ \
   --state %h/.local/state/console-kit/@NAME@ \
-  --adapter @PROJECT@/${CONSOLE_ADAPTER} \
   --team-domain ${CONSOLE_TEAM_DOMAIN} \
   --aud ${CONSOLE_AUD} \
   --hostname ${CONSOLE_HOSTNAME} \
