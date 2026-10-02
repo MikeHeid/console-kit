@@ -17,6 +17,9 @@ from unittest import mock
 
 import build_zip as B
 
+# Skills the console's rounds lean on, shipped in the plugin so a fresh install has them.
+SHIPPED_SKILLS = ("roar", "refine", "drill", "deliberate")
+
 
 class Base(unittest.TestCase):
     def setUp(self):
@@ -40,6 +43,7 @@ class LayoutTests(Base):
                      "console-kit/plugins/console-kit/hooks/session_start.py",
                      "console-kit/plugins/console-kit/skills/console-onboard/SKILL.md",
                      "console-kit/plugins/console-kit/skills/console-process/SKILL.md",
+                     *(f"console-kit/plugins/console-kit/skills/{s}/SKILL.md" for s in SHIPPED_SKILLS),
                      "console-kit/plugins/console-kit/agents/security.md",
                      "console-kit/plugins/console-kit/kit/onboard.py",
                      "console-kit/plugins/console-kit/kit/agent.py",
@@ -184,6 +188,50 @@ class InstalledPluginTests(Base):
         with zipfile.ZipFile(out) as z:
             z.extractall(self.tmp / "unzipped")
         self.assert_complete(self.install(self.tmp / "unzipped/console-kit", "console-kit@console-kit-local"))
+
+    def test_the_default_next_step_skills_resolve_from_the_installed_plugin_and_never_the_repository(self):
+        # Catches: a fresh install where Refine and Drill are refused because the skills the
+        # onboarding default names were never shipped; a resolver that finds `console-kit:refine`
+        # anywhere but the installed plugin; and one that lets a repository's own
+        # .claude/skills/refine stand in, under either name, for what the user installed.
+        import sys
+        sys.path.insert(0, str(B.ROOT / "plugin/kit"))
+        from console_kit import projectcfg as PC
+        import onboard as O
+        skill_dir = self.install(B.ROOT, "console-kit@console-kit")
+        cfg = self.tmp / "cfg-console-kit"
+        installed = (skill_dir / "..").resolve()
+        for name in SHIPPED_SKILLS:
+            with self.subTest(skill=name):
+                text = (installed / name / "SKILL.md").read_text(encoding="utf-8")
+                self.assertTrue(text.startswith(f"---\nname: {name}\n"), name)
+        proj = self.tmp / "proj"
+        (proj / ".claude/skills/refine").mkdir(parents=True)
+        (proj / ".claude/skills/refine/SKILL.md").write_text("repo-supplied: do something else\n")
+        (proj / ".console-kit.json").write_text(json.dumps({"next_step": O.DEFAULT_NEXT_STEP}))
+        self.assertEqual(PC.load(proj).next_step, {"refine": "console-kit:refine", "drill": "console-kit:drill"})
+        for kind, name in O.DEFAULT_NEXT_STEP.items():
+            with self.subTest(kind=kind):
+                got = PC.resolve_skill(name, proj, cfg)
+                self.assertEqual(got, (installed / kind / "SKILL.md").resolve())
+                self.assertNotIn(proj.resolve(), got.parents)
+        # The plain name the repository's own folder carries is still not an installed user skill.
+        with self.assertRaisesRegex(PC.ConfigError, "not an installed user skill"):
+            PC.resolve_skill("refine", proj, cfg)
+        # And the CLI a fork session runs says the same, with the real install.
+        env = {**os.environ, "CLAUDE_CONFIG_DIR": str(cfg)}
+        agent = [sys.executable, str(B.ROOT / "plugin/kit/agent.py"), "--state", str(self.tmp / "st"), "next-step"]
+        ok = subprocess.run([*agent, "refine", "--project", str(proj)], capture_output=True, text=True, env=env,
+                            timeout=60)
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertEqual(json.loads(ok.stdout)["skill_md"], str((installed / "refine/SKILL.md").resolve()))
+        self.assertNotIn("repo-supplied", ok.stdout + ok.stderr)
+        (proj / ".console-kit.json").write_text(json.dumps({"next_step": {"refine": "refine"}}))
+        bad = subprocess.run([*agent, "refine", "--project", str(proj)], capture_output=True, text=True, env=env,
+                             timeout=60)
+        self.assertEqual(bad.returncode, 1, bad.stdout + bad.stderr)
+        self.assertIn("not an installed user skill", bad.stderr)
+        self.assertNotIn("repo-supplied", bad.stdout + bad.stderr)
 
 
 if __name__ == "__main__":

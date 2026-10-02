@@ -134,6 +134,22 @@ class WriteTests(Base):
                                        "ledger": ".console-kit/folded.txt", "adapter": ".console-kit/adapter.py"})
         self.assertEqual(cfg["audit"], {"seat": "determinism", "brief": "check replay"})
 
+    def test_next_step_defaults_to_the_plugins_own_skills_and_never_replaces_one(self):
+        # Catches: onboarding that leaves Refine and Drill refused on a fresh install (no next_step),
+        # one that overwrites a project's own choice of skill, and a default the server would refuse.
+        from console_kit import projectcfg as PC
+        self.write()
+        cfg = json.loads((self.project / ".console-kit.json").read_text())
+        self.assertEqual(cfg["next_step"], {"refine": "console-kit:refine", "drill": "console-kit:drill"})
+        self.assertEqual(PC.load(self.project).next_step, cfg["next_step"])
+        (self.project / ".console-kit.json").write_text(json.dumps({"next_step": {"refine": "refine"}}))
+        self.write()
+        cfg = json.loads((self.project / ".console-kit.json").read_text())
+        self.assertEqual(cfg["next_step"], {"refine": "refine", "drill": "console-kit:drill"})
+        (self.project / ".console-kit.json").write_text(json.dumps({"next_step": ["refine"]}))
+        with self.assertRaisesRegex(O.OnboardError, "next_step"):
+            self.write()
+
     def test_a_broken_config_is_refused_before_anything_is_written(self):
         (self.project / ".console-kit.json").write_text("{not json")
         with self.assertRaisesRegex(O.OnboardError, "is not valid JSON"):

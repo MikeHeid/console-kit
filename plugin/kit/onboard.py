@@ -9,7 +9,8 @@ non-secret config, and print the commands the OWNER runs.
 `write` creates, inside the project:
 
     .console-kit/console.env     the server's settings (none of them a secret)
-    .console-kit.json            fold paths, the adapter, the audit seat (merged, never clobbered)
+    .console-kit.json            fold paths, the adapter, the audit seat, the next-step skills
+                                 (merged, never clobbered)
     .console-kit/adapter.py      a starter adapter, only when the project has none
     .console-kit/page.html       a starter page, only when the project has none
 
@@ -45,6 +46,9 @@ HOST = re.compile(rf"^(?:{LABEL}\.)+[a-z]{{2,63}}\Z")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 REL = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_./-]{0,200}\Z")
 MARK = "# written by console-kit onboard.py"
+# The skills the plugin ships for the two next-step forks (resolved as an installed plugin's
+# `<plugin>:<name>`, never from the repository: console_kit/projectcfg.py `resolve_skill`).
+DEFAULT_NEXT_STEP = {"refine": "console-kit:refine", "drill": "console-kit:drill"}
 
 
 class OnboardError(ValueError):
@@ -163,6 +167,13 @@ def config_json(project: Path, a: dict) -> str:
     fold.setdefault("locked", ".console-kit/locked")
     fold.setdefault("ledger", ".console-kit/folded.txt")
     fold["adapter"] = a["adapter"]
+    # Refine and drill run a skill the plugin itself ships, so a fresh install has them. A kind
+    # already named is kept as it is: a project that installed its own skill keeps using it.
+    steps = cfg.setdefault("next_step", {})
+    if not isinstance(steps, dict):
+        raise OnboardError(f"{path}: \"next_step\" must be an object")
+    for kind, skill in DEFAULT_NEXT_STEP.items():
+        steps.setdefault(kind, skill)
     if a.get("audit_seat"):
         cfg["audit"] = {"seat": a["audit_seat"], "brief": a.get("audit_brief") or ""}
     return json.dumps(cfg, indent=2) + "\n"

@@ -447,3 +447,16 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   file changed is refused. A test moves the sidecar aside and the answer reads
   stale. A test shows fold refuses an adapter without `RECORDS_OUTCOMES`.
 
+## Skills the plugin ships (unreleased)
+
+The plugin carries the skills the console's rounds lean on, so a fresh
+install needs nothing else: **`roar`** (a three-seat panel on the plugin's
+own `console-kit:architect`, `console-kit:ux` and `console-kit:other` sitting
+as advisor), **`refine`**, **`drill`** and **`deliberate`**. Run them as
+`/console-kit:roar` and so on. Onboarding now writes `next_step` as
+`{"refine": "console-kit:refine", "drill": "console-kit:drill"}` when a
+project names none; a project's own entry is kept. Inside a console round
+none of them writes into the project before the owner locks. The lookup's
+trust rules are unchanged: installed user or plugin skills only, never a
+skill inside the repository.
+

@@ -3299,6 +3299,15 @@ class ProjectConfigTests(Tmp):
         plug.mkdir(parents=True)
         (plug / "SKILL.md").write_text("the plugin's dig\n")
         self.assertEqual(PC.resolve_skill("tool:dig", proj, user), (plug / "SKILL.md").resolve())
+        # The onboarding default names the plugin's own skill; the repository's same-named folder
+        # still never stands in for it, and the user's plain `refine` is still what `refine` means.
+        ours = user / "plugins/cache/console-kit/console-kit/0.0.0/skills/refine"
+        ours.mkdir(parents=True)
+        (ours / "SKILL.md").write_text("the plugin's refine\n")
+        self.assertEqual(PC.resolve_skill("console-kit:refine", proj, user), (ours / "SKILL.md").resolve())
+        self.assertEqual(PC.resolve_skill("refine", proj, user), (user / "skills/refine/SKILL.md").resolve())
+        with self.assertRaisesRegex(PC.ConfigError, "not an installed user skill"):
+            PC.resolve_skill("console-kit:drill", proj, user)
         (user / "skills/sneaky").symlink_to(proj / ".claude/skills/refine")
         with self.assertRaisesRegex(PC.ConfigError, "resolves into the project"):
             PC.resolve_skill("sneaky", proj, user)
