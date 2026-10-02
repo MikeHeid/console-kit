@@ -1225,6 +1225,9 @@ class Console:
                 if again is not None:   # a retry of an ask that landed: refused nothing then, refuses nothing now
                     link = RX.replaces_of(self.store, again["qid"])
                     # `replaces` is not in the record the retry matched on: a different one is a different ask.
+                    # Only a written link can be compared. When the first ask's link write failed (link is
+                    # None), nothing kept the `replaces` it named, so a retry naming another ruling, or none,
+                    # cannot be told from the true retry: the one below writes the link this retry names.
                     if link is not None and replaces != link["replaces"]:
                         raise RequestError(409, f"nonce {again['nonce']} was already used by {again['qid']}, which "
                                                 f"replaces {link['replaces']}; this ask names "
