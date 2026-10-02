@@ -65,6 +65,11 @@ From its message read:
   answer) or `follow_up_of` (one round's answers): the owner picked that from
   "Next step ▾". It names no seats. Section 8 replaces steps 3 to 5.
 
+A **scan for a resolve** (`todo.scans`, CONSOLE-kit/Q40) is not a fork: it
+names stale rulings, runs no seats, and is answered per ruling with a
+proposed anchor, a replacement question or `A advise`. The console-process
+skill's step 4b covers it.
+
 ## 2. Build the bundle
 
     A fork-context FORK_ID > <scratch>/bundle.md

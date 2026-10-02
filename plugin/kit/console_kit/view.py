@@ -146,6 +146,13 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
         if state == "stale":   # the lock an owner act names, so one taken on a page that is out of date is refused
             questions[r["qid"]]["lock"] = RX.current_lock(store, r["qid"])["id"]
 
+    # CONSOLE-kit/Q40, Q41: the owner's scans for a resolve, each with where every ruling it names stands. The
+    # done-rule is refactor.scan_status's, from records alone, so the page, `view` and `todo` agree with the server.
+    scans = {}
+    for sc in RX.scans(store):
+        st = RX.scan_status(store, sc)
+        scans[sc["id"]] = {**{k: sc[k] for k in ("id", "seq", "ts", "by", "qids", "locks")}, **st}
+
     threads: dict[str, list[dict]] = {}
     forks: dict[str, dict] = {}
     transcripts: dict[str, dict] = {}
@@ -212,6 +219,7 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
         "questions": questions,
         "threads": threads,
         "forks": forks,
+        "scans": scans,
         "inbox": [q["question"]["qid"] for q in inbox],
         "awaiting_agent": sorted(waiting_agent),
         "orphaned": orphaned,
@@ -293,6 +301,8 @@ def todo(view: dict) -> dict:
     awaiting_agent  the items whose thread waits on the agent
     chat            whether the chat waits, and the owner message to reply to
     visuals         the visual requests nothing answers yet (id, item)
+    scans           every scan for a resolve that is not done, oldest first: its id, when, and the rulings
+                    still waiting on the steward (CONSOLE-kit/Q40); an older server's view has none
     inbox           the qids in the owner's inbox
     seq             the store seq the view was built at
     """
@@ -305,6 +315,8 @@ def todo(view: dict) -> dict:
         "chat": {"awaiting_agent": chat["awaiting_agent"],
                  "reply_to": owner_chat[-1]["id"] if chat["awaiting_agent"] and owner_chat else None},
         "visuals": [dict(w) for w in _waiting(view)],
+        "scans": [{"id": sc["id"], "ts": sc["ts"], "waiting": [q for q, v in sc["rulings"].items() if not v]}
+                  for sc in sorted(view.get("scans", {}).values(), key=lambda sc: sc["seq"]) if not sc["done"]],
         "inbox": list(view["inbox"]),
         "seq": view["seq"],
     }

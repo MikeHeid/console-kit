@@ -808,6 +808,8 @@
       for (const q of loose) if (!inCluster.has(q.question.qid)) list.appendChild(looseRow(q));
       body.appendChild(list);
     }
+    const scanAll = renderScanAll();
+    if (scanAll) body.appendChild(scanAll);
 
     // Items awaiting agent
     if (view.awaiting_agent && view.awaiting_agent.length > 0) {
@@ -1305,11 +1307,13 @@
       kpBtn.setAttribute('aria-label', 'Keep this ruling and stop checking it: ' + truncateText(qData.text, 40));
       tools.appendChild(wdBtn);
       tools.appendChild(kpBtn);
+      tools.appendChild(scanControl(q));
       banner.appendChild(tools);
       banner.appendChild(whySlot);
       banner.appendChild(reSlot);
       banner.appendChild(wdSlot);
       banner.appendChild(kpSlot);
+      if (q.refactor && q.refactor.advice) banner.appendChild(renderAdvice(q));
       if (q.refactor && q.refactor.proposal) banner.appendChild(renderProposal(q));
       bodyEl.appendChild(banner);
     }
@@ -1902,6 +1906,90 @@
     if (!lines.length) return null;
     const box = el('div', { className: 'ck-refactor-note', role: 'note' });
     for (const l of lines) box.appendChild(el('p', {}, [l]));
+    return box;
+  }
+
+  // CONSOLE-kit/Q40, Q41: "Scan for a resolve" asks the steward to work out what became of stale rulings. It is
+  // a request, never a ruling: the steward answers with a proposed anchor, a replacement question or a star
+  // recommendation, and nothing changes until the owner presses Confirm, Withdraw or Keep. One scan at a time:
+  // while one is open the buttons say so (the server refuses a second one by name in any case).
+  function openScan() {
+    const open = Object.values(view.scans || {}).filter(sc => !sc.done);
+    open.sort((a, b) => a.seq - b.seq);
+    return open[0] || null;
+  }
+
+  function staleRulings() {
+    return Object.values(view.questions || {}).filter(q => q.state === 'stale' && q.lock)
+      .sort((a, b) => a.question.seq - b.question.seq);
+  }
+
+  function scanWaiting(sc) {
+    return sc.qids.filter(qid => !Object.keys(sc.rulings[qid] || {}).length);
+  }
+
+  async function askScan(qs, all, btn) {
+    btn.disabled = true;
+    const body = { action: 'scan', qids: qs.map(q => q.question.qid), locks: qs.map(q => q.lock) };
+    if (all) body.all = true;
+    const result = await apiPost('/refactor', body, all ? 'scan-all' : 'scan-' + qs[0].question.qid);
+    btn.disabled = false;
+    if (result.error) { announce('Scan not asked: ' + result.error); return; }
+    announce((qs.length === 1 ? 'Scan asked for ' + qs[0].question.qid : 'Scan asked for ' + qs.length + ' stale rulings')
+      + '. The steward answers each one; nothing changes until you decide.');
+    redrawKeepingPlace();
+  }
+
+  function scanControl(q) {
+    const qid = q.question.qid;
+    const sc = openScan();
+    if (!sc) {
+      const btn = el('button', { className: 'ck-btn ck-scan-one', type: 'button', dataFocusKey: 'scan-' + qid,
+        'aria-label': 'Scan for a resolve: ' + truncateText(q.question.text, 40) }, ['Scan for a resolve']);
+      btn.addEventListener('click', () => askScan([q], false, btn));
+      return btn;
+    }
+    let words;
+    if (sc.qids.includes(qid)) {
+      const r = sc.rulings[qid] || {};
+      words = r.answered ? 'Scanned: the steward answered below' : 'Scan asked ' + sc.ts + ': waiting on the steward';
+    } else {
+      words = 'A scan is open (' + scanWaiting(sc).length + ' of ' + sc.qids.length + ' waiting); it answers first';
+    }
+    return el('span', { className: 'ck-scan-status', dataQid: qid }, [words]);
+  }
+
+  function renderScanAll() {
+    const stale = staleRulings();
+    const sc = openScan();
+    if (!stale.length && !sc) return null;
+    const box = el('div', { className: 'ck-scan-all', role: 'region', 'aria-label': 'Scan stale rulings for a resolve' });
+    if (sc) {
+      const waiting = scanWaiting(sc);
+      box.appendChild(el('p', { className: 'ck-scan-status' }, ['Scan asked ' + sc.ts + ': ' + waiting.length + ' of '
+        + sc.qids.length + ' rulings still wait on the steward' + (waiting.length ? ' (' + waiting.join(', ') + ')' : '')
+        + '.']));
+      return box;
+    }
+    box.appendChild(el('p', {}, [stale.length + (stale.length === 1 ? ' ruling is' : ' rulings are')
+      + ' stale. The steward can work out what became of each and answer with a new anchor, a replacement question'
+      + ' or a recommendation. Nothing changes until you decide.']));
+    const btn = el('button', { className: 'ck-btn ck-scan-all-go', type: 'button', dataFocusKey: 'scan-all' },
+      ['Scan all stale (' + stale.length + ')']);
+    btn.addEventListener('click', () => askScan(stale, true, btn));
+    box.appendChild(btn);
+    return box;
+  }
+
+  // The steward's answer when neither a new anchor nor a replacement fits: a star recommendation, with its
+  // evidence. It is advice: the owner's own Withdraw or Keep (above) is the ruling.
+  function renderAdvice(q) {
+    const a = q.refactor.advice;
+    const what = a.star === 'withdraw' ? 'Withdraw' : 'Keep, stop checking';
+    const box = el('div', { className: 'ck-advice', role: 'note', 'aria-label': 'The steward recommends for ' + q.question.qid });
+    box.appendChild(el('strong', {}, ['The steward recommends: ★ ' + what]));
+    box.appendChild(el('p', {}, [a.evidence]));
+    box.appendChild(el('p', { className: 'ck-advice-note' }, ['Nothing changes until you press ' + what + '… above.']));
     return box;
   }
 

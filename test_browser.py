@@ -2721,5 +2721,117 @@ class InboxUXTests(unittest.TestCase):
                     self.assertEqual(name, "none" if reduced else "ck-slide-down")
 
 
+class ScanUITests(unittest.TestCase):
+    """CONSOLE-kit/Q40 (button_now) and Q41 (side file): scanning stale rulings for a resolve, on the page."""
+
+    setUpClass = classmethod(LiveConsoleTests.setUpClass.__func__)
+    tearDownClass = classmethod(LiveConsoleTests.tearDownClass.__func__)
+    serve = LiveConsoleTests.serve
+    page = LiveConsoleTests.page
+    open_inbox = LiveConsoleTests.open_inbox
+    open_item = InboxUXTests.open_item
+    said = InboxUXTests.said
+
+    RULES = "# Rules\nRULE-ALPHA: every release is reviewed twice.\nRULE-BETA: the console never runs code.\n" \
+            "RULE-DELTA: the owner locks answers.\n"
+
+    def ruling(self, n, text):
+        """LANE.1/Q<n>, answered and locked against the excerpt `text` of rules.md."""
+        qid = f"LANE.1/Q{n}"
+        self.console.write("question", {
+            "qid": qid, "item": "LANE.1", "text": f"Does {text.split(':')[0]} still hold?", "kind": "single",
+            "options": [{"id": "a", "label": "Yes"}, {"id": "b", "label": "No"}], "star": "a",
+            "valid_if": [{"kind": "excerpt", "path": "rules.md", "text": text}], "source": "rules.md:1",
+            "nonce": f"scanq{n:04d}"}, "agent")
+        ans = self.console.write("answer", {"qid": qid, "picks": ["a"], "own_text": "", "nonce": f"scana{n:04d}"},
+                                 "owner")
+        lk = self.console.write("lock", {"qid": qid, "answer": ans["id"], "nonce": f"scanl{n:04d}"}, "owner")
+        return qid, lk["id"]
+
+    def setup_rulings(self):
+        """Q1 and Q2 stale (their rules were reworded), Q3 holding."""
+        url = self.serve()
+        (self.cfg.root / "rules.md").write_text(self.RULES)
+        self.q1, self.l1 = self.ruling(1, "RULE-ALPHA: every release is reviewed twice.")
+        self.q2, self.l2 = self.ruling(2, "RULE-BETA: the console never runs code.")
+        self.q3, self.l3 = self.ruling(3, "RULE-DELTA: the owner locks answers.")
+        (self.cfg.root / "rules.md").write_text(self.RULES.replace("reviewed twice", "reviewed once")
+                                                .replace("never runs code", "may run tests"))
+        return url
+
+    def scans(self):
+        p = self.cfg.state / "refactor.jsonl"
+        return [r for r in (json.loads(x) for x in p.read_text().splitlines()) if r["type"] == "scan"] \
+            if p.exists() else []
+
+    def card(self, page, qid):
+        return page.locator(f".ck-question[data-qid='{qid}']")
+
+    def test_q40_each_stale_ruling_offers_a_scan_and_pressing_asks_one_that_changes_nothing(self):
+        # Catches: the button on a ruling that holds, a press that writes a ruling (withdraw, keep, lock) or
+        # anything in store.jsonl, a scan naming a lock the page was not shown, buttons still offered while a
+        # scan is open (the second press would only be refused), and a press nobody hears happened.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.setup_rulings()
+                store_before = self.cfg.store.read_bytes()
+                page = self.page(kind, 1280, url)
+                self.open_item(page)
+                for qid in (self.q1, self.q2):
+                    self.assertEqual(self.card(page, qid).locator(".ck-scan-one").count(), 1, qid)
+                self.assertEqual(self.card(page, self.q3).locator(".ck-scan-one").count(), 0)
+                self.card(page, self.q1).locator(".ck-scan-one").click()
+                self.said(page, f"Scan asked for {self.q1}")
+                self.assertEqual([(s["qids"], s["locks"], s["by"]) for s in self.scans()],
+                                 [([self.q1], [self.l1], "owner")])
+                self.assertEqual(self.cfg.store.read_bytes(), store_before)
+                page.wait_for_selector(f".ck-scan-status[data-qid='{self.q1}']")
+                self.assertIn("waiting on the steward",
+                              self.card(page, self.q1).locator(".ck-scan-status").text_content())
+                self.assertIn("A scan is open", self.card(page, self.q2).locator(".ck-scan-status").text_content())
+                self.assertEqual(page.locator(".ck-scan-one").count(), 0)
+                self.assertGreater(self.card(page, self.q1).locator(".ck-stale-banner").count(), 0)   # still stale
+
+    def test_q40_scan_all_is_one_request_naming_every_stale_ruling_once(self):
+        # Catches: "Scan all" sent as one request per ruling, a list that misses a stale ruling or names one that
+        # holds, a double press queueing a second scan, and a control left on offer once the scan is open.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.setup_rulings()
+                page = self.page(kind, 1280, url)
+                self.open_inbox(page, 1280)
+                go = page.locator(".ck-scan-all-go")
+                self.assertEqual(go.text_content(), "Scan all stale (2)")
+                go.dblclick()
+                page.wait_for_function("!document.querySelector('.ck-scan-all-go')")
+                self.said(page, "Scan asked for 2 stale rulings")
+                self.assertEqual([(s["qids"], s["locks"]) for s in self.scans()],
+                                 [([self.q1, self.q2], [self.l1, self.l2])])
+                self.assertIn("2 of 2 rulings still wait on the steward",
+                              page.locator(".ck-scan-all .ck-scan-status").text_content())
+
+    def test_q40_the_stewards_advice_shows_with_its_evidence_and_changes_nothing(self):
+        # Catches: advice shown as a ruling (the ruling withdrawn or kept by the steward's word), advice with no
+        # evidence, and a page that hides the owner's own Withdraw and Keep once advice is in.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.setup_rulings()
+                self.console.advise({"qid": self.q1, "star": "withdraw",
+                                     "evidence": "RULE-ALPHA now says reviewed once; the twice-review premise is gone.",
+                                     "nonce": "scanadv0001"})
+                page = self.page(kind, 1280, url)
+                self.open_item(page)
+                adv = self.card(page, self.q1).locator(".ck-advice")
+                self.assertIn("The steward recommends: ★ Withdraw", adv.text_content())
+                self.assertIn("the twice-review premise is gone", adv.text_content())
+                self.assertIn("Nothing changes until you press Withdraw", adv.text_content())
+                for label in ("Withdraw this ruling", "Keep this ruling and stop checking it"):
+                    self.assertEqual(self.card(page, self.q1).locator(f"button[aria-label^='{label}']").count(), 1,
+                                     label)
+                code, view = self.SV.agent_request(self.cfg.socket, "GET", "/view")
+                self.assertEqual(view["view"]["questions"][self.q1]["state"], "stale")
+                self.assertNotIn("outcome", view["view"]["questions"][self.q1]["refactor"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1600,6 +1600,16 @@ class SessionStartHookTests(Tmp):
         for since in (0, 1, 4):
             self.assertEqual(hook._waiting(bell, since), D.pending(bell, since))
         self.assertEqual([r["seq"] for r in hook._waiting(bell, 0)], [1, 9, 4])
+        # Q40: a scan line is numbered by `rx` and waits past `rx_through`, whatever its store seq says.
+        with open(bell, "ab") as fh:
+            fh.write(b"\n" + json.dumps({"seq": 2, "intent": "scan", "rx": 3, "qids": 2}).encode() + b"\n")
+        for since, rx_since in ((0, 0), (9, 0), (9, 2), (9, 3), (0, 5)):
+            self.assertEqual(hook._waiting(bell, since, rx_since), D.pending(bell, since, rx_since=rx_since),
+                             (since, rx_since))
+        self.assertEqual([r.get("rx") for r in hook._waiting(bell, 9, 2)], [3])
+        (self.dir / D.CURSOR_FILE).write_text('{"through": 7, "rx_through": 3}')
+        self.assertEqual((hook._cursor(self.dir), hook._rx_cursor(self.dir)),
+                         (D.read_cursor(self.dir), D.read_rx_cursor(self.dir)))
         for body in ('{"through": 7}', '{"through": true}', '{"through": -1}', "junk", "[]"):
             (self.dir / D.CURSOR_FILE).write_text(body)
             self.assertEqual(hook._cursor(self.dir), D.read_cursor(self.dir), body)

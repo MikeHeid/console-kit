@@ -8,6 +8,12 @@ requests wake it: `process` (answers are in), `fork` (deliberate), `chat` (0.7.0
 
 The agent's own cursor, the highest doorbell seq it has processed, is kept in
 `agent-cursor.json` beside the doorbell. It only moves forward.
+
+A scan for a resolve (CONSOLE-kit/Q40, Q41) is a refactor record, not a store
+record, so its line cannot take a store seq of its own: it carries the store's
+seq as it stood and `rx`, the refactor seq. Such a line is pending while its
+`rx` is past `rx_through`, the cursor's second number, which `synced
+--rx-through` moves; its `seq` is not what decides it.
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ from typing import Callable
 
 from .registry import read_regular
 
-WAKE_INTENTS = ("process", "fork", "chat", "visual")
+WAKE_INTENTS = ("process", "fork", "chat", "visual", "scan")
 CURSOR_FILE = "agent-cursor.json"
 MAX_DOORBELL = 64 << 20  # one short line per owner write; far past any real console
 MAX_CURSOR = 4096
@@ -53,16 +59,23 @@ def read_lines(path: Path) -> list[dict]:
     return out
 
 
-def pending(path: Path, since: int, intents: tuple[str, ...] | None = WAKE_INTENTS) -> list[dict]:
-    """Doorbell lines after `since`, oldest first; with `intents`, only the lines carrying one of them."""
+def _rx(r: dict) -> int | None:
+    v = r.get("rx")
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def pending(path: Path, since: int, intents: tuple[str, ...] | None = WAKE_INTENTS,
+            rx_since: int = 0) -> list[dict]:
+    """Doorbell lines after `since` (a refactor line: after `rx_since`), oldest first; with `intents`, only those."""
     return [r for r in read_lines(path)
-            if r["seq"] > since and (intents is None or r.get("intent") in intents)]
+            if (r["seq"] > since if _rx(r) is None else _rx(r) > rx_since)
+            and (intents is None or r.get("intent") in intents)]
 
 
 def watch(path: Path, since: int, *, poll: float = 2.0, timeout: float | None = None,
           sleep: Callable[[float], None] = time.sleep,
           clock: Callable[[], float] = time.monotonic,
-          heartbeat: Callable[[], None] | None = None) -> list[dict]:
+          heartbeat: Callable[[], None] | None = None, rx_since: int = 0) -> list[dict]:
     """Block until a wake line arrives after `since`, and return every wake line waiting.
 
     A line already there when the watch starts returns at once, so a signal sent
@@ -72,7 +85,7 @@ def watch(path: Path, since: int, *, poll: float = 2.0, timeout: float | None = 
     """
     start = clock()
     while True:
-        found = pending(path, since)
+        found = pending(path, since, rx_since=rx_since)
         if found:
             return found
         if timeout is not None and clock() - start >= timeout:
@@ -205,21 +218,35 @@ class Heartbeat:
         self._write(False)
 
 
-def read_cursor(state: Path) -> int:
+def _cursor_value(state: Path, key: str) -> int:
     try:
         data = read_regular(Path(state) / CURSOR_FILE, MAX_CURSOR)
-        v = json.loads(data.decode("utf-8")).get("through", 0) if data is not None else 0
+        v = json.loads(data.decode("utf-8")).get(key, 0) if data is not None else 0
     except (OSError, ValueError, AttributeError):
         return 0
     return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
 
 
-def write_cursor(state: Path, through: int) -> int:
-    """Record that the agent has processed up to `through`; never moves backwards. Returns the cursor now held."""
+def read_cursor(state: Path) -> int:
+    return _cursor_value(state, "through")
+
+
+def read_rx_cursor(state: Path) -> int:
+    """The highest refactor seq (a scan's `rx`) the agent has processed."""
+    return _cursor_value(state, "rx_through")
+
+
+def write_cursor(state: Path, through: int, rx_through: int | None = None) -> int:
+    """Record that the agent has processed up to `through` (and `rx_through`); neither moves backwards.
+
+    Returns the store cursor now held. Each number keeps its own high mark, so
+    moving one never resets the other.
+    """
     now = max(read_cursor(state), through)
+    rx = max(read_rx_cursor(state), rx_through or 0)
     p = Path(state) / CURSOR_FILE
     fd, tmp = tempfile.mkstemp(dir=p.parent, prefix=".agent-cursor.", suffix=".tmp")  # 0600, unique, from creation
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps({"through": now}) + "\n")
+        fh.write(json.dumps({"through": now, **({"rx_through": rx} if rx else {})}) + "\n")
     os.replace(tmp, p)
     return now

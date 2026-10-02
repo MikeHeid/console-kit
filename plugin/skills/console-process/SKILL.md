@@ -175,13 +175,80 @@ a picture to draw: use the
 **console-visual** skill for each. A visual line on the doorbell
 (`"intent": "visual"`) is what woke you.
 
+## 4b. Answer each scan for a resolve
+
+Each entry of `todo.scans` is the owner pressing **Scan for a resolve** on a
+stale ruling, or **Scan all stale** (one scan naming every stale ruling at
+that moment). `waiting` lists the rulings still to answer. A scan is a
+request, never a ruling: you find out what became of each ruling and answer
+it, and **nothing changes until the owner presses Confirm, Withdraw or Keep**
+(CONSOLE-kit/Q31: the steward proposes, the owner decides). A scan line on
+the doorbell (`"intent": "scan"`, with an `rx`) is what woke you.
+
+For each waiting ruling, read `A view --item ITEM` (its question, the
+answer the owner locked, and `failing`: the conditions that no longer hold),
+then work out three things, in this order:
+
+1. **Where did the cited text go?** Search the project for the excerpt's
+   words and for the rule's name or number. Moved, reworded, split, or gone?
+2. **Does the premise still hold?** Read the new text (or its absence) against
+   what the owner locked. Is the ruling still the right answer, just cited
+   from somewhere else?
+3. **What replaced it?** A newer rule, a later ruling, a change of design, or
+   nothing at all?
+
+Then answer the ruling with exactly ONE of these. **Prefer an anchor whenever
+that is honest**:
+
+- **The premise holds, at new lines**: propose them as its anchor. The server
+  reads the lines now, and the owner confirms them side by side with the old
+  ones:
+
+      A propose-anchor QID --cite path:FIRST-LAST --basis "why these lines carry the ruling now"
+
+- **The question itself must be asked again** (the options no longer fit):
+  `A ask` a new question whose file carries `"replaces": "QID"`. The old
+  ruling stays in force until the owner locks the new one.
+- **Neither fits**: recommend, with the evidence from 1–3 above:
+
+      A advise QID --star withdraw --evidence "where the text went, why the premise is gone, what replaced it"
+      A advise QID --star keep --evidence "why the ruling stands though its lines moved past re-citing"
+
+  `withdraw` when the premise is gone; `keep` when the ruling still holds but
+  no lines can carry it (the owner's Keep stops checking it).
+
+A worked shape, six stale rulings in one scan:
+
+| Ruling | Cited text went | Premise | Replaced by | Answer |
+|---|---|---|---|---|
+| A | moved to another file, same words | holds | nothing | propose-anchor at the new lines |
+| B | reworded in place | holds | nothing | propose-anchor at the reworded lines |
+| C | reworded, meaning changed | no longer holds | a later rule | ask, `"replaces"` |
+| D | deleted with its feature | gone | nothing | advise withdraw |
+| E | split across two sections | holds | nothing | propose-anchor citing both |
+| F | rewritten as prose, no stable line | holds | nothing | advise keep |
+
+A ruling is answered once one of these names it, written after the scan, for
+the lock the scan names. One the owner settles meanwhile (withdraws, keeps,
+re-anchors, answers again or re-locks), or one a replacement was already asked
+for, needs nothing more. **A ruling whose cited text came back still needs an
+answer**: whether a scan is done follows the records, never the files, so a
+revert or a branch switch never closes it (and the files moving back could not
+reopen it). Answer it `A advise QID --star keep --evidence "the cited text is
+back: …"`, which is accepted on a ruling that holds while a scan names it.
+The scan is done when every ruling it names is answered or settled; `A todo`
+then stops listing it, and the owner may scan again. A second scan is refused
+while one is open, so answer every ruling of the open one.
+
 ## 5. Mark the console synced
 
-    A synced --through SEQ
+    A synced --through SEQ [--rx-through RX]
 
 `SEQ` is the highest doorbell seq you fully handled in steps 2–4, chat lines
-included once you have replied to them. The cursor
-only moves forward. If something failed, say so instead:
+included once you have replied to them. A scan line has its own number, `rx`
+(a scan writes nothing to the store, so it has no store seq of its own): pass
+the highest `rx` of the scan lines you handled in step 4b as `--rx-through`.
+Both cursors only move forward. If something failed, say so instead:
 
     A synced --error "what failed, in one line"
 
@@ -192,6 +259,6 @@ true`), so its exit wakes this session when the owner sends the next request:
 
     A watch
 
-It exits 0 printing the waiting lines when a `process`, `fork`, `chat` or `visual`
+It exits 0 printing the waiting lines when a `process`, `fork`, `chat`, `visual` or `scan`
 arrives, and returns at once if one is already waiting. When it exits, run
 this skill again.
