@@ -80,6 +80,7 @@ from . import doorbell as D
 from . import gitseam as G
 from . import items as IT
 from . import pagesnap as PS
+from . import prs as PR
 from . import names as N
 from . import projectcfg as PC
 from . import publish as P
@@ -548,6 +549,28 @@ class Console:
             raise RequestError(400, f"items kept; a seed question was refused: {e}") from None
         self._bump()
         return {"items": len(body["items"]), "seeds_added": added}
+
+    def push_prs(self, body: object, agent: str | None) -> dict:
+        """`prs-push`: the project's pull requests, read by the steward's gh in ITS process, as data.
+
+        The only way pull requests reach either server: neither ever talks to
+        GitHub or starts gh. Checked against the closed schema, stamped with
+        when it arrived and which agent sent it, kept in STATE/prs.json.
+        """
+        why = PR.snapshot_problem(body)
+        if why:
+            raise RequestError(400, why)
+        with self._lock:
+            try:
+                doc = PR.store_snapshot(self.cfg.state, body, agent)
+            except ValueError as e:   # over MAX_FILE: nothing was written
+                raise RequestError(413, str(e)) from None
+        self._bump()   # an open PRs view re-reads on the next live wake
+        return {"prs": len(doc["prs"]), "repo": doc["repo"], "pushed_at": doc["pushed_at"]}
+
+    def prs(self) -> dict:
+        """The owner's PRs view: the steward's last push, or `pushed: false` and the note saying why (F63)."""
+        return PR.load(self.cfg.state)
 
     def tags(self, view: dict, items: dict[str, dict]) -> dict:
         """Suggested next steps (0.8.0). A failure here costs the chips, never the page."""
@@ -1559,6 +1582,12 @@ class OwnerHandler(_Handler):
             return self._check()
         if self.path == "/api/usage":  # 0.8.6: the footer's probe
             return self._send(200, read_usage(self.console.cfg))
+        if self.path == "/api/prs":   # the steward's last prs-push, read only: no owner route writes it
+            try:
+                return self._send(200, self.console.prs())
+            except OSError as e:   # STATE itself gone odd: named in the log, never a dropped connection
+                sys.stderr.write(f"console prs: {e}\n")
+                return self._send(503, {"error": "the pull requests could not be read just now"})
         if self.path == "/api/page-staged":   # Q29: the proposal's preview, framed sandbox="" and sandboxed here too
             data = self.console.staged_page()
             if data is None:
@@ -1761,6 +1790,8 @@ class AgentHandler(_Handler):
                 return self._send(200, self.console.propose_anchor(self._body(), agent))
             if self.path == "/items":   # Q24: the ONLY way items reach a server; the adapter ran in the steward
                 return self._send(200, self.console.push_items(self._body()))
+            if self.path == "/prs":   # the ONLY way pull requests reach a server; gh ran in the steward
+                return self._send(200, self.console.push_prs(self._body(), agent))
             if self.path == "/page-snapshot":   # Q28: the ONLY way a page reaches a server; git ran in the steward
                 self.max_body = PS.MAX_BODY   # per instance, safe for the same reason as /history-blob above
                 return self._send(200, self.console.push_page_snapshot(self._body()))

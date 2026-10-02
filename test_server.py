@@ -38,6 +38,7 @@ from console_kit import server as SV  # noqa: E402
 from console_kit import multiserver as MS  # noqa: E402
 from console_kit import items as IT  # noqa: E402
 from console_kit import pagesnap as PS  # noqa: E402
+from console_kit import prs as PR  # noqa: E402
 from console_kit import publish as P  # noqa: E402
 from html import escape as html_escape  # noqa: E402
 
@@ -2992,6 +2993,13 @@ call("agent POST /items", agent, "POST", "/items", p.get("items") or
      {"items": {"LANE": {"title": "a lane", "parent": None, "status": "open"},
                 "LANE.1": {"title": "a phase", "parent": "LANE", "status": "open"}},
       "seed_questions": [], "board": None})
+out["prs_before"] = call("owner GET /api/prs (before push)", owner, "GET", "/api/prs")
+call("agent POST /prs", agent, "POST", "/prs", {"repo": "octo/repo", "window_days": 30, "prs": [
+     {"number": 7, "title": "<img src=x onerror=alert(1)> LANE.1/Q2", "state": "open", "draft": False,
+      "head": "lane-1", "base": "main", "author": "octo", "created_at": "2026-09-30T10:00:00Z",
+      "updated_at": "2026-09-30T11:00:00Z", "merged_at": None, "closed_at": None,
+      "url": "https://github.com/octo/repo/pull/7", "merge_commit": None, "checks": "pending"}]})
+out["prs"] = call("owner GET /api/prs", owner, "GET", "/api/prs")
 a = call("owner POST /api/answer", owner, "POST", "/api/answer",
          {"qid": "LANE.1/Q2", "picks": ["a"], "own_text": "", "nonce": "nogitanswer1"})
 call("owner POST /api/lock", owner, "POST", "/api/lock",
@@ -3097,6 +3105,10 @@ class NoServerGitTests(_Live, unittest.TestCase):
         for name, code in got["codes"].items():
             self.assertLess(code, 500, name)
         out = got["out"]
+        # The PR push ran under the same hook (the steward's gh ran elsewhere): kept, served, nothing spawned.
+        self.assertEqual(got["codes"]["agent POST /prs"], 200)
+        self.assertEqual((out["prs_before"]["pushed"], out["prs_before"]["note"]), (False, PR.NOT_PUSHED))
+        self.assertEqual((out["prs"]["pushed"], [p["number"] for p in out["prs"]["prs"]]), (True, [7]))
         self.assertEqual(out["check"]["history"], NOGIT)
         [c] = out["check"]["stale"]["LANE.1/Q2"]["conditions"]
         self.assertEqual((c["reason"], c["history"]), ("file_changed", NOGIT))
@@ -3452,7 +3464,7 @@ class OneServerTests(_OneServer, unittest.TestCase):
         self.assertIn("subprocess.Popen", seen)
 
     AGENT_GETS = ("/view", "/check", "/health", "/history-wants", "/no-such-route")
-    AGENT_POSTS = ("/items", "/cursor", "/working", "/reanchor", "/visual", "/visual-export", "/question",
+    AGENT_POSTS = ("/items", "/prs", "/cursor", "/working", "/reanchor", "/visual", "/visual-export", "/question",
                    "/message", "/transcript", "/history-blob", "/history-specs", "/page-snapshot", "/anchor-proposal",
                    "/no-such-route")
 
@@ -6917,6 +6929,224 @@ class RefactorTests(_Live, unittest.TestCase):
         self.assertEqual(sum(1 for q in view["view"]["questions"].values() if q.get("refactor", {}).get("proposal")), 6)
         todo = json.dumps(VW.todo(view["view"]))
         self.assertLess(len(todo.encode("utf-8")), 64 * 1024)
+
+
+# -- Pull requests: pushed by the steward's gh, as data; the server never talks to GitHub -------------------
+
+def pr_row(number: int, **over) -> dict:
+    """One PR as `agent.py prs-push` sends it."""
+    pr = {"number": number, "title": f"PR {number}", "state": "open", "draft": False, "head": f"lane-{number}",
+          "base": "main", "author": "octo", "created_at": "2026-09-30T10:00:00Z", "updated_at": "2026-09-30T11:00:00Z",
+          "merged_at": None, "closed_at": None, "url": f"https://github.com/octo/repo/pull/{number}",
+          "merge_commit": None, "checks": "success"}
+    pr.update(over)
+    return pr
+
+
+PRS_PUSH = {"repo": "octo/repo", "window_days": 30, "prs": [
+    pr_row(12, draft=True, checks="pending"),
+    pr_row(9, state="merged", merged_at="2026-09-29T08:00:00Z", closed_at="2026-09-29T08:00:00Z",
+           merge_commit="a" * 40, checks="failure"),
+    pr_row(8, state="closed", closed_at="2026-09-28T08:00:00Z", checks="none")]}
+
+# Each is refused, and named: unknown keys at either level, every cap, and a link that is not this PR on GitHub.
+BAD_PRS = [
+    {**PRS_PUSH, "extra": 1},
+    {k: v for k, v in PRS_PUSH.items() if k != "window_days"},
+    {**PRS_PUSH, "prs": [{**pr_row(1), "html": "<b>x</b>"}]},
+    {**PRS_PUSH, "prs": [pr_row(n) for n in range(1, PR.MAX_PRS + 2)]},
+    {**PRS_PUSH, "prs": [pr_row(1, title="x" * (PR.MAX_TITLE + 1))]},
+    {**PRS_PUSH, "prs": [pr_row(1, head="b" * (PR.MAX_REF + 1))]},
+    {**PRS_PUSH, "prs": [pr_row(1, head="a\nb")]},
+    {**PRS_PUSH, "prs": [pr_row(1, author="x" * (PR.MAX_LOGIN + 1))]},
+    {**PRS_PUSH, "prs": [pr_row(1, url="javascript:alert(1)")]},
+    {**PRS_PUSH, "prs": [pr_row(1, url="http://github.com/octo/repo/pull/1")]},
+    {**PRS_PUSH, "prs": [pr_row(1, url="https://github.com/evil/repo/pull/1")]},
+    {**PRS_PUSH, "prs": [pr_row(1, url="https://github.com.evil.example/octo/repo/pull/1")]},
+    {**PRS_PUSH, "prs": [pr_row(1, state="merged")]},
+    {**PRS_PUSH, "prs": [pr_row(1, checks="green")]},
+    {**PRS_PUSH, "prs": [pr_row(1), pr_row(1)]},
+    {**PRS_PUSH, "prs": [pr_row(True)]},
+    {**PRS_PUSH, "repo": "not a repo"},
+    {**PRS_PUSH, "window_days": PR.MAX_DAYS + 1},
+]
+
+
+class PrsPushTests(_Live, unittest.TestCase):
+    """The PRs view: pushed only through the agent door, checked against a closed schema, kept in STATE."""
+
+    def prs(self):
+        code, out = self.get("/api/prs")
+        self.assertEqual(code, 200, out)
+        return out
+
+    def test_before_the_first_push_the_view_says_why_it_is_empty(self):
+        # Catches: a silent blank list, invented PRs, and a note that outlives the first push.
+        self.assertEqual(self.prs(), {"pushed": False, "note": PR.NOT_PUSHED})
+        self.assertIn("agent.py prs-push", PR.NOT_PUSHED)
+        self.assertFalse((self.cfg.state / PR.PRS).exists())   # reading wrote nothing
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/prs", {**PRS_PUSH, "prs": []}, agent="agent-9")
+        self.assertEqual(code, 200, out)
+        got = self.prs()
+        self.assertEqual((got["pushed"], got["note"], got["prs"], got["by"]), (True, None, [], "agent-9"))
+
+    def test_a_push_is_kept_stamped_and_served_to_the_owner(self):
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/prs", PRS_PUSH, agent="agent-5")
+        self.assertEqual(code, 200, out)
+        self.assertEqual((out["prs"], out["repo"]), (3, "octo/repo"))
+        got = self.prs()
+        self.assertEqual(got["prs"], PRS_PUSH["prs"])
+        self.assertEqual((got["repo"], got["window_days"], got["by"]), ("octo/repo", 30, "agent-5"))
+        self.assertRegex(got["pushed_at"], PR.TS)
+        self.assertEqual(got["pushed_at"], out["pushed_at"])   # the SERVER's clock, not anything the steward sent
+        self.assertEqual(os.stat(self.cfg.state / PR.PRS).st_mode & 0o777, 0o600)
+        again = SV.Console(self.cfg, FakeAdapter())                # a restart reads it back from STATE
+        self.assertEqual(again.prs()["prs"], PRS_PUSH["prs"])
+
+    def test_unknown_keys_and_every_cap_are_refused_by_name_and_the_last_push_stands(self):
+        self.assertEqual(SV.agent_request(self.cfg.socket, "POST", "/prs", PRS_PUSH)[0], 200)
+        for bad in BAD_PRS:
+            with self.subTest(bad=json.dumps(bad)[:120]):
+                why = PR.snapshot_problem(bad)
+                self.assertIsNotNone(why)
+                self.assertEqual(SV.agent_request(self.cfg.socket, "POST", "/prs", bad), (400, {"error": why}))
+        self.assertEqual(self.prs()["prs"], PRS_PUSH["prs"])      # every refusal left the push standing
+        self.assertIn("unknown fields ['html']", PR.snapshot_problem(BAD_PRS[2]))
+        self.assertIn(f"over {PR.MAX_PRS}", PR.snapshot_problem(BAD_PRS[3]))
+        self.assertIn(f"over {PR.MAX_TITLE}", PR.snapshot_problem(BAD_PRS[4]))
+
+    def test_the_owner_door_cannot_write_it(self):
+        # Catches: a write route on the owner's side (an owner, or anyone holding an Access token, would then
+        # put arbitrary links on the page). Every owner method on both paths is refused, and nothing is stored.
+        for path in ("/api/prs", "/prs"):
+            for method in ("POST", "PUT", "PATCH", "DELETE"):
+                with self.subTest(path=path, method=method):
+                    code, _ = self.req(method, path, PRS_PUSH, tok=token())
+                    self.assertIn(code, (404, 405))
+        self.assertFalse((self.cfg.state / PR.PRS).exists())
+        self.assertEqual(self.req("GET", "/api/prs")[0], 403)      # the read is behind the Access gate too
+        self.assertEqual(self.prs()["pushed"], False)
+
+    def test_a_link_planted_at_prs_json_is_never_followed(self):
+        outside = Path(self.tmp.name) / "outside.json"
+        outside.write_text(json.dumps({**PRS_PUSH, "pushed_at": "2026-09-30T00:00:00Z", "by": None}))
+        (self.cfg.state / PR.PRS).symlink_to(outside)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.prs(), {"pushed": False, "note": PR.UNREADABLE})
+        self.assertEqual(SV.agent_request(self.cfg.socket, "POST", "/prs", {**PRS_PUSH, "prs": []})[0], 200)
+        self.assertFalse((self.cfg.state / PR.PRS).is_symlink())   # the link was replaced, its target untouched
+        self.assertIn("octo/repo", outside.read_text())
+        self.assertEqual(self.prs()["prs"], [])
+
+    def test_a_stored_file_that_fails_its_check_is_unreadable_not_half_served(self):
+        (self.cfg.state / PR.PRS).write_text(json.dumps({**PRS_PUSH, "pushed_at": "2026-09-30T00:00:00Z",
+                                                         "by": None, "extra": True}))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.prs(), {"pushed": False, "note": PR.UNREADABLE})
+        self.assertIn("prs.json", err.getvalue())
+
+
+FAKE_GH = r"""#!{python}
+import json, os, sys
+args = sys.argv[1:]
+log = os.environ.get("FAKE_GH_LOG")
+if log:
+    with open(log, "a") as f:
+        f.write(json.dumps(args) + "\n")
+if os.environ.get("FAKE_GH_FAIL"):
+    sys.stderr.write("gh: To get started with GitHub CLI, please run:  gh auth login\n")
+    sys.exit(4)
+row = lambda n, **o: dict({{"number": n, "title": "PR %d" % n, "state": "OPEN", "isDraft": False,
+                           "headRefName": "lane-%d" % n, "baseRefName": "main",
+                           "author": {{"login": "octo", "is_bot": False}}, "createdAt": "2026-09-30T10:00:00Z",
+                           "updatedAt": "2026-09-30T11:00:00Z", "mergedAt": None, "closedAt": None,
+                           "url": "https://github.com/octo/repo/pull/%d" % n, "mergeCommit": None,
+                           "statusCheckRollup": []}}, **o)
+if args[:2] == ["repo", "view"]:
+    print(json.dumps({{"nameWithOwner": "octo/repo"}}))
+elif "open" in args:
+    print(json.dumps([row(12, isDraft=True, statusCheckRollup=[{{"__typename": "CheckRun", "status": "IN_PROGRESS",
+                                                                 "conclusion": ""}}])]))
+else:
+    print(json.dumps([row(9, state="MERGED", mergedAt="2026-09-29T08:00:00Z", closedAt="2026-09-29T08:00:00Z",
+                          mergeCommit={{"oid": "{sha}"}})]))
+"""
+
+
+class PrsPushCliTests(_SingleServer, unittest.TestCase):
+    """`agent.py prs-push`, a separate process, runs gh (a fake on PATH) in ITS process and pushes the result."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(os.path.realpath(tmp.name))
+        self.single(self.base)
+        from console_kit import registry as R
+        reg = self.base / "cfg" / "console-kit" / "projects.json"
+        R.register(self.scfg.root, self.scfg.state, HERE / "plugin" / "kit", path=reg)
+        bindir = self.base / "bin"
+        bindir.mkdir()
+        gh = bindir / "gh"
+        gh.write_text(FAKE_GH.format(python=sys.executable, sha="b" * 40))
+        gh.chmod(0o755)
+        self.log = self.base / "gh.log"
+        self.env = {**os.environ, "XDG_CONFIG_HOME": str(reg.parent.parent), "FAKE_GH_LOG": str(self.log),
+                    "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"}
+        self.env.pop("CONSOLE_KIT_AGENT", None)
+
+    def run_cli(self, *extra, **env):
+        return subprocess.run([sys.executable, str(HERE / "plugin" / "kit" / "agent.py"), "--state",
+                               str(self.scfg.state), "prs-push", "--project", str(self.scfg.root), *extra],
+                              capture_output=True, text=True, env={**self.env, **env}, timeout=120,
+                              cwd=self.scfg.root)
+
+    def test_the_cli_runs_gh_here_and_the_server_keeps_what_it_sent(self):
+        r = self.run_cli("--days", "14", "--limit", "20")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["prs"], 2)
+        calls = [json.loads(ln) for ln in self.log.read_text().splitlines()]
+        self.assertEqual([c[:2] for c in calls], [["repo", "view"], ["pr", "list"], ["pr", "list"]])
+        self.assertIn("20", calls[1])
+        self.assertTrue(any(a.startswith("closed:>=") for a in calls[2]))
+        got = self.sconsole.prs()
+        self.assertEqual([(p["number"], p["state"], p["draft"], p["checks"]) for p in got["prs"]],
+                         [(12, "open", True, "pending"), (9, "merged", False, "none")])
+        self.assertEqual((got["repo"], got["window_days"], got["prs"][1]["merge_commit"]), ("octo/repo", 14, "b" * 40))
+
+    def test_a_gh_failure_is_named_and_nothing_is_sent(self):
+        r = self.run_cli(FAKE_GH_FAIL="1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("refused, nothing sent", r.stderr)
+        self.assertIn("gh auth login", r.stderr)
+        self.assertEqual(self.sconsole.prs(), {"pushed": False, "note": PR.NOT_PUSHED})
+
+    def test_out_of_range_options_are_refused_before_gh_runs(self):
+        for extra in (("--days", "0"), ("--days", str(PR.MAX_DAYS + 1)), ("--limit", str(PR.MAX_LIMIT + 1))):
+            r = self.run_cli(*extra)
+            self.assertEqual(r.returncode, 1, extra)
+            self.assertIn("refused, nothing sent", r.stderr)
+        self.assertFalse(self.log.exists())
+
+
+class OneServerPrsTests(_OneServer, unittest.TestCase):
+    """The one server takes the same push on `/p/<project>/prs`, under the project's token (K4), and only there."""
+
+    def test_a_push_reaches_only_its_own_project(self):
+        self.spawn()
+        self.assertEqual(self.owner("alpha", "GET", "/api/prs"), (200, {"pushed": False, "note": PR.NOT_PUSHED}))
+        code, out = self.agent("POST", "/p/alpha/prs", PRS_PUSH)
+        self.assertEqual(code, 200, out)
+        self.assertEqual(self.owner("alpha", "GET", "/api/prs")[1]["prs"], PRS_PUSH["prs"])
+        self.assertEqual(self.owner("beta", "GET", "/api/prs")[1]["pushed"], False)
+        bad = BAD_PRS[0]
+        self.assertEqual(self.agent("POST", "/p/alpha/prs", bad), (400, {"error": PR.snapshot_problem(bad)}))
+        # Another project's token on this project's path is the one 403, and nothing moves.
+        self.assertEqual(SV.agent_request(self.sock, "POST", "/p/beta/prs", PRS_PUSH, token=self.tokens["alpha"]),
+                         (403, {"error": "forbidden"}))
+        self.assertEqual(self.owner("beta", "GET", "/api/prs")[1]["pushed"], False)
+        self.assertIn(self.owner("alpha", "POST", "/api/prs", PRS_PUSH)[0], (404, 405))
+        self.stop()
+        self.assertEqual(self.violations(), [])
 
 
 if __name__ == "__main__":

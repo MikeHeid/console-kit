@@ -1281,6 +1281,59 @@ class LiveConsoleTests(unittest.TestCase):
                 page.wait_for_function("document.querySelector('.ck-items-note') === null", timeout=10000)
                 self.assert_not_reloaded(page)
 
+    def test_the_prs_tab_says_why_it_is_empty_then_renders_hostile_titles_as_text(self):
+        # Catches: a blank list (or invented PRs) before the steward's first prs-push; a title or branch put in
+        # with innerHTML (the img's onerror would run and mark the body); a link that is not the PR's GitHub URL,
+        # or one that opens without noopener; a merged PR above an open one; a question the title names that is
+        # not linked to its item; and a PRs view that never re-reads after a live push.
+        from console_kit import prs as PR
+        hostile = "<img src=x onerror=\"document.body.setAttribute('data-ran','pr')\"> fixes LANE.1/Q1"
+        pr = lambda n, **o: {**{"number": n, "title": f"PR {n}", "state": "open", "draft": False,
+                                "head": f"lane-{n}", "base": "main", "author": "octo",
+                                "created_at": "2026-09-30T10:00:00Z", "updated_at": "2026-09-30T11:00:00Z",
+                                "merged_at": None, "closed_at": None,
+                                "url": f"https://github.com/octo/repo/pull/{n}", "merge_commit": None,
+                                "checks": "success"}, **o}
+        push = {"repo": "octo/repo", "window_days": 30, "prs": [
+            pr(4, title=hostile, head="<b>x</b>", draft=True, checks="failure"),
+            pr(3, title="constructor toString __proto__ hasOwnProperty", head="valueOf", state="merged",
+               merged_at="2026-09-29T08:00:00Z", closed_at="2026-09-29T08:00:00Z", merge_commit="a" * 40)]}
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    url = self.serve()
+                    self.ask(1)
+                    page = self.page(kind, width, url)
+                    self.open_inbox(page, width)
+                    page.click("#ck-tab-prs")
+                    note = page.wait_for_selector(".ck-prs-note")
+                    self.assertEqual((note.text_content(), note.get_attribute("role")), (PR.NOT_PUSHED, "status"))
+                    self.assertEqual(page.locator(".ck-pr-row").count(), 0)
+                    code, out = self.SV.agent_request(self.cfg.socket, "POST", "/prs", push, agent="agent-5")
+                    self.assertEqual(code, 200, out)
+                    page.wait_for_selector(".ck-pr-row", timeout=10000)   # the live wake re-read it
+                    self.assertEqual(page.eval_on_selector_all(".ck-pr-row", "rs => rs.map(r => r.dataset.number)"),
+                                     ["4", "3"])
+                    first = page.locator(".ck-pr-row[data-number='4']")
+                    self.assertEqual(first.locator(".ck-pr-title").text_content(), hostile)
+                    self.assertIn("<b>x</b> → main", first.locator(".ck-pr-branch").text_content())
+                    self.assertEqual(page.locator(".ck-prs img, .ck-prs b").count(), 0)
+                    self.assertIsNone(page.evaluate("document.body.getAttribute('data-ran')"))
+                    link = first.locator("a.ck-pr-link")
+                    self.assertEqual((link.get_attribute("href"), link.get_attribute("target"),
+                                      link.get_attribute("rel")),
+                                     ("https://github.com/octo/repo/pull/4", "_blank", "noopener noreferrer"))
+                    self.assertIn("draft", first.text_content())
+                    self.assertIn("checks fail", first.text_content())
+                    self.assertIn("merged", page.locator(".ck-pr-row[data-number='3']").text_content())
+                    # Object.prototype names are not items: no Open button for them.
+                    self.assertEqual(page.locator(".ck-pr-row[data-number='3'] button").count(), 0)
+                    self.assertIn("by the steward (agent-5)", page.locator(".ck-prs-pushed").text_content())
+                    self.assertFalse(page.evaluate(OVERFLOW))
+                    first.locator("button", has_text="Open LANE.1/Q1").click()
+                    page.wait_for_selector(".ck-back-btn")   # the item the question belongs to, opened
+                    self.assert_not_reloaded(page)
+
     def test_the_snapshot_pages_own_script_runs_beside_the_console(self):
         # Q28 point 4. Catches: a CSP or an injection change that stops the page's own inline script (the dashboard
         # breaks) or the console's (the owner loses the console), and the page's provenance line not shown.

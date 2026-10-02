@@ -383,6 +383,7 @@ Two consequences for the cut-over:
     python3 <current>/plugin/kit/agent.py --state <state> health                          # the new version
     python3 <current>/plugin/kit/agent.py --state <state> items-push --project <project> --adapter <adapter path>
     git fetch && python3 <current>/plugin/kit/agent.py --state <state> page-snapshot --path <page path>
+    python3 <current>/plugin/kit/agent.py --state <state> prs-push                        # needs gh, logged in
     /reload-plugins            # the plugin loads in place from <current>
 
 **The steward pushes the items after an upgrade.** The server no longer runs
@@ -406,6 +407,15 @@ the owner opens the console and presses **Use this page**. That is one click
 per dashboard update. A page staged but not yet published also survives
 restarts. Rolling back to a release from before Q29 serves the last published
 page; anything still only staged is ignored by that release.
+
+**The steward pushes the pull requests after an upgrade.** The console's
+PRs tab is filled only by `agent.py prs-push`, which runs `gh pr list` in the
+steward's own process; the server never talks to GitHub. After the first
+upgrade that has the tab, it says the steward has not pushed pull requests
+yet until the `prs-push` line above runs. Run it from inside the project's
+checkout, with `gh` installed and logged in (`gh auth status`). Run it again
+whenever you want the list fresh: the tab shows when it was last pushed. An
+older kit never reads `prs.json`, so rolling back only hides the tab.
 
 **Update the project's adapter before the first stale answer is settled.**
 Since CONSOLE-kit/Q30–Q32, the owner can withdraw a stale ruling, keep it

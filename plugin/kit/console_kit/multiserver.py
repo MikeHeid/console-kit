@@ -66,7 +66,7 @@ FORBIDDEN = {"error": "forbidden"}   # one body for every refusal at the agent d
 # The agent POST routes the base handler serves; anything else is the 404 below. `_Handler.finish` drains the
 # unread body of that 404, and of every 403 and 503 here, within its own total deadline.
 POST_ROUTES = {"/cursor", "/working", "/reanchor", "/visual", "/visual-export", "/history-blob", "/history-specs",
-               "/items", "/page-snapshot", "/anchor-proposal", *SV.AGENT_ROUTES}
+               "/items", "/prs", "/page-snapshot", "/anchor-proposal", *SV.AGENT_ROUTES}
 BEARER = re.compile(r"^Bearer (ck1_[A-Za-z0-9_-]{43})\Z")
 NO_HASH = "0" * 64   # compared against when a project has no hash, so an unknown project costs the same compare
 

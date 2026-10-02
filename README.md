@@ -115,6 +115,11 @@ server cannot check it.
   agent-6`). One of them, the **steward**, named in your own registry, is the
   only one that processes your requests and folds your answers. The others
   post their questions to your inbox instead of asking you directly.
+- The **PRs** tab lists the project's open pull requests, then those
+  merged or closed in the last 30 days (`--days` changes it), with checks, draft and merged
+  badges, a link to each on GitHub, and an **Open** button for any item or
+  question a title or branch names. The steward pushes the list
+  (`agent.py prs-push`), and the tab says when it last did.
 
 ## How it fits together
 
@@ -131,8 +136,10 @@ server cannot check it.
 - **`server.py`** serves the console, inside your published dashboard page if
   you have one. Every request without a valid Access token is refused, loopback
   included. **It runs no project code and no git.** Your work items arrive by
-  `agent.py items-push`, git history by `agent.py history-push`, and the page
-  by `agent.py page-snapshot`. The steward runs all three in its own process,
+  `agent.py items-push`, git history by `agent.py history-push`, pull
+  requests by `agent.py prs-push` (`gh` runs in the steward, never in the
+  server), and the page by `agent.py page-snapshot`. The steward runs all
+  four in its own process,
   and each sends data the server checks against a closed schema.
 - **`agent.py`** is the agent's side. Its commands:
 
@@ -142,7 +149,7 @@ server cannot check it.
   | Asking and answering | `ask`, `reply`, `working`, `synced`, `watch` |
   | Deliberation | `fork-context`, `transcript`, `visual`, `visual-export`, `next-step`, `costs` |
   | Stale answers | `check`, `reanchor`, `propose-anchor` |
-  | Pushing data | `items-push`, `history-push`, `page-snapshot` |
+  | Pushing data | `items-push`, `history-push`, `prs-push`, `page-snapshot` |
   | Owner only | `register`, `steward`, `server add`, `server token rotate` |
 
   `--as NAME` names the session.

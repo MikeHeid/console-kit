@@ -42,7 +42,7 @@
   let lockingAll = null;        // 0.8.5: the item whose answers are being locked in turn, or null
   const lockAllError = {};      // 0.8.5: item -> why its last 'Lock all' stopped
   // 0.7.0: the inbox's tabs, the round form, and the live loop.
-  let currentTab = 'inbox';     // 'inbox' | 'feed' | 'chat', inside inbox mode
+  let currentTab = 'inbox';     // 'inbox' | 'feed' | 'prs' | 'chat', inside inbox mode
   let arrived = new Set();      // qids and message ids that arrived with the latest live update
   let knownIds = null;          // every qid and message id the page has seen; null before the first view
   let seenAtOpen = 0;           // the seen seq when the inbox was opened: what the Feed marks "new"
@@ -712,6 +712,8 @@
       body.appendChild(renderOffline());
     } else if (currentTab === 'feed') {
       renderFeed(body);
+    } else if (currentTab === 'prs') {
+      renderPRs(body);
     } else if (currentTab === 'chat') {
       renderChat(body);
     } else {
@@ -725,7 +727,7 @@
   }
 
   // The inbox's three views (0.7.0): what waits on you, what happened, and the chat.
-  const TABS = [['inbox', 'Inbox'], ['feed', 'Feed'], ['chat', 'Chat']];
+  const TABS = [['inbox', 'Inbox'], ['feed', 'Feed'], ['prs', 'PRs'], ['chat', 'Chat']];
 
   function renderTabs() {
     const bar = el('div', { className: 'ck-tabs', role: 'tablist', 'aria-label': 'Inbox views' });
@@ -3041,8 +3043,8 @@
 
   // ---------------------------------------------------------------------------
   // The Feed (0.7.0): every store record as an event, newest first, filterable
-  // by kind and by item. Folds and PR merges are not store records, so they are
-  // not here; the footer says so.
+  // by kind and by item. Folds and pull requests are not store records, so they
+  // are not here (a PR has no seq to page by); the footer says where they are.
   // ---------------------------------------------------------------------------
 
   const FEED_LABEL = { question: 'Question asked', answer: 'Answered', lock: 'Locked', reanchor: 'Re-anchored',
@@ -3126,8 +3128,8 @@
     else list.appendChild(el('li', { className: 'ck-muted' }, ['Loading…']));
     if (!feedState.events || feedState.key !== key || feedState.seq !== view.seq) loadFeed(list, false);
     body.appendChild(el('p', { className: 'ck-muted ck-feed-foot' }, [
-      'Folds and pull-request merges happen in the repository, not in the console\'s store, so they are not ' +
-      'listed here: see the project\'s pull requests.']));
+      'Folds happen in the repository, not in the console\'s store, so they are not listed here. Pull ' +
+      'requests, open and recently merged or closed, are in the PRs tab.']));
   }
 
   function fillFeedList(list) {
@@ -3171,6 +3173,136 @@
       const more = el('button', { className: 'ck-btn', type: 'button' }, ['Older']);
       more.addEventListener('click', () => { more.disabled = true; loadFeed(list, true); });
       list.appendChild(el('li', { className: 'ck-feed-more' }, [more]));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pull requests (owner ask: "have PR requests and history show up"). The
+  // server never talks to GitHub: the steward runs `agent.py prs-push`, which
+  // runs gh in its own process and sends the list as data. Titles and branch
+  // names are whatever someone typed on GitHub, so every one goes in as text
+  // (el() and textContent), never HTML, and a link goes only to an
+  // https://github.com/ URL.
+  // ---------------------------------------------------------------------------
+
+  const prsState = { data: null, error: null, ver: undefined, loading: false };
+  const PR_CHECKS = { success: 'checks pass', failure: 'checks fail', pending: 'checks running', none: 'no checks' };
+  const PR_ID_TOKEN = /[A-Za-z0-9][A-Za-z0-9_.\-]*(?:\/Q[1-9][0-9]*)?/g;
+  const PR_MAX_LINKS = 5;
+
+  async function loadPRs(listEl) {
+    if (prsState.loading) return;
+    prsState.loading = true;
+    const ver = liveVer;
+    try {
+      const resp = await fetch(config.api + '/prs', { credentials: 'same-origin' });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'HTTP ' + resp.status);
+      prsState.data = data;
+      prsState.error = null;
+    } catch (e) {
+      prsState.error = e.message || 'Network error';
+    }
+    prsState.ver = ver;
+    prsState.loading = false;
+    if (document.contains(listEl)) fillPRs(listEl);
+  }
+
+  function renderPRs(body) {
+    const box = el('div', { className: 'ck-prs' });
+    body.appendChild(box);
+    if (prsState.data || prsState.error) fillPRs(box);
+    else box.appendChild(el('p', { className: 'ck-muted' }, ['Loading…']));
+    // A live wake (a push bumps the version) or the first open: read the steward's push again.
+    if (prsState.ver !== liveVer || (!prsState.data && !prsState.error)) loadPRs(box);
+  }
+
+  // Only GitHub, only https: anything else is shown as text with no link.
+  function prHref(url) {
+    return (typeof url === 'string' && url.startsWith('https://github.com/')) ? url : null;
+  }
+
+  // The items and questions a PR's title or branch names, as the console knows them (exact, case-sensitive).
+  function prLinks(pr) {
+    const found = [];
+    const text = String(pr.title || '') + ' ' + String(pr.head || '');
+    for (const m of text.matchAll(PR_ID_TOKEN)) {
+      const tok = m[0].replace(/[._\-]+$/, '');
+      let item = null;
+      // Own keys only: a title word like "constructor" must not match Object.prototype.
+      if (view && view.questions && Object.hasOwn(view.questions, tok)) item = (view.questions[tok].question || {}).item || tok.split('/Q')[0];
+      else if (!tok.includes('/') && items && Object.hasOwn(items, tok)) item = tok;
+      if (item && items && Object.hasOwn(items, item) && !found.some(f => f.id === tok)) found.push({ id: tok, item: item });
+      if (found.length >= PR_MAX_LINKS) break;
+    }
+    return found;
+  }
+
+  function prWhen(pr) {
+    if (pr.state === 'merged') return ['merged ', pr.merged_at];
+    if (pr.state === 'closed') return ['closed ', pr.closed_at];
+    return ['opened ', pr.created_at];
+  }
+
+  function renderPRRow(pr) {
+    const row = el('li', { className: 'ck-feed-row ck-pr-row', dataState: pr.state, dataNumber: String(pr.number) });
+    const href = prHref(pr.url);
+    const titleKids = [el('span', { className: 'ck-pr-num' }, ['#' + pr.number]), ' ',
+      el('span', { className: 'ck-pr-title' }, [String(pr.title)])];
+    const title = href
+      ? el('a', { className: 'ck-pr-link', href: href, target: '_blank', rel: 'noopener noreferrer' }, titleKids)
+      : el('span', { className: 'ck-pr-link' }, titleKids);
+    const head = el('div', { className: 'ck-feed-head' }, [title]);
+    if (pr.draft) head.appendChild(el('span', { className: 'ck-pr-badge', dataKind: 'draft' }, ['draft']));
+    if (pr.state !== 'open') head.appendChild(el('span', { className: 'ck-pr-badge', dataKind: pr.state }, [pr.state]));
+    row.appendChild(head);
+    const [verb, ts] = prWhen(pr);
+    const meta = el('div', { className: 'ck-pr-meta' }, [
+      el('span', { className: 'ck-pr-branch' }, [String(pr.head) + ' → ' + String(pr.base)]),
+      el('span', { className: 'ck-feed-agent' }, ['by ' + (pr.author || 'unknown')]),
+      el('span', { className: 'ck-pr-checks', dataChecks: pr.checks }, [PR_CHECKS[pr.checks] || 'checks unknown']),
+      el('span', { className: 'ck-feed-time', title: ts ? new Date(ts).toLocaleString() : '' }, [verb + relTime(ts)])
+    ]);
+    row.appendChild(meta);
+    const links = prLinks(pr);
+    if (links.length) {
+      const bar = el('div', { className: 'ck-pr-items' });
+      for (const l of links) {
+        const b = el('button', { className: 'ck-btn ck-btn-quiet', type: 'button', 'aria-label': 'Open ' + l.id }, ['Open ' + l.id]);
+        b.addEventListener('click', () => openFromInbox(l.item));
+        bar.appendChild(b);
+      }
+      row.appendChild(bar);
+    }
+    return row;
+  }
+
+  function fillPRs(box) {
+    box.textContent = '';
+    if (prsState.error) {
+      box.appendChild(el('p', { className: 'ck-error-msg' }, ['Could not load the pull requests: ' + prsState.error]));
+      return;
+    }
+    const d = prsState.data;
+    if (!d || !d.pushed) {   // never a blank list, never invented PRs (F63)
+      box.appendChild(el('p', { className: 'ck-prs-note', role: 'status' },
+        [(d && d.note) || 'The steward has not pushed pull requests yet (agent.py prs-push).']));
+      return;
+    }
+    const by = d.by ? 'the steward (' + d.by + ')' : 'the steward';
+    box.appendChild(el('p', { className: 'ck-muted ck-prs-pushed', title: new Date(d.pushed_at).toLocaleString() },
+      [String(d.repo) + ' · pushed ' + relTime(d.pushed_at) + ' by ' + by]));
+    const prs = Array.isArray(d.prs) ? d.prs : [];
+    const open = prs.filter(p => p.state === 'open');
+    const done = prs.filter(p => p.state !== 'open');
+    const groups = [['Open', open, 'No open pull requests.'],
+      ['Merged or closed, last ' + d.window_days + ' days', done, 'None merged or closed in that window.']];
+    for (const [label, list, empty] of groups) {
+      box.appendChild(el('h3', { className: 'ck-prs-heading' }, [label + ' (' + list.length + ')']));
+      const ol = el('ol', { className: 'ck-feed ck-prs-list', 'aria-label': label });
+      if (!list.length) ol.appendChild(el('li', { className: 'ck-muted' }, [empty]));
+      for (const pr of list) ol.appendChild(renderPRRow(pr));
+      box.appendChild(ol);
     }
   }
 
