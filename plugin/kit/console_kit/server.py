@@ -78,6 +78,7 @@ from . import __version__
 from . import anchors as A
 from . import doorbell as D
 from . import gitseam as G
+from . import items as IT
 from . import names as N
 from . import projectcfg as PC
 from . import publish as P
@@ -86,7 +87,6 @@ from . import stewardgit as SG
 from . import tags as T
 from . import view as V
 from . import visuals as VIS
-from .fold import load_adapter
 from .store import Store, StoreError
 
 HOST = "127.0.0.1"          # never configurable: the tunnel is the only way in
@@ -112,6 +112,9 @@ AGENT_ROUTES = {"/question": "question", "/message": "message", "/transcript": "
 # and a visual up to 256 KiB, and JSON escaping can grow either several times.
 # The door is a user-only Unix socket; the owner's door keeps MAX_BODY.
 AGENT_MAX_BODY = 2 << 20
+# /view's answer when a stored file fails its check: what to do, never where the file is.
+VIEW_UNREADABLE = ("the console's stored state could not be read just now; if the stored items are the cause, "
+                   "the steward should push them again (agent.py items-push)")
 # An HTML mock is shown ONLY in <iframe sandbox="">. This policy holds even if the
 # URL is opened in its own tab: `sandbox` (no tokens) gives it an opaque origin
 # and no script, `default-src 'none'` lets it load nothing from anywhere, and
@@ -476,7 +479,45 @@ class Console:
         view = V.build(self.store, items, holds, names=self.names.mapping())
         view["tags"] = self.tags(view, items)
         view["config"] = {"specs_dir": self.project.specs_dir, "visuals_dir": self.project.visuals_dir}
+        pushed = getattr(self.adapter, "pushed", None)
+        if getattr(self.adapter, "problem", None):   # the items() above already read (and logged) it
+            view["items_note"] = IT.UNREADABLE
+        else:
+            view["items_note"] = IT.NOT_PUSHED if callable(pushed) and not pushed() else None   # F63: never a blank
         return {"view": view, "items": items, "cursor": self.read_cursor()}
+
+    def page_payload(self) -> dict:
+        """The owner door's /api/view: `payload()` and the version it was built at, for the page's live loop.
+
+        `ver` is read FIRST, so a change while the view is built makes the next
+        wait wake rather than be missed. With it the page's first /api/wait also
+        wakes on a version-only change (the first items-push moves no store
+        record); without it that wait slept through one and took its version as
+        the baseline. Only the page's door carries it: it names this process's
+        boot, so the agent socket's /view stays the same bytes across restarts.
+        """
+        ver = self.version()
+        return {**self.payload(), "ver": ver}
+
+    def push_items(self, body: object) -> dict:
+        """`items-push` (Q24, K3 §3.6): the steward's adapter output, as data. Kept in STATE/items.json, then seeded.
+
+        The only way items reach either server: neither ever imports or runs the
+        project's adapter, which is project code an agent can write.
+        """
+        why = IT.snapshot_problem(body)
+        if why:
+            raise RequestError(400, why)
+        try:
+            IT.store_snapshot(self.cfg.state, body)
+        except ValueError as e:   # over MAX_ITEMS: nothing was written
+            raise RequestError(413, str(e)) from None
+        try:
+            added = self.seed()
+        except StoreError as e:   # a pushed seed the store refuses: the items stand, the seed is named
+            raise RequestError(400, f"items kept; a seed question was refused: {e}") from None
+        self._bump()
+        return {"items": len(body["items"]), "seeds_added": added}
 
     def tags(self, view: dict, items: dict[str, dict]) -> dict:
         """Suggested next steps (0.8.0). A failure here costs the chips, never the page."""
@@ -725,6 +766,8 @@ class Console:
         if not callable(fn):
             return None
         got = fn()
+        if got is None and isinstance(self.adapter, IT.SnapshotAdapter):
+            return None   # the steward pushed no board (or nothing yet): the door's 404, as on the one server
         values = got.get("values") if isinstance(got, dict) else None
         if (not isinstance(got.get("shape") if isinstance(got, dict) else None, str)
                 or not isinstance(values, dict)
@@ -982,10 +1025,17 @@ class Console:
         except Exception as e:  # a register caught mid-write, or a broken adapter
             sys.stderr.write(f"console health: register: {type(e).__name__}: {e}\n")
             ok = False
+        # Degraded, not down: unreadable stored items (the single server serves on) stay a 200, since a restart
+        # cannot fix them and only a push can; a 503 would invite a supervisor's restart loop. The state is in
+        # the body instead: register "error" and a note that names what to do, never the file's path.
+        degraded = ok and bool(getattr(self.adapter, "problem", None))
         agent = D.listening(self.cfg.state)["state"]
-        return ok, {"ok": ok, "version": __version__, "store_seq": len(self.store.records()),
-                    "register": "ok" if ok else "error", "agent": agent,
-                    "agent_listening": agent == "listening"}
+        body = {"ok": ok, "version": __version__, "store_seq": len(self.store.records()),
+                "register": "ok" if ok and not degraded else "error", "agent": agent,
+                "agent_listening": agent == "listening"}
+        if degraded:
+            body["register_note"] = IT.UNREADABLE
+        return ok, body
 
     # "Agent active" (owner, 2026-09-29): an agent that picks up a request marks
     # the items it is working on, and its next cursor post (synced, or an error)
@@ -1167,6 +1217,16 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _view(self, build: Callable[[], dict]) -> None:
+        """/view and /api/view: a stored file that fails its check is a 503 naming the problem, never a dropped
+        connection. The path stays in the server's stderr: the answer goes to a browser or an agent."""
+        try:
+            view = build()
+        except StoreError as e:
+            sys.stderr.write(f"console view: {e}\n")
+            return self._send(503, {"error": VIEW_UNREADABLE})
+        self._send(200, view)
+
     def _body(self) -> object:
         if not (self.headers.get("Content-Type") or "").split(";")[0].strip() == "application/json":
             raise RequestError(415, "send application/json")
@@ -1218,7 +1278,7 @@ class OwnerHandler(_Handler):
         if self.path in ("/", "/index.html"):
             return self._send(200, self.console.page(), "text/html; charset=utf-8")
         if self.path == "/api/view":
-            return self._send(200, self.console.payload())
+            return self._view(self.console.page_payload)   # with `ver`: the live loop's baseline
         if self.path == "/api/board":
             return self._board()
         if self.path == "/api/check":
@@ -1371,7 +1431,7 @@ class AgentHandler(_Handler):
 
     def do_GET(self) -> None:
         if self.path == "/view":
-            return self._send(200, self.console.payload())
+            return self._view(self.console.payload)
         if self.path == "/check":
             return OwnerHandler._check(self)
         if self.path == "/health":
@@ -1414,6 +1474,8 @@ class AgentHandler(_Handler):
                 return self._send(200, self.console.push_history_blob(self._body()))
             if self.path == "/history-specs":  # Q23 part 2: spec last-commit times, and a prune of the blobs
                 return self._send(200, self.console.push_history_specs(self._body()))
+            if self.path == "/items":   # Q24: the ONLY way items reach a server; the adapter ran in the steward
+                return self._send(200, self.console.push_items(self._body()))
             kind = AGENT_ROUTES.get(self.path)
             if kind is None:
                 return self._send(404, {"error": "not found"})
@@ -1535,11 +1597,16 @@ def serve(cfg: Config, verify: Callable[[str | None], dict] | None = None) -> No
     # CONSOLE-kit/Q23: this process starts no git, whatever any later code asks for. First, before
     # anything reads the project: a git here would obey a .git/config an agent can write.
     G.close()
+    # CONSOLE-kit/Q24 ("items_push_now"): this process never imports or runs the project's adapter either.
+    # It is project code an agent can write; it runs in the steward (`agent.py items-push`), and only its
+    # output reaches here, as data, kept in STATE/items.json. `cfg.adapter` is not read.
+    # A stored items.json that fails its check does not stop this server (tolerant): it starts, logs one
+    # line, shows the board's UNREADABLE note and a not-ok /health, and the next push recovers it live.
     try:
-        console = Console(cfg, load_adapter(cfg.adapter))
-    except (PC.ConfigError, N.NamesError) as e:
+        console = Console(cfg, IT.SnapshotAdapter(cfg.state, tolerant=True))
+        added = console.seed()
+    except (PC.ConfigError, N.NamesError, StoreError) as e:   # the register itself, or the project's config
         raise SystemExit(f"console: {e}") from None
-    added = console.seed()
     sys.stderr.write(f"console: {len(added)} seed question(s) added; store {cfg.store}\n")
     agent = agent_server(console)
     threading.Thread(target=agent.serve_forever, daemon=True).start()
@@ -1588,7 +1655,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--root", type=Path, required=True)
     ap.add_argument("--page", type=Path, required=True)
     ap.add_argument("--state", type=Path, required=True)
-    ap.add_argument("--adapter", type=Path, required=True)
+    ap.add_argument("--adapter", type=Path, default=None,
+                    help="IGNORED since Q24: the server never runs the adapter; the steward pushes items "
+                         "(agent.py items-push). Still accepted so an existing unit starts")
     ap.add_argument("--team-domain", required=True, help="e.g. yourteam.cloudflareaccess.com")
     ap.add_argument("--aud", required=True, help="the Access application's AUD tag")
     ap.add_argument("--hostname", required=True, help="the public hostname, e.g. console.example.com")
@@ -1611,7 +1680,11 @@ def main(argv: list[str] | None = None) -> int:
     for flag, p in (("--usage-file", a.usage_file), ("--account-file", a.account_file)):
         if p is not None and not p.is_absolute():
             ap.error(f"{flag} takes an absolute path")
-    serve(Config(root=a.root, page=a.page, state=a.state, adapter=a.adapter, team_domain=a.team_domain,
+    if a.adapter is not None:
+        sys.stderr.write("console: --adapter is ignored: this server never runs the adapter; items arrive when "
+                         "the steward runs `agent.py items-push`\n")
+    serve(Config(root=a.root, page=a.page, state=a.state, adapter=a.adapter or Path(os.devnull),
+                 team_domain=a.team_domain,
                  aud=a.aud, hostname=a.hostname, port=a.port, project=a.project, health_port=a.health_port,
                  usage_file=a.usage_file, account_file=a.account_file))
     return 0

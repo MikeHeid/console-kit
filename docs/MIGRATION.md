@@ -171,10 +171,34 @@ or, to write it without an editor, put the same text in
     systemctl --user restart <name>-console.service
 
 `WorkingDirectory` can stay the project checkout. The server reads only the
-paths it is given (`--root`, `--page`, `--state`, `--adapter`, and the
-optional usage and account files, which must be absolute), and finds its own
-modules beside its `server.py`. Make sure each of those flags is an absolute
-path in your unit.
+paths it is given (`--root`, `--page`, `--state`, and the optional usage and
+account files, which must be absolute), and finds its own modules beside its
+`server.py`. Make sure each of those flags is an absolute path in your unit.
+
+The server never runs the project's adapter (owner ruling CONSOLE-kit/Q24).
+An `--adapter` flag still in the unit is accepted and ignored, so the unit
+keeps starting. The items come from the steward instead, which runs the
+adapter in its own process and pushes the result. Run this once the server
+is up, and again whenever the register changes:
+
+    python3 <current>/plugin/kit/agent.py --state <state> items-push --project <project> --adapter <adapter path>
+
+Run it from inside the project's checkout, with an `--adapter` path inside
+that project. The command picks the server to send to from the directory it
+runs in, and refuses an adapter outside the project.
+
+Until then the inbox says that items appear when the steward pushes them.
+
+If the stored items cannot be read (a damaged `items.json` in the state dir,
+or something other than a plain file in its place), the single server still
+starts. It logs one line, shows no items, and the inbox says the stored items
+cannot be read. `health` still answers 200, since the process is up and a
+restart would not fix the file, with its register marked "error" and a note
+saying to push again. This covers a file the server may not open, too. To recover, run
+`items-push` again: it replaces the file, and the board comes back without a
+restart. A directory found there is renamed aside to `.items.json.set-aside.*`,
+never deleted. The one server (`--all`) still refuses just that project and
+keeps serving the others.
 
 Check it:
 
@@ -328,7 +352,15 @@ Two consequences for the cut-over:
     python3 <current>/plugin/kit/agent.py --state <state> register --project <project>   # each project
     systemctl --user restart <name>-console.service                                       # each project
     python3 <current>/plugin/kit/agent.py --state <state> health                          # the new version
+    python3 <current>/plugin/kit/agent.py --state <state> items-push --project <project> --adapter <adapter path>
     /reload-plugins            # the plugin loads in place from <current>
+
+**The steward pushes the items after an upgrade.** The server no longer runs
+the adapter (CONSOLE-kit/Q24). So after the first upgrade past that change,
+the board has no items until the `items-push` line above runs. The inbox says
+so instead of going blank. The push is kept in the state dir, so later
+restarts keep the items. Run the push from inside the project's checkout,
+with `--adapter` inside that project.
 
 Read the release's notes in `INSTALL.md` ("Upgrading to …") first. Some
 releases ask for a step of their own, such as `reanchor` or a

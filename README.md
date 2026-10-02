@@ -322,6 +322,37 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   every kit module except those named exceptions, and fails on any other way
   to start one.
 
+### The server runs no project code (owner ruling CONSOLE-kit/Q24)
+
+- **Why.** The project's adapter is Python an agent can write. A server that
+  imported it ran that code at its next restart, outside every agent's jail.
+- **What changed.** The console server never imports or runs the adapter, at
+  start or later. The steward runs it in its own process and sends the
+  result, as data:
+
+      python3 <kit>/agent.py --state <state dir> items-push --project <project> --adapter <adapter path>
+
+  Run it from inside the project's checkout, with `--adapter` inside that
+  project. The command picks its server from the directory it runs in, and
+  refuses an adapter outside the project.
+
+  The server checks what arrives against a closed schema (each item is
+  `title`, `parent`, `status`; unknown keys are refused). It keeps the last
+  push in the state dir, so a restart shows it. The single server and the
+  one server (`server.py --all`) take the same push, refuse in the same words,
+  and show the same items.
+- **What you see.** Until the first push, the inbox says the items appear when
+  the steward pushes them. It never shows a blank or invented items. Push
+  again whenever the register changes. `--adapter` is still accepted, so an
+  existing unit keeps starting, but it is ignored. If the stored items cannot
+  be read, the single server still starts. It shows no items, the inbox says
+  why, and `health` answers 200 with its register marked "error" until the
+  next `items-push` replaces the file.
+  The one server refuses just that project.
+- **How it is held.** A test runs the real server under an audit hook, with an
+  adapter configured whose import leaves a marker. The test fails if the
+  server imports, opens, compiles or runs that file.
+
 ## How it fits together
 
 ```
@@ -405,6 +436,8 @@ shows the spec's file time and says the last-commit time is unavailable.
   `visual-export`, and `register` and `steward`, which **only you** run.
   `--as NAME` names the session (0.8.2).
 - **`fold.py`** writes locked answers into your project through the adapter.
+  It runs in the steward's process, like `agent.py items-push`; the server
+  never runs the adapter.
 - **`plugin/`** holds the Claude Code plugin: the hook, the skills and the
   committee agents.
 - **`onboard.py`** and **`deploy/`** onboard a project and install the
@@ -452,6 +485,11 @@ old token from the next request.
     .venv/bin/python test_kit.py && .venv/bin/python test_server.py && .venv/bin/python test_onboard.py
     .venv/bin/python test_build.py
     CONSOLE_KIT_BROWSER=1 .venv/bin/python test_browser.py   # needs playwright + browsers
+
+`test_server.py`'s syscall tests need `strace`, and FAIL when it is missing,
+so they cannot quietly not run. On a machine without it, set
+`CONSOLE_KIT_NO_STRACE=1` to skip them; each is then reported, by name, as
+not run.
 
 To build the release zip:
 

@@ -42,7 +42,6 @@ import re
 import socket
 import stat
 import sys
-import tempfile
 import threading
 from dataclasses import dataclass, field
 from http.server import ThreadingHTTPServer
@@ -50,127 +49,29 @@ from pathlib import Path
 from typing import Callable
 
 from . import gitseam as G
+from .items import (ITEM_FIELDS, ITEMS, MAX_ITEM_COUNT, MAX_ITEMS, SnapshotAdapter,  # noqa: F401 (MS.<name>)
+                    snapshot_problem)
 from . import projectcfg as PC
 from . import publish as P
 from . import registry as R
 from . import rootfs as RF
 from . import names as N
-from . import schema as S
 from . import serverfile as SF
 from . import server as SV
 from .store import StoreError
 
 LOCK = "server.lock"
-ITEMS = "items.json"
 OLD_SOCKET = "agent.sock"
 SOCKET = "server.sock"
-MAX_ITEMS = 4 << 20
-MAX_ITEM_COUNT = 10_000
 MAX_PAGE = 4 << 20
 PROJECT_PATH = re.compile(r"^/p/([a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31})(/[^?#]*)\Z")
 FORBIDDEN = {"error": "forbidden"}   # one body for every refusal at the agent door: it names nothing (§3.5)
 # The agent POST routes the base handler serves; anything else is the 404 below. `_Handler.finish` drains the
 # unread body of that 404, and of every 403 and 503 here, within its own total deadline.
 POST_ROUTES = {"/cursor", "/working", "/reanchor", "/visual", "/visual-export", "/history-blob", "/history-specs",
-               *SV.AGENT_ROUTES}
+               "/items", *SV.AGENT_ROUTES}
 BEARER = re.compile(r"^Bearer (ck1_[A-Za-z0-9_-]{43})\Z")
 NO_HASH = "0" * 64   # compared against when a project has no hash, so an unknown project costs the same compare
-
-
-ITEM_FIELDS = {"title": (str,), "parent": (str, type(None)), "status": (str, type(None))}
-
-
-def snapshot_problem(doc: object) -> str | None:
-    """Why a pushed (or stored) snapshot cannot be served, naming the first bad field; None when it can.
-
-    One check for both doors in: `items-push` refuses with it, and a stored
-    STATE/items.json that fails it refuses that project, so no request ever
-    reaches the view with an item it cannot read (a list `parent` is unhashable
-    there, a number `title` breaks the feed).
-    """
-    if not isinstance(doc, dict) or set(doc) - {"items", "seed_questions", "board"} or "items" not in doc:
-        return 'items-push sends {"items": {...}, "seed_questions": [...], "board": ...}'
-    items, seeds, board = doc["items"], doc.get("seed_questions", []), doc.get("board")
-    if not isinstance(items, dict) or len(items) > MAX_ITEM_COUNT:
-        return f"items is an object of at most {MAX_ITEM_COUNT} item ids"
-    for k, v in items.items():
-        if not (isinstance(k, str) and len(k) <= 128 and S.ITEM_ID.match(k)):
-            return f"items: {k[:40]!r} is not an item id" if isinstance(k, str) else "items: an id is not a string"
-        if not isinstance(v, dict):
-            return f"items.{k} is not an object"
-        if set(v) - set(ITEM_FIELDS):
-            return f"items.{k} has unknown fields {sorted(set(v) - set(ITEM_FIELDS))[:5]}; known: {sorted(ITEM_FIELDS)}"
-        if "title" not in v:
-            return f"items.{k}.title is missing"
-        for f, types in ITEM_FIELDS.items():
-            if f in v and not isinstance(v[f], types):
-                want = " or ".join("null" if t is type(None) else t.__name__ for t in types)
-                return f"items.{k}.{f} must be {want}, not {type(v[f]).__name__}"
-    if seeds is None:
-        seeds = []
-    if not isinstance(seeds, list) or not all(isinstance(q, dict) for q in seeds):
-        return "seed_questions is a list of question objects"
-    for n, q in enumerate(seeds):   # the seed reads qid before the store checks the rest
-        if not isinstance(q.get("qid"), str):
-            return f"seed_questions[{n}].qid must be str"
-    if board is not None and not (isinstance(board, dict) and isinstance(board.get("shape"), str)
-                                  and isinstance(board.get("values"), dict)
-                                  and all(isinstance(k, str) and isinstance(v, str)
-                                          for k, v in board["values"].items())):
-        return "board is null or {shape: str, values: {str: str}}"
-    return None
-
-
-class SnapshotAdapter:
-    """The project's items, seed questions and board as its steward last pushed them (§3.6), read as data.
-
-    Absent until the first `items-push`: no items, no seeds, no board. The
-    file is re-read only when it changes, so a request costs a stat.
-    """
-
-    def __init__(self, state: Path) -> None:
-        self.path = Path(state) / ITEMS
-        self._lock = threading.Lock()
-        self._seen: tuple[int, int] | None = None
-        self._doc: dict = {"items": {}, "seed_questions": [], "board": None}
-
-    def _load(self) -> dict:
-        with self._lock:
-            try:
-                st = os.stat(self.path, follow_symlinks=False)
-            except FileNotFoundError:
-                self._seen, self._doc = None, {"items": {}, "seed_questions": [], "board": None}
-                return self._doc
-            key = (st.st_mtime_ns, st.st_size)
-            if key != self._seen:
-                fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
-                with os.fdopen(fd, "rb") as fh:
-                    raw = fh.read(MAX_ITEMS + 1)
-                if len(raw) > MAX_ITEMS:
-                    raise StoreError(f"{self.path} is over {MAX_ITEMS} bytes")
-                try:
-                    doc = json.loads(raw.decode("utf-8"))
-                except ValueError as e:   # UnicodeDecodeError and JSONDecodeError both
-                    raise StoreError(f"{self.path} is not JSON: {e}") from None
-                why = snapshot_problem(doc)
-                if why:
-                    raise StoreError(f"{self.path}: {why}")
-                self._doc = {"items": doc["items"], "seed_questions": doc.get("seed_questions") or [],
-                             "board": doc.get("board")}
-                self._seen = key
-            return self._doc
-
-    def items(self) -> dict[str, dict]:
-        return dict(self._load()["items"])
-
-    def seed_questions(self) -> list[dict]:
-        return [dict(q) for q in self._load()["seed_questions"]]
-
-    def board(self) -> dict | None:
-        return self._load()["board"]
-
-    def record(self, entries, dry_run):   # the fold runs in the steward's process (§4), never here
-        return []
 
 
 @dataclass
@@ -239,34 +140,6 @@ class ProjectConsole(SV.Console):
         if self.adapter.board() is None:
             return None
         return super().board()
-
-    def push_items(self, body: object) -> dict:
-        """`items-push` (§3.6): the steward's adapter output, as data. Kept in STATE/items.json, then seeded."""
-        why = snapshot_problem(body)
-        if why:
-            raise SV.RequestError(400, why)
-        items, seeds, board = body["items"], body.get("seed_questions") or [], body.get("board")
-        data = json.dumps({"items": items, "seed_questions": seeds, "board": board}, sort_keys=True).encode()
-        if len(data) > MAX_ITEMS:
-            raise SV.RequestError(413, f"the pushed items are over {MAX_ITEMS} bytes")
-        state = self.cfg.state
-        fd, tmp = tempfile.mkstemp(dir=state, prefix=".items.", suffix=".tmp")   # 0600 from creation
-        try:
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(data)
-            os.replace(tmp, state / ITEMS)
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
-        try:
-            added = self.seed()
-        except StoreError as e:   # a pushed seed the store refuses: the items stand, the seed is named
-            raise SV.RequestError(400, f"items kept; a seed question was refused: {e}") from None
-        self._bump()
-        return {"items": len(items), "seeds_added": added}
 
 
 def open_project(name: str, entry: dict, team_domain: str, registry: dict | str) -> Hosted:
@@ -435,14 +308,9 @@ class MultiAgentHandler(SV.AgentHandler):
     def do_POST(self) -> None:
         if self._project() is None:
             return
-        if self.path == "/items":
-            try:
-                return self._send(200, self.console.push_items(self._body()))
-            except SV.RequestError as e:
-                return self._send(e.code, {"error": str(e)})
         if self.path not in POST_ROUTES:
             return self._send(404, {"error": "not found"})
-        super().do_POST()
+        super().do_POST()   # /items included: SV.AgentHandler serves it for both servers (Q24)
 
 
 class MultiOwnerHandler(SV.OwnerHandler):

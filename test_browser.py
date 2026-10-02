@@ -1175,8 +1175,10 @@ class LiveConsoleTests(unittest.TestCase):
 
     # -- the real server ------------------------------------------------------------
 
-    def serve(self):
+    def serve(self, snapshot=False):
+        """The real Console and doors; `snapshot` gives it what `serve` gives it since Q24 (pushed items only)."""
         import tempfile
+        from console_kit import items as IT
         from console_kit import server as SV
         from test_server import AUD, HOSTNAME, KEY, TEAM, token
         td = tempfile.mkdtemp(prefix="ck-live-")
@@ -1185,7 +1187,7 @@ class LiveConsoleTests(unittest.TestCase):
         (root / "page.html").write_text(LIVE_HOST)
         cfg = SV.Config(root=root, page=root / "page.html", state=root / "state", adapter=root / "unused.py",
                         team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="live-test")
-        console = SV.Console(cfg, _LiveAdapter())
+        console = SV.Console(cfg, IT.SnapshotAdapter(cfg.state) if snapshot else _LiveAdapter())
         verify = SV.access_verifier(TEAM, AUD, key_for=lambda _t: KEY.public_key())
         owner = SV.owner_server(console, verify, 0)
         threading.Thread(target=owner.serve_forever, daemon=True).start()
@@ -1254,6 +1256,24 @@ class LiveConsoleTests(unittest.TestCase):
         self.assertTrue(page.evaluate("window.__notReloaded === true"), "the page reloaded")
 
     # -- tests -------------------------------------------------------------------------
+
+    def test_before_the_first_items_push_the_inbox_says_why_the_board_is_empty(self):
+        # Q24. Catches: a silent blank before the steward's first push (the server runs no adapter, so it has
+        # no items until then), the note never rendered, and a note that stays after the push arrives.
+        from console_kit import items as IT
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve(snapshot=True)
+                page = self.page(kind, 1280, url)
+                self.open_inbox(page, 1280)
+                note = page.wait_for_selector(".ck-items-note")
+                self.assertEqual(note.text_content(), IT.NOT_PUSHED)
+                self.assertEqual(note.get_attribute("role"), "status")
+                code, out = self.SV.agent_request(self.cfg.socket, "POST", "/items",
+                                                  {"items": dict(LIVE_ITEMS), "seed_questions": [], "board": None})
+                self.assertEqual(code, 200, out)
+                page.wait_for_function("document.querySelector('.ck-items-note') === null", timeout=10000)
+                self.assert_not_reloaded(page)
 
     def test_a_new_question_appears_without_reload_and_the_chip_counts_it(self):
         # Catches: a page that only refreshes on open or on Refresh (the owner sees nothing
