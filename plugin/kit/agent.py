@@ -668,6 +668,9 @@ def _page_snapshot(a) -> int:
         print(f"refused ({code}): {out.get('error')}", file=sys.stderr)
         return 1
     sys.stdout.write(_json(out))
+    # Q29: staged only. Nothing served changes until the owner presses the button; no agent can.
+    print(f"staged {commit[:12]}: the console shows it as a proposal; it is served once the owner presses "
+          f"\"{PS.USE}\"", file=sys.stderr)
     return 0
 
 

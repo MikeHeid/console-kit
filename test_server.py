@@ -2987,8 +2987,11 @@ for path in ("/", "/index.html", "/api/board", "/api/usage", "/api/feed", "/api/
              "/api/evidence?qid=LANE.1/Q2", "/api/visual?id=" + "0" * 24):
     call("owner GET " + path, owner, "GET", path)
 out["page_before_snapshot"] = owner("GET", "/")[1]
-if p.get("snapshot"):   # Q28: the page, as `agent.py page-snapshot` sends it
+if p.get("snapshot"):   # Q28: the page, as `agent.py page-snapshot` sends it; Q29: staged, then the owner publishes
     call("agent POST /page-snapshot", agent, "POST", "/page-snapshot", p["snapshot"])
+    out["page_staged"] = owner("GET", "/")[1]
+    out["preview"] = call("owner GET /api/page-staged", owner, "GET", "/api/page-staged")
+    call("owner POST /api/page-publish", owner, "POST", "/api/page-publish", {"commit": p["snapshot"]["commit"]})
 out["page"] = owner("GET", "/")[1]
 out["view"] = call("owner GET /api/view", owner, "GET", "/api/view")
 out["check"] = call("owner GET /api/check", owner, "GET", "/api/check")
@@ -5798,7 +5801,10 @@ root = Path(sys.argv[2])
 cfg = SV.Config(root=root, page=None, state=root / "state", adapter=root / "none.py",
                 team_domain="t.example.com", aud="a" * 64, hostname="h.example.com", port=0)
 c = SV.Console(cfg, IT.SnapshotAdapter(cfg.state, tolerant=True))
-print(json.dumps(c.push_page_snapshot(json.loads(sys.argv[3]))))
+body = json.loads(sys.argv[3])
+print(json.dumps(c.push_page_snapshot(body)))
+print(json.dumps(c.page()))   # the staged page shown as a proposal: both files read
+print(json.dumps(c.publish_page({"commit": body["commit"]})))
 again = SV.Console(cfg, IT.SnapshotAdapter(cfg.state, tolerant=True))   # a restart: read back from STATE
 print(json.dumps("DASHBOARD-V1" in again.page() and "DASHBOARD-V1" in again.page()))
 '''
@@ -5815,6 +5821,10 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
 
     def push(self, body):
         return SV.agent_request(self.scfg.socket, "POST", "/page-snapshot", body)
+
+    def publish(self, commit: str = "c0ffee" + "0" * 34) -> dict:
+        """The owner's "Use this page" (Q29), as the owner route calls it; the route itself is PageStagePublishTests'."""
+        return self.sconsole.publish_page({"commit": commit})
 
     def page(self) -> str:
         return self.sconsole.page()   # what the owner door's GET / sends, byte for byte
@@ -5836,7 +5846,11 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
         # AC 2. Catches: the snapshot held in memory only; no provenance line, or one that calls an unreviewed ref
         # reviewed; and the page's own markup or script dropped (point 4: both scripts stay in the page).
         code, out = self.push(page_body(DASH))
-        self.assertEqual((code, out), (200, {"stored": "c0ffee" + "0" * 34, "ref": "origin/main", "reviewed": True}))
+        self.assertEqual((code, out), (200, {"staged": "c0ffee" + "0" * 34, "ref": "origin/main", "reviewed": True}))
+        self.assertEqual(os.stat(self.scfg.state / PS.STAGED).st_mode & 0o777, 0o600)
+        self.stop_single()
+        self.start_single()   # the staged page survives a restart too, and is published after it
+        self.assertEqual(self.publish(), {"published": "c0ffee" + "0" * 34, "ref": "origin/main", "reviewed": True})
         self.stop_single()
         self.start_single()
         html = self.page()
@@ -5844,12 +5858,17 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
         self.assertIn('document.body.dataset.pageScript = "ran";', html)
         self.assertIn(P.BEGIN, html)
         self.assertLess(html.index("pageScript"), html.index(P.BEGIN))   # the page's script, then the console's
-        self.assertIn("Dashboard page from origin/main @ c0ffee000000 (from the steward)", html)
+        self.assertIn("Dashboard page from origin/main @ c0ffee000000 (staged by the steward, published by you)",
+                      html)
         self.assertEqual(os.stat(self.scfg.state / PS.SNAPSHOT).st_mode & 0o777, 0o600)
+        self.assertFalse(os.path.lexists(self.scfg.state / PS.STAGED))   # published: no proposal left
+        self.assertNotIn("ck-page-proposed", html)
         self.assertEqual(self.push(page_body(DASH, ref="feature/x", reviewed=False))[0], 200)
+        self.publish()
         html = self.page()
-        self.assertIn("Dashboard page from feature/x @ c0ffee000000 (unreviewed ref)", html)
-        self.assertNotIn("from the steward", html)
+        self.assertIn("Dashboard page from feature/x @ c0ffee000000 (staged from an unreviewed ref, published by you)",
+                      html)
+        self.assertNotIn("staged by the steward", html)
 
     def test_the_route_takes_only_the_closed_schema_and_a_refusal_keeps_the_last_snapshot(self):
         # AC 3, the server's half. Catches: an unknown or missing key accepted, a ref or path that could carry
@@ -5857,6 +5876,7 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
         # last good snapshot.
         import base64
         self.assertEqual(self.push(page_body(DASH))[0], 200)
+        self.publish()
         good = page_body(DASH)
         bads = [{**good, "extra": 1}, {k: v for k, v in good.items() if k != "reviewed"}, [good], "page",
                 {**good, "ref": "-x"}, {**good, "ref": "a b"}, {**good, "ref": "<script>"}, {**good, "ref": ""},
@@ -5879,40 +5899,50 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
                       f"Content-Length: {PS.MAX_BODY + 1}\r\n\r\n".encode())
             self.assertTrue(s.recv(4096).startswith(b"HTTP/1.0 413"))
         self.assertIn("DASHBOARD-V1", self.page())   # every refusal left the last snapshot standing
+        self.assertFalse(os.path.lexists(self.scfg.state / PS.STAGED))   # and staged nothing
 
     def test_a_link_fifo_or_directory_at_the_snapshot_is_never_followed_and_a_push_recovers(self):
-        # AC 2. Catches: the snapshot opened or written by path (a planted link would serve the agent's page), an
-        # open that waits on a FIFO, and a directory that leaves the page unreadable for good.
+        # AC 2, for both files (Q29). Catches: either opened or written by path (a planted link would serve, or
+        # publish, the agent's page), an open that waits on a FIFO, a directory that leaves the page unreadable for
+        # good, and a publish that takes a staged file without checking it again.
         outside = self.base / "outside.json"
         planted = json.dumps(page_body(SENTINEL_PAGE))   # a VALID snapshot: only a followed link would serve it
         outside.write_text(planted)
-        snap = self.scfg.state / PS.SNAPSHOT
         kinds = ("link", "fifo", "dir", "unchecked") + (("no access",) if os.geteuid() != 0 else ())
-        for kind in kinds:
-            with self.subTest(kind=kind):
-                if kind == "link":
-                    snap.symlink_to(outside)
-                elif kind == "no access":   # EACCES out of read_at: the note, never an error out of page()
-                    snap.write_text(planted)
-                    os.chmod(snap, 0)
-                elif kind == "unchecked":   # a plain file written past the route: re-checked when it is read
-                    snap.write_text(json.dumps(page_body(SENTINEL_PAGE, ref="<script>")))
-                elif kind == "fifo":
-                    planted_fifo(self, snap)
-                else:
-                    snap.mkdir()
-                    (snap / "kept").write_text("kept")
-                got = within(self, self.page)
-                html = got.get("value", "")
-                self.assertIn(html_escape(PS.UNREADABLE), html)
-                self.assertNotIn("SENTINEL-PAGE-TARGET", html)
-                self.assertEqual(self.push(page_body(DASH))[0], 200)
-                self.assertIn("DASHBOARD-V1", self.page())
-                self.assertTrue(stat.S_ISREG(os.lstat(snap).st_mode))
-                self.assertEqual(outside.read_text(), planted)   # the link's target, untouched
-                snap.unlink()
-        aside = [n for n in os.listdir(self.scfg.state) if n.startswith(f".{PS.SNAPSHOT}.set-aside.")]
-        self.assertEqual([(self.scfg.state / a / "kept").read_text() for a in aside], ["kept"])
+        for name, note in ((PS.SNAPSHOT, PS.UNREADABLE), (PS.STAGED, PS.STAGED_UNREADABLE)):
+            snap = self.scfg.state / name
+            for kind in kinds:
+                with self.subTest(name=name, kind=kind):
+                    if kind == "link":
+                        snap.symlink_to(outside)
+                    elif kind == "no access":   # EACCES out of read_at: the note, never an error out of page()
+                        snap.write_text(planted)
+                        os.chmod(snap, 0)
+                    elif kind == "unchecked":   # a plain file written past the route: re-checked when it is read
+                        snap.write_text(json.dumps(page_body(SENTINEL_PAGE, ref="<script>")))
+                    elif kind == "fifo":
+                        planted_fifo(self, snap)
+                    else:
+                        snap.mkdir()
+                        (snap / "kept").write_text("kept")
+                    got = within(self, self.page)
+                    html = got.get("value", "")
+                    self.assertIn(html_escape(note), html)
+                    self.assertNotIn("SENTINEL-PAGE-TARGET", html)
+                    if name == PS.STAGED:   # the planted proposal is never published, whatever commit is named
+                        err = within(self, lambda: self.publish(page_body(SENTINEL_PAGE)["commit"])).get("error")
+                        self.assertIsInstance(err, SV.RequestError)
+                        self.assertEqual((err.code, str(err)), (409, PS.STAGED_UNREADABLE))
+                        self.assertFalse(os.path.lexists(self.scfg.state / PS.SNAPSHOT))
+                    self.assertEqual(self.push(page_body(DASH))[0], 200)
+                    self.publish()
+                    self.assertIn("DASHBOARD-V1", self.page())
+                    self.assertTrue(stat.S_ISREG(os.lstat(self.scfg.state / PS.SNAPSHOT).st_mode))
+                    self.assertEqual(outside.read_text(), planted)   # the link's target, untouched
+                    for n in (PS.SNAPSHOT, PS.STAGED):
+                        (self.scfg.state / n).unlink(missing_ok=True)
+            aside = [n for n in os.listdir(self.scfg.state) if n.startswith(f".{name}.set-aside.")]
+            self.assertEqual([(self.scfg.state / a / "kept").read_text() for a in aside], ["kept"])
 
     def test_every_snapshot_file_operation_is_dir_relative_and_follows_no_link(self):
         # AC 2, the syscall half: under strace, a push, a restart and two page reads touch page-snapshot.json only
@@ -5928,9 +5958,13 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
                            capture_output=True, text=True, timeout=120)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.splitlines()[-1], "true")
-        safe, unsafe = dirfd_ops(trace.read_text(), (PS.SNAPSHOT,))
+        text = trace.read_text()
+        safe, unsafe = dirfd_ops(text, (PS.SNAPSHOT, PS.STAGED))
         self.assertEqual(unsafe, [])
-        self.assertGreaterEqual(safe, 3)   # the set-aside stat, the store's rename, and each read's open
+        self.assertGreaterEqual(safe, 6)   # each file's set-aside stat, rename and reads, and the staged unlink
+        for name in (PS.SNAPSHOT, PS.STAGED):   # both are exercised, so the count is not one file's alone
+            self.assertEqual(dirfd_ops(text, (name,))[1], [])
+            self.assertGreaterEqual(dirfd_ops(text, (name,))[0], 2, name)
 
     # -- point 1: --page is never read -----------------------------------------------------------------------
 
@@ -5965,10 +5999,17 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
                 self.assertEqual(r.returncode, 0, r.stderr[-2000:])
                 got = json.loads(r.stdout.strip().splitlines()[-1])
                 self.assertEqual(got["codes"]["agent POST /page-snapshot"], 200)
-                before, after = got["out"]["page_before_snapshot"], got["out"]["page"]
+                self.assertEqual(got["codes"]["owner GET /api/page-staged"], 200)
+                self.assertEqual(got["codes"]["owner POST /api/page-publish"], 200)
+                before, staged, after = (got["out"]["page_before_snapshot"], got["out"]["page_staged"],
+                                         got["out"]["page"])
                 self.assertIn(html_escape(PS.NO_SNAPSHOT), before)
+                self.assertIn(html_escape(PS.NO_SNAPSHOT), staged)   # staged alone serves nothing (point 5)
+                self.assertNotIn("DASHBOARD-V1", staged)
+                self.assertIn("Proposed dashboard: origin/main @ c0ffee000000", staged)
+                self.assertIn("DASHBOARD-V1", got["out"]["preview"])
                 self.assertIn("DASHBOARD-V1", after)
-                for html in (before, after):
+                for html in (before, staged, after):
                     self.assertNotIn("SENTINEL-PAGE-TARGET", html)
                 text = trace.read_text()
                 self.assertIn(str(root / "state" / "store.jsonl"), text)   # the trace sees the server's file calls
@@ -6005,11 +6046,17 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
         r = self.cli("--path", "docs/index.html")
         self.assertEqual(r.returncode, 0, r.stderr)
         head = git(root, "rev-parse", "HEAD").stdout.strip()
-        self.assertEqual(json.loads(r.stdout), {"stored": head, "ref": "origin/main", "reviewed": True})
-        self.assertIn(f"Dashboard page from origin/main @ {head[:12]} (from the steward)", self.page())
+        self.assertEqual(json.loads(r.stdout), {"staged": head, "ref": "origin/main", "reviewed": True})
+        self.assertIn(f'staged {head[:12]}: the console shows it as a proposal; it is served once the owner presses '
+                      f'"{PS.USE}"', r.stderr)
+        self.assertIn(html_escape(PS.NO_SNAPSHOT), self.page())   # Q29: staging alone serves nothing
+        self.publish(head)
+        self.assertIn(f"Dashboard page from origin/main @ {head[:12]} (staged by the steward, published by you)",
+                      self.page())
         (root / "docs" / "index.html").write_text(DASH.replace("DASHBOARD-V1", "EDITED-IN-THE-WORKING-TREE"))
         git(root, "add", "docs/index.html")   # staged, too: still not a commit
         self.assertEqual(self.cli("--path", "docs/index.html").returncode, 0)
+        self.publish(head)
         self.assertIn("DASHBOARD-V1", self.page())
         self.assertNotIn("EDITED-IN-THE-WORKING-TREE", self.page())
         git(root, "commit", "-qm", "an unmerged edit")   # on main, not on origin/main
@@ -6020,9 +6067,12 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
         self.assertNotIn("EDITED-IN-THE-WORKING-TREE", self.page())
         r = self.cli("--from-ref", "main", "--path", "docs/index.html", "--unreviewed")
         self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("EDITED-IN-THE-WORKING-TREE", self.page())   # proposed, not served
+        self.assertIn("· unreviewed", self.page())
+        self.publish(json.loads(r.stdout)["staged"])
         html = self.page()
         self.assertIn("EDITED-IN-THE-WORKING-TREE", html)
-        self.assertIn("(unreviewed ref)", html)
+        self.assertIn("(staged from an unreviewed ref, published by you)", html)
 
     def test_the_cli_reads_head_from_the_commit_even_with_a_dirty_tree(self):
         # Code review LOW (M3 survived): the page read from the working tree when the ref is HEAD, the one ref a
@@ -6038,8 +6088,8 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
                     git(root, "add", "docs/index.html")
                 r = self.cli("--from-ref", "HEAD", "--path", "docs/index.html", "--unreviewed")
                 self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertEqual(json.loads(r.stdout), {"stored": head, "ref": "HEAD", "reviewed": False})
-                doc, _ = PS.load(self.scfg.state)
+                self.assertEqual(json.loads(r.stdout), {"staged": head, "ref": "HEAD", "reviewed": False})
+                doc, _ = PS.load(self.scfg.state, PS.STAGED)
                 self.assertEqual(PS.page_text(doc["content"]), DASH)   # the committed bytes, exactly
                 self.assertNotIn("DIRTY-WORKING-TREE", self.page())
 
@@ -6066,6 +6116,157 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
         self.assertIn(html_escape(PS.NO_SNAPSHOT), self.page())   # nothing was ever sent
 
 
+PREVIEW_IFRAME = '<iframe sandbox="" src="/api/page-staged" title="Proposed dashboard page" referrerpolicy="no-referrer">'
+
+
+class PageStagePublishTests(_Live, unittest.TestCase):
+    """Q29 ("Agents stage, I publish"): a pushed page is a proposal; only the owner's route serves it."""
+
+    C1 = "c0ffee" + "0" * 34
+    C2 = "beef" + "1" * 36
+
+    def stage(self, html=DASH, commit=C1, **kw):
+        code, out = self.agent_post("/page-snapshot", page_body(html, commit=commit, **kw))
+        self.assertEqual(code, 200, out)
+        return out
+
+    def page(self) -> str:
+        code, html = self.get("/")
+        self.assertEqual(code, 200)
+        return html
+
+    def publish(self, body, **kw):
+        return self.req("POST", "/api/page-publish", body, tok=kw.pop("tok", token()), **kw)
+
+    def served(self) -> bytes | None:
+        snap = self.cfg.state / PS.SNAPSHOT
+        return snap.read_bytes() if snap.exists() else None
+
+    def raw_get(self, path, tok=True):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("GET", path, headers={"Cf-Access-Jwt-Assertion": token()} if tok else {})
+        r = conn.getresponse()
+        out = (r.status, dict(r.getheaders()), r.read())
+        conn.close()
+        return out
+
+    def test_staging_alone_changes_nothing_served_and_shows_the_proposal(self):
+        # Points 1, 3 and 5. Catches: /page-snapshot serving directly (the mutant the brief names), no proposal
+        # shown, a proposal that leaves out the ref, commit, size or kind, and the no-snapshot note dropped.
+        out = self.stage()
+        self.assertEqual(out, {"staged": self.C1, "ref": "origin/main", "reviewed": True})
+        self.assertIsNone(self.served())
+        html = self.page()
+        self.assertNotIn("DASHBOARD-V1", html)
+        self.assertNotIn("pageScript", html)
+        self.assertIn(f'<p class="ck-page-note" role="status">{html_escape(PS.NO_SNAPSHOT)}</p>', html)
+        size = len(DASH.encode())
+        self.assertIn(f'<p class="ck-page-proposed-line">Proposed dashboard: origin/main @ c0ffee000000 · '
+                      f'{size} bytes · reviewed</p>', html)
+        self.assertIn(f'<button type="button" class="ck-page-use" data-commit="{self.C1}">Use this page</button>',
+                      html)
+        self.assertIn(PREVIEW_IFRAME, html)
+        self.stage(commit=self.C2, ref="feature/x", reviewed=False)   # a second staging replaces the proposal
+        html = self.page()
+        self.assertIn(f"Proposed dashboard: feature/x @ {self.C2[:12]} · {size} bytes · unreviewed", html)
+        self.assertNotIn(self.C1[:12], html)
+        self.assertIsNone(self.served())
+
+    def test_the_preview_frame_is_sandboxed_with_no_allowance_at_all(self):
+        # Point 3, the attribute layer. Catches: allow-scripts or allow-same-origin added to the frame (the second
+        # would hand the staged script the console's origin), and the frame pointed anywhere but the gated route.
+        import re
+        self.stage()
+        frames = re.findall(r"<iframe\b[^>]*>", self.page())
+        self.assertEqual(frames, [PREVIEW_IFRAME])
+
+    def test_the_preview_route_is_gated_and_answers_under_the_sandbox_csp(self):
+        # Point 3, the header layer: each layer alone stops the script. Catches: the route ungated, the staged page
+        # sent under the console's own CSP (which runs scripts), or as anything but the exact staged bytes.
+        self.assertEqual(self.raw_get("/api/page-staged")[0], 404)   # nothing staged
+        self.stage()
+        self.assertEqual(self.raw_get("/api/page-staged", tok=False)[0], 403)
+        code, headers, body = self.raw_get("/api/page-staged")
+        self.assertEqual(code, 200)
+        self.assertEqual(headers["Content-Security-Policy"], SV.VISUAL_HTML_CSP)
+        self.assertTrue(SV.VISUAL_HTML_CSP.startswith("sandbox; default-src 'none';"))
+        self.assertNotIn("script-src", SV.VISUAL_HTML_CSP)
+        self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
+        self.assertEqual(body, DASH.encode())
+        self.assertIsNone(self.served())   # a preview publishes nothing
+
+    def test_publish_takes_the_staged_commit_and_refuses_a_mismatch_by_name(self):
+        # Point 2. Catches: a publish with nothing staged, a stale page's button publishing a newer staging the
+        # owner never saw, a bad body accepted, and a staged file left behind to be published twice.
+        self.assertEqual(self.publish({"commit": self.C1}),
+                         (404, {"error": "no dashboard page is staged; ask the steward to run agent.py page-snapshot"}))
+        self.stage(commit=self.C2)
+        code, out = self.publish({"commit": self.C1})
+        self.assertEqual(code, 409)
+        self.assertEqual(out["error"], f"the staged page is now {self.C2[:12]}, not {self.C1[:12]}: a newer one was "
+                                       f"staged since this page loaded; reload, check it, and press \"Use this page\" "
+                                       f"again")
+        for bad in ({}, {"commit": "abc"}, {"commit": self.C2, "extra": 1}, [self.C2], {"commit": self.C2.upper()}):
+            self.assertEqual(self.publish(bad)[0], 400, bad)
+        self.assertIsNone(self.served())
+        self.assertEqual(self.publish({"commit": self.C2}),
+                         (200, {"published": self.C2, "ref": "origin/main", "reviewed": True}))
+        html = self.page()
+        self.assertIn("DASHBOARD-V1", html)
+        self.assertIn(f"Dashboard page from origin/main @ {self.C2[:12]} (staged by the steward, published by you)",
+                      html)
+        self.assertNotIn("ck-page-proposed", html)
+        self.assertNotIn(html_escape(PS.NO_SNAPSHOT), html)
+        self.assertFalse(os.path.lexists(self.cfg.state / PS.STAGED))
+        self.assertEqual(self.publish({"commit": self.C2})[0], 404)   # once
+
+    def test_publish_checks_the_staged_file_again(self):
+        # Point 2: the inject and caps checks re-run at publish. Catches: a staged file written past the route
+        # (a page the console cannot be injected into, a markup ref) published because the route checked it once.
+        for bad in (page_body("<html>no body</html>"), page_body(DASH, ref="<script>"),
+                    page_body("<html><body>" + "x" * PS.MAX_PAGE + "</body></html>")):
+            (self.cfg.state / PS.STAGED).write_text(json.dumps(bad))
+            self.assertEqual(self.publish({"commit": bad["commit"]}), (409, {"error": PS.STAGED_UNREADABLE}))
+            self.assertIsNone(self.served())
+            self.assertIn(html_escape(PS.STAGED_UNREADABLE), self.page())
+
+    def test_the_publish_route_is_behind_access_and_origin(self):
+        # Point 2: the answer/lock gate. Catches: the route without the Access check, or without the Origin check
+        # (a page on another site, or a request with no Origin, publishing in the owner's session).
+        self.stage()
+        for case, kw in (("no token", {"tok": None}), ("bad token", {"tok": "x"}),
+                         ("another site", {"headers": {"Origin": "https://evil.example.com"}}),
+                         ("no Origin", {"origin": False})):
+            with self.subTest(case=case):
+                self.assertEqual(self.publish({"commit": self.C1}, **kw)[0], 403)
+                self.assertIsNone(self.served())
+        self.assertEqual(self.publish({"commit": self.C1})[0], 200)
+
+    def test_no_agent_route_changes_the_served_page(self):
+        # Point 4. Every agent-door route, GET and POST, driven with a staging body, a publish body and nothing,
+        # while a different page is staged. Catches: an agent verb that publishes, /page-snapshot publishing, and
+        # a publish route reachable from the agent socket. The route list is the one server's own, so a new agent
+        # route is driven here without editing this test.
+        self.stage()
+        self.assertEqual(self.publish({"commit": self.C1})[0], 200)
+        served = self.served()
+        self.stage(DASH.replace("DASHBOARD-V1", "STAGED-V2"), commit=self.C2)
+        posts = sorted(MS.POST_ROUTES | {"/page-publish", "/api/page-publish", "/publish", "/use"})
+        bodies = (page_body(DASH.replace("DASHBOARD-V1", "STAGED-V2"), commit=self.C2), {"commit": self.C2}, None)
+        for path in posts:
+            for body in bodies:
+                SV.agent_request(self.cfg.socket, "POST", path, body)
+                self.assertEqual(self.served(), served, (path, body))
+        for path in ("/page-publish", "/api/page-publish"):
+            self.assertEqual(SV.agent_request(self.cfg.socket, "POST", path, {"commit": self.C2})[0], 404)
+        for path in ("/view", "/check", "/health", "/history-wants", "/page-staged", "/api/page-staged"):
+            SV.agent_request(self.cfg.socket, "GET", path)
+        self.assertEqual(self.served(), served)
+        html = self.page()
+        self.assertIn("DASHBOARD-V1", html)
+        self.assertNotIn("STAGED-V2", html)
+
+
 class PageParityTests(_OneServer, _SingleServer, unittest.TestCase):
     """Q28: the same push is answered alike and serves the same page on the single server and the one server."""
 
@@ -6080,6 +6281,19 @@ class PageParityTests(_OneServer, _SingleServer, unittest.TestCase):
         for body in (page_body(DASH, ref="-x"), {"content": ""}, page_body(DASH)):
             data = json.dumps(body).encode()
             self.assertEqual(both[0]("POST", "/page-snapshot", data), both[1]("POST", "/page-snapshot", data), body)
+        proposed = P.strip(self.sconsole.page())   # Q29: the same proposal, and nothing served, on both
+        code, one = self.owner("alpha", "GET", "/")
+        self.assertEqual((code, P.strip(one)), (200, proposed))
+        self.assertIn("Proposed dashboard: origin/main @ c0ffee000000", proposed)
+        self.assertNotIn("DASHBOARD-V1", proposed)
+        commit = page_body(DASH)["commit"]
+        for wrong in ({"commit": "f" * 40}, {}):   # refused alike
+            code, out = self.owner("alpha", "POST", "/api/page-publish", wrong)
+            with self.assertRaises(SV.RequestError) as e:
+                self.sconsole.publish_page(wrong)
+            self.assertEqual((code, out), (e.exception.code, {"error": str(e.exception)}), wrong)
+        self.assertEqual(self.owner("alpha", "POST", "/api/page-publish", {"commit": commit}),
+                         (200, self.sconsole.publish_page({"commit": commit})))
         single = P.strip(self.sconsole.page())
         code, one = self.owner("alpha", "GET", "/")
         self.assertEqual(code, 200)

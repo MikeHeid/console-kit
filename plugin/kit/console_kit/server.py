@@ -786,12 +786,37 @@ class Console:
         return PS.render(self.cfg.state, block)
 
     def push_page_snapshot(self, body: object) -> dict:
-        """`page-snapshot` (Q28): a page the steward read from a commit, as data. Kept in STATE, served from there."""
+        """`page-snapshot` (Q28): a page the steward read from a commit, as data.
+
+        It is only STAGED (Q29): shown to the owner as a proposal, never served,
+        until they press "Use this page" (`publish_page`, the owner door only).
+        """
         why = PS.snapshot_problem(body)
         if why:
             raise RequestError(400, why)
-        PS.store(self.cfg.state, body)
-        return {"stored": body["commit"], "ref": body["ref"], "reviewed": body["reviewed"]}
+        with self._lock:
+            PS.stage(self.cfg.state, body)
+        return {"staged": body["commit"], "ref": body["ref"], "reviewed": body["reviewed"]}
+
+    def publish_page(self, body: object) -> dict:
+        """The owner's "Use this page" (Q29): the staged page, re-checked, becomes the served one.
+
+        No agent route reaches this. `commit` must be the staged commit the
+        owner's page showed, so a page staged after they looked is refused.
+        The ancestor check `agent.py` ran cannot be repeated here: this server
+        runs no git.
+        """
+        if not isinstance(body, dict) or set(body) != {"commit"}:
+            raise RequestError(400, 'page-publish takes {"commit": <the staged commit id>}')
+        with self._lock:
+            try:
+                return PS.publish(self.cfg.state, body["commit"])
+            except PS.PublishError as e:
+                raise RequestError(e.code, str(e)) from None
+
+    def staged_page(self) -> bytes | None:
+        """The staged page's bytes for the owner's sandboxed preview; None when nothing (readable) is staged."""
+        return PS.staged_page(self.cfg.state)
 
     def relock(self, body: object) -> list[dict]:
         """Re-lock a locked answer as it stands: one answer superseding it, word for word, and its lock.
@@ -1299,6 +1324,11 @@ class OwnerHandler(_Handler):
             return self._check()
         if self.path == "/api/usage":  # 0.8.6: the footer's probe
             return self._send(200, read_usage(self.console.cfg))
+        if self.path == "/api/page-staged":   # Q29: the proposal's preview, framed sandbox="" and sandboxed here too
+            data = self.console.staged_page()
+            if data is None:
+                return self._send(404, {"error": "no dashboard page is staged"})
+            return self._send_raw(200, data, "text/html; charset=utf-8", VISUAL_HTML_CSP)
         route, query = self._query()
         live = {"/api/wait": self._wait, "/api/feed": self._feed, "/api/evidence": self._evidence,
                 "/api/visual": self._visual}.get(route)
@@ -1421,7 +1451,7 @@ class OwnerHandler(_Handler):
         if not self._gate():
             return
         kind = OWNER_ROUTES.get(self.path)
-        if kind is None and self.path not in ("/api/relock", "/api/lock-all"):
+        if kind is None and self.path not in ("/api/relock", "/api/lock-all", "/api/page-publish"):
             return self._send(404, {"error": "not found"})
         # Browsers send Origin on every POST, same-origin included, so a missing one is refused too:
         # an absent header must not read as "trusted".
@@ -1432,6 +1462,8 @@ class OwnerHandler(_Handler):
                 return self._send(200, {"records": self.console.relock(self._body())})
             if self.path == "/api/lock-all":
                 return self._send(200, self.console.lock_all(self._body()))
+            if self.path == "/api/page-publish":   # Q29: the owner's "Use this page"; no agent route publishes
+                return self._send(200, self.console.publish_page(self._body()))
             self._send(200, {"record": self.console.write(kind, self._body(), "owner")})
         except RequestError as e:
             self._send(e.code, {**e.extra, "error": str(e)})
