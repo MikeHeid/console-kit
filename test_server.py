@@ -3430,6 +3430,19 @@ class _OneServer:
 class OneServerTests(_OneServer, unittest.TestCase):
     """K3 step 3: the one server's doors, items-push, and its rules (AC3.3, AC3.5, AC3.6)."""
 
+    def test_each_projects_page_config_carries_the_running_kit_version(self):
+        # The footer's version (owner, 2026-10-01) on the ONE server. Catches: a ProjectConsole.page() of its
+        # own that builds the config without `version`; today it holds only because page() is inherited.
+        import re
+        from console_kit import __version__
+        self.spawn()
+        for name in ("alpha", "beta"):
+            code, html = self.owner(name, "GET", "/")
+            self.assertEqual(code, 200, name)
+            m = re.search(r'<script type="application/json" id="console-kit-config">(.*?)</script>', html, re.S)
+            self.assertIsNotNone(m, f"{name}: no config block in the served page")
+            self.assertEqual(json.loads(m.group(1)).get("version"), __version__, name)
+
     def test_ac35_no_project_code_and_items_only_from_the_push(self):
         # Catches: importing the adapter (or reading its source and exec-ing a string), spawning git or anything
         # else, and validating writes against the adapter rather than the pushed snapshot.
