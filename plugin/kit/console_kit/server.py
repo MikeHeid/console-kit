@@ -832,7 +832,8 @@ class Console:
         `cfg.page` is not read, by this server or the one server: a page an agent
         can edit would put its script in the owner's browser.
         """
-        block = P.console_block(json.dumps({"api": "/api", "project": self.cfg.project}))
+        # `version` is the running kit's, the value /health reports: the footer shows it (owner, 2026-10-01).
+        block = P.console_block(json.dumps({"api": "/api", "project": self.cfg.project, "version": __version__}))
         return PS.render(self.cfg.state, block)
 
     def push_page_snapshot(self, body: object) -> dict:

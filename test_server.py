@@ -536,6 +536,21 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertIn('id="console-kit-config"', page)
 
+    def test_the_page_config_carries_the_running_kit_version(self):
+        # Owner, 2026-10-01: "version number should be in footer". Catches: a footer version typed into
+        # console.js (it would drift from the release), or one the page has no way to learn.
+        import re
+        from console_kit import __version__
+        code, page = self.req("GET", "/", tok=token())
+        self.assertEqual(code, 200)
+        m = re.search(r'<script type="application/json" id="console-kit-config">(.*?)</script>', page, re.S)
+        self.assertIsNotNone(m, "no config block in the served page")
+        self.assertEqual(json.loads(m.group(1)).get("version"), __version__)
+        health = SV.agent_request(self.cfg.socket, "GET", "/health")[1]
+        self.assertEqual(health.get("version"), __version__)   # the same value /health reports
+        js = (KIT / "console_kit" / "console.js").read_text(encoding="utf-8")
+        self.assertNotIn(__version__, js)   # never hardcoded in the page's script
+
     def test_every_other_method_meets_the_gate(self):
         # Catches: only GET and POST gated, so PUT/OPTIONS/... reach a default handler unchecked
         # (Sourcery on #165).
@@ -3414,6 +3429,19 @@ class _OneServer:
 
 class OneServerTests(_OneServer, unittest.TestCase):
     """K3 step 3: the one server's doors, items-push, and its rules (AC3.3, AC3.5, AC3.6)."""
+
+    def test_each_projects_page_config_carries_the_running_kit_version(self):
+        # The footer's version (owner, 2026-10-01) on the ONE server. Catches: a ProjectConsole.page() of its
+        # own that builds the config without `version`; today it holds only because page() is inherited.
+        import re
+        from console_kit import __version__
+        self.spawn()
+        for name in ("alpha", "beta"):
+            code, html = self.owner(name, "GET", "/")
+            self.assertEqual(code, 200, name)
+            m = re.search(r'<script type="application/json" id="console-kit-config">(.*?)</script>', html, re.S)
+            self.assertIsNotNone(m, f"{name}: no config block in the served page")
+            self.assertEqual(json.loads(m.group(1)).get("version"), __version__, name)
 
     def test_ac35_no_project_code_and_items_only_from_the_push(self):
         # Catches: importing the adapter (or reading its source and exec-ing a string), spawning git or anything

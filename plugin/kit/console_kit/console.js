@@ -3595,7 +3595,7 @@
   // differs, so a load straight after a write changes nothing and moves nothing.
   // A board whose shape differs from the page's (an item added, moved or
   // retitled) is never patched: a half-patched tree would be quietly wrong, so
-  // the page says it changed and offers a reload instead.
+  // the page says it changed and what fixes it instead (showBoardStale).
   const BOARD_POLL_MS = 60000;
   let boardTimer = null;
   let boardBusy = false;
@@ -3652,14 +3652,33 @@
     return changed;
   }
 
+  // The served page is a PUBLISHED SNAPSHOT (CONSOLE-kit/Q28, Q29), so a reload serves the same page with the
+  // same shape and this bar comes straight back (owner, 2026-10-01: "the 'board has changed since page loaded'
+  // message is not going away"). It therefore offers no reload: it names the only things that fix it. A page
+  // staged and waiting is known from the proposal strip the server rendered into this page, with its "Use
+  // this page" button (bindPageProposal); without one, the steward must stage a new page. The bar stays and
+  // cannot be dismissed: polling has stopped, so it is the only sign the numbers on the page are frozen.
+  // It is role=status, fixed at the bottom edge and traps nothing, so it never blocks the page.
+  const BOARD_STALE_LEAD = 'The dashboard has changed since this page was published, so its live numbers are paused. ';
+
   function showBoardStale() {
     stopBoard();
     if (document.querySelector('.ck-board-stale')) return;
-    const reload = el('button', { type: 'button', className: 'ck-board-reload' }, ['Reload']);
-    reload.addEventListener('click', () => location.reload());
-    const bar = el('div', { className: 'ck-board-stale', role: 'status' }, [
-      el('span', {}, ['The board has changed since this page loaded. ']), reload
-    ]);
+    const use = document.querySelector('.ck-page-proposed .ck-page-use');
+    const kids = [];
+    if (use) {
+      const show = el('button', { type: 'button', className: 'ck-board-show-proposal' }, ['Show the proposal']);
+      show.addEventListener('click', () => {
+        use.scrollIntoView({ block: 'center' });
+        use.focus();
+      });
+      kids.push(el('span', {}, [BOARD_STALE_LEAD +
+        'A new page is waiting: press "Use this page" in the proposal to publish it. ']), show);
+    } else {
+      kids.push(el('span', {}, [BOARD_STALE_LEAD +
+        'The steward must stage a new page (agent.py page-snapshot) before it can be published here.']));
+    }
+    const bar = el('div', { className: 'ck-board-stale', role: 'status' }, kids);
     document.body.insertBefore(bar, document.body.firstChild);
   }
 
@@ -3720,30 +3739,44 @@
     return label + ' ' + Math.round(w.used_percentage) + '%' + (r ? ' (resets ' + r + ')' : '');
   }
 
+  // Owner, 2026-10-01: "version number should be in footer". The running kit's version, as the server that
+  // served this page knows it (`console_kit.__version__`, the value /health reports), never typed in here.
+  // It shares the usage footer's bar, which already makes room for itself, and keeps that bar on when usage
+  // is off or has nothing to say. A page served by no kit server (no version in its config) gets none.
+  function kitVersion() {
+    const v = config && config.version;
+    return typeof v === 'string' && /^[0-9A-Za-z.+-]{1,40}$/.test(v) ? v : null;
+  }
+
   function renderFooter(u) {
     const root = document.documentElement;
-    if (!u || !u.enabled) {
+    const version = kitVersion();
+    const usageOn = !!(u && u.enabled);
+    if (!usageOn && !version) {
       if (footerEl) { footerEl.remove(); footerEl = null; }
       root.classList.remove('ck-footer-on');
       return;
     }
     if (!footerEl) {
-      footerEl = el('div', { className: 'ck-footer', role: 'contentinfo', 'aria-label': 'Claude usage and account' }, []);
+      footerEl = el('div', { className: 'ck-footer', role: 'contentinfo',
+                             'aria-label': 'Console kit version, Claude usage and account' }, []);
       document.body.appendChild(footerEl);
       root.classList.add('ck-footer-on');
     }
     const parts = [];
     let stale = false;
-    if (u.usage) {
-      const age = Date.now() - new Date(u.usage.updated_at).getTime();
+    const usage = usageOn ? u : {};   // usage off: the bar carries the version alone
+    if (usage.usage) {
+      const age = Date.now() - new Date(usage.usage.updated_at).getTime();
       stale = age > USAGE_STALE_MS;
-      parts.push('Claude usage: ' + usageWindow('5-hour', u.usage.five_hour) + ', ' +
-                 usageWindow('7-day', u.usage.seven_day));
+      parts.push('Claude usage: ' + usageWindow('5-hour', usage.usage.five_hour) + ', ' +
+                 usageWindow('7-day', usage.usage.seven_day));
       parts.push('as of ' + fmtAge(age));
-    } else if (u.usage_problem) {
-      parts.push('Claude usage: ' + u.usage_problem);
+    } else if (usage.usage_problem) {
+      parts.push('Claude usage: ' + usage.usage_problem);
     }
-    if (u.account) parts.push(u.account);
+    if (usage.account) parts.push(usage.account);
+    if (version) parts.push('console-kit ' + version);
     footerEl.textContent = parts.join(' · ');
     footerEl.setAttribute('data-stale', stale ? 'true' : 'false');
     // The host page gets room for the footer at whatever height it wrapped to.
@@ -3763,6 +3796,7 @@
   }
 
   function startUsage() {
+    renderFooter(null);   // the version shows at once, before (or without) any usage answer
     if (!config || !config.api) return;
     fetchUsage();
     setInterval(fetchUsage, USAGE_POLL_MS);
