@@ -371,7 +371,7 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   adapter configured whose import leaves a marker. The test fails if the
   server imports, opens, compiles or runs that file.
 
-### The page is a reviewed snapshot (owner ruling CONSOLE-kit/Q28)
+### The page is a reviewed snapshot you publish (0.8.12, owner rulings CONSOLE-kit/Q28 and Q29)
 
 - **Why.** The server used to read your page from the project's checkout on
   every request and put the console into it. Any agent that could edit that
