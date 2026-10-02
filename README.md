@@ -47,6 +47,25 @@ to run next. `INSTALL.md` (also in the zip) has the whole guide.
   Your own words on an answer travel with it. Locking turns an answer into a
   ruling. A round's questions open as one form: ←/→ to move, 1–9 to pick, then
   **Lock all & process**.
+- **Lock with one tap, undo for five seconds.** **Lock this answer** starts a
+  countdown with **Undo** focused. Nothing is sent until it ends. Undo, opening
+  another item, closing the panel or leaving the page cancels it, and nothing
+  is written.
+- **A round moves on by itself.** Pick a single-choice option and, after a
+  moment, the form moves to the next question still without a pick, and says
+  so. It stays put for multiple choice, for a question you are writing words
+  on, and for ↑/↓ through the options. It never moves onto the Lock page.
+- **Answer these together.** Loose questions on one item, asked by one named
+  agent session within five minutes of each other, are grouped in the inbox
+  and open as one form. Unnamed sessions are never grouped, because nothing
+  shows they are one agent's.
+- **Send to agent.** Once you have answered something, a bar under the panel
+  header shows "N answered · M left" and sends the agent the same "process
+  them" signal as before. It goes once sent and comes back with the next
+  answer.
+- **Locked questions roll up** to one line (question, pick, state). Click or
+  press Enter to open one. Open and stale questions stay whole. The slides and
+  fades run only when your system does not ask for reduced motion.
 - **Deliberate before answering.** On an open question, pick one to three
   seats (DevOps, UX, adversarial, security, architect, analyst, or one you
   name). They reply with a ★ and their reasons, and never answer or lock for
