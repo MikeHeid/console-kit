@@ -3655,8 +3655,9 @@
   // The served page is a PUBLISHED SNAPSHOT (CONSOLE-kit/Q28, Q29), so a reload serves the same page with the
   // same shape and this bar comes straight back (owner, 2026-10-01: "the 'board has changed since page loaded'
   // message is not going away"). It therefore offers no reload: it names the only things that fix it. A page
-  // staged and waiting is known from the proposal strip the server rendered into this page, with its "Use
-  // this page" button (bindPageProposal); without one, the steward must stage a new page. The bar stays and
+  // staged and waiting is known from the proposal the server rendered into this page; its button opens the
+  // same review dialog as the "New dashboard page waiting" button (bindPageProposal), where "Use this page"
+  // publishes. Without one, the steward must stage a new page. The bar stays and
   // cannot be dismissed: polling has stopped, so it is the only sign the numbers on the page are frozen.
   // It is role=status, fixed at the bottom edge and traps nothing, so it never blocks the page.
   const BOARD_STALE_LEAD = 'The dashboard has changed since this page was published, so its live numbers are paused. ';
@@ -3664,16 +3665,13 @@
   function showBoardStale() {
     stopBoard();
     if (document.querySelector('.ck-board-stale')) return;
-    const use = document.querySelector('.ck-page-proposed .ck-page-use');
     const kids = [];
-    if (use) {
-      const show = el('button', { type: 'button', className: 'ck-board-show-proposal' }, ['Show the proposal']);
-      show.addEventListener('click', () => {
-        use.scrollIntoView({ block: 'center' });
-        use.focus();
-      });
+    if (openPageDialog) {
+      const show = el('button', { type: 'button', className: 'ck-board-show-proposal',
+                                  'aria-haspopup': 'dialog' }, ['Review the new page']);
+      show.addEventListener('click', () => openPageDialog(show));
       kids.push(el('span', {}, [BOARD_STALE_LEAD +
-        'A new page is waiting: press "Use this page" in the proposal to publish it. ']), show);
+        'A new page is waiting: review it and press "Use this page" to publish it. ']), show);
     } else {
       kids.push(el('span', {}, [BOARD_STALE_LEAD +
         'The steward must stage a new page (agent.py page-snapshot) before it can be published here.']));
@@ -3805,12 +3803,22 @@
     });
   }
 
-  // Q29: the owner's "Use this page". The server rendered the proposal strip; this only sends the commit it
+  // Q29: the owner's "Use this page". The server rendered the proposal; this only sends the commit it
   // showed, so a page staged after the owner looked is refused by name rather than published unseen.
+  // Owner, 2026-10-02: "can you create a modal rather than place on bottom (button hides under header)".
+  // The server renders the proposal as a <dialog> without `open`, laid out inline until this upgrades it
+  // (data-ck-ready), so a page whose console script fails still shows it. Upgraded, it is reviewed in a modal
+  // (showModal: focus moves in and is held there, Esc closes, a backdrop) that opens ONLY from a button the
+  // owner presses: the fixed "New dashboard page waiting" chip, or the stale-board bar's. Never on load.
+  // Opening, closing and Esc publish nothing; the "Use this page" click below is the page's one publish.
+  let openPageDialog = null;   // set once the dialog is bound: (opener) => void
+
   function bindPageProposal() {
-    const btn = document.querySelector('.ck-page-proposed .ck-page-use');
-    if (!btn || !config || !config.api) return;
-    const errEl = document.querySelector('.ck-page-proposed .ck-page-use-error');
+    const wrap = document.querySelector('.ck-page-proposed');
+    const dlg = wrap && wrap.querySelector('dialog.ck-page-dialog');
+    const btn = dlg && dlg.querySelector('.ck-page-use');
+    if (!btn || !config || !config.api || typeof dlg.showModal !== 'function') return;
+    const errEl = dlg.querySelector('.ck-page-use-error');
     btn.addEventListener('click', async () => {
       btn.disabled = true;
       btn.textContent = 'Publishing…';
@@ -3835,6 +3843,31 @@
         errEl.hidden = false;
       }
     });
+    const chip = wrap.querySelector('.ck-page-waiting');
+    const notNow = dlg.querySelector('.ck-page-not-now');
+    let opener = null;
+    openPageDialog = from => {
+      if (dlg.open) return;
+      opener = from || null;
+      dlg.showModal();
+      dlg.focus();   // the dialog itself, so its name is read and no button is pre-chosen
+    };
+    dlg.addEventListener('close', () => {
+      const o = opener;
+      opener = null;
+      if (o && o.isConnected) o.focus();
+    });
+    // Esc is the dialog's own (it closes it); the inbox's document-level Esc must not also close the panel.
+    dlg.addEventListener('keydown', e => { if (e.key === 'Escape') e.stopPropagation(); });
+    if (notNow) notNow.addEventListener('click', () => dlg.close());
+    wrap.setAttribute('data-ck-ready', '');
+    if (chip) {
+      chip.addEventListener('click', () => openPageDialog(chip));
+      chip.hidden = false;
+      const root = document.documentElement;
+      root.classList.add('ck-page-waiting-on');
+      root.style.setProperty('--ck-chip-h', chip.offsetHeight + 'px');
+    }
   }
 
   // Initialize
@@ -3854,10 +3887,10 @@
     document.addEventListener('visibilitychange', onVisibility);
     injectItemButtons();
     // Initial fetch, then the live loop (0.7.0) keeps the page current
+    bindPageProposal();   // before the board: a stale bar offers the dialog only once it is bound
     fetchView().then(() => { if (config && config.api) liveLoop(); });
     startBoard();
     startUsage();
-    bindPageProposal();
   }
 
   // Public API

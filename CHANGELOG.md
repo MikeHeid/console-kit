@@ -507,3 +507,32 @@ skill inside the repository.
   (`agent.py page-snapshot`). It stays a status message fixed at the bottom
   and cannot be dismissed, because polling has stopped and it is the only
   sign the numbers on the page are frozen.
+
+## Reviewing a new dashboard page in a dialog (unreleased)
+
+- **A staged page is reviewed in a modal dialog** (owner, 2026-10-02: "can
+  you create a modal rather than place on bottom (button hides under
+  header)"). The proposal is no longer a strip at the end of the page. A
+  small button fixed at the bottom-left, "New dashboard page waiting ·
+  Review", shows whenever a page is staged. It sits above the host page's
+  sticky header in the stacking order and away from the top edge, so no
+  header covers it at any scroll position. When the stale-board bar is also
+  showing, the bar moves up to sit above it.
+- **The dialog** is a native `<dialog>` opened with `showModal()`, so focus
+  moves into it and stays there, Esc closes it, and the page behind gets a
+  backdrop. It is named by its heading, and focus goes back to the button
+  that opened it. It shows the ref, commit, size and provenance line, the
+  same sandboxed preview (`<iframe sandbox="">` on `/api/page-staged`, under
+  the same CSP, unchanged), **Use this page** and **Not now**. It fades and
+  scales in only under `prefers-reduced-motion: no-preference`.
+- **It never opens by itself.** It opens only from the waiting button or the
+  stale-board bar's button, now named "Review the new page". Opening it,
+  closing it and pressing Esc publish nothing. Publishing is still only
+  **Use this page**, through the same `POST /api/page-publish` with the
+  commit the page showed, so a page staged after the owner looked is still
+  refused by name.
+- **Without the console script** the proposal is still shown. The server
+  renders the dialog without `open`, and until `console.js` marks it ready,
+  the stylesheet lays it out inline at the end of the page, as the strip
+  was. The waiting button and "Not now" stay hidden there, because they
+  would do nothing without the script.

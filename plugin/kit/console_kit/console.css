@@ -1189,8 +1189,54 @@ html.ck-footer-on .ck-board-stale { bottom: calc(var(--ck-footer-h, 28px) + 8px)
 /* Q29: a staged dashboard page, offered to the owner; its preview is a sandboxed frame. */
 .ck-page-proposed { margin: 8px 16px; padding: 8px 12px; border: 1px solid #c9a227; border-radius: 6px;
   background: #fffbea; color: #3a2f00; font: 14px/1.4 system-ui, sans-serif; }
-.ck-page-proposed iframe { width: 100%; height: 60vh; border: 1px solid #ccc; background: #fff; }
+.ck-page-proposed iframe { display: block; box-sizing: border-box; width: 100%; height: 60vh;
+  border: 1px solid #ccc; background: #fff; }
 .ck-page-use-error { color: #a40000; }
+.ck-page-dialog-title { font-size: 16px; margin: 0 0 6px; }
+.ck-page-preview-note { margin: 8px 0 4px; font-size: 13px; }
+.ck-page-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.ck-page-actions button { font: inherit; padding: 6px 14px; border-radius: 6px; cursor: pointer;
+  border: 1px solid #8a6d00; background: #fff; color: #3a2f00; }
+.ck-page-actions .ck-page-use { background: #3a2f00; color: #fff; border-color: #3a2f00; }
+.ck-page-actions button:disabled { opacity: .6; cursor: progress; }
+/* Owner, 2026-10-02: "can you create a modal rather than place on bottom (button hides under header)".
+   The server renders a <dialog> with no `open`. Until console.js marks the region data-ck-ready, it is laid
+   out inline, as the strip was, so a page whose script fails still shows the proposal (its "Not now" would
+   do nothing there, so it is hidden). Upgraded, the region takes no room: the dialog lives in the top layer
+   when open, above every host header, and a fixed button (z-index as the stale bar's, over the host's sticky
+   header at 100 and under the kit's own panel) says a page is waiting. */
+.ck-page-proposed:not([data-ck-ready]) .ck-page-dialog {
+  display: block; position: static; inset: auto; width: auto; max-width: none; max-height: none;
+  margin: 0; padding: 0; border: 0; background: transparent; color: inherit; }
+.ck-page-proposed:not([data-ck-ready]) .ck-page-not-now { display: none; }
+.ck-page-proposed[data-ck-ready] { margin: 0; padding: 0; border: 0; background: none; }
+.ck-page-dialog[open] {
+  box-sizing: border-box; width: min(960px, calc(100vw - 32px)); max-height: calc(100vh - 32px);
+  overflow: auto; padding: 16px; border: 1px solid #c9a227; border-radius: 8px;
+  background: #fffbea; color: #3a2f00; font: 14px/1.4 system-ui, sans-serif;
+  box-shadow: var(--shadow-md, 0 8px 24px rgba(0,0,0,.3)); }
+.ck-page-dialog[open] iframe { height: min(60vh, 640px); }
+.ck-page-dialog:focus { outline: none; }
+.ck-page-dialog:focus-visible { outline: 2px solid var(--c-accent, #0057d9); outline-offset: 2px; }
+.ck-page-dialog::backdrop { background: rgba(0,0,0,.45); }
+@media (prefers-reduced-motion: no-preference) {
+  .ck-page-dialog[open] { animation: ck-page-dialog-in .16s ease-out; }
+  @keyframes ck-page-dialog-in { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: none; } }
+}
+.ck-page-waiting {
+  position: fixed; left: 16px; bottom: max(16px, env(safe-area-inset-bottom, 0px)); z-index: 995;
+  max-width: calc(100vw - 32px); box-sizing: border-box; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; padding: 6px 14px; border: 1px solid #8a6d00; border-radius: 18px;
+  background: #fffbea; color: #3a2f00; font: 600 14px/1.4 system-ui, sans-serif; cursor: pointer;
+  box-shadow: var(--shadow-md, 0 4px 12px rgba(0,0,0,.25)); }
+.ck-page-waiting[hidden] { display: none; }
+.ck-page-waiting:focus-visible { outline: 2px solid var(--c-accent, #0057d9); outline-offset: 2px; }
+html.ck-footer-on .ck-page-waiting { bottom: calc(var(--ck-footer-h, 28px) + 8px); }
+/* The chip and the stale bar share the bottom edge: the bar sits above the chip, and the page gets room. */
+html.ck-page-waiting-on .ck-board-stale { bottom: calc(max(16px, env(safe-area-inset-bottom, 0px)) + var(--ck-chip-h, 34px) + 8px); }
+html.ck-footer-on.ck-page-waiting-on .ck-board-stale { bottom: calc(var(--ck-footer-h, 28px) + var(--ck-chip-h, 34px) + 16px); }
+html.ck-page-waiting-on body { padding-bottom: calc(var(--ck-chip-h, 34px) + 24px); }
+html.ck-footer-on.ck-page-waiting-on body { padding-bottom: calc(var(--ck-footer-h, 28px) + var(--ck-chip-h, 34px) + 16px); }
 
 /* --- Pull requests (the steward's prs-push): text only, links only to GitHub --- */
 .ck-prs-note { color: var(--c-fg-muted); padding: 12px 0; }

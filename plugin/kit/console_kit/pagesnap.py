@@ -55,6 +55,7 @@ UNREADABLE = ("The published dashboard page cannot be read, so it is not shown: 
               "agent.py page-snapshot, then press \"Use this page\".")
 STAGED_UNREADABLE = "A proposed dashboard page cannot be read: ask the steward to run agent.py page-snapshot again."
 USE = "Use this page"
+WAITING = "New dashboard page waiting · Review"
 # "reviewed" is what the agent's command said (its ancestor check); this server runs no git and cannot verify it.
 REVIEWED_CLAIM = "reviewed (agent's claim, not checked by the server)"
 
@@ -216,6 +217,13 @@ def proposal_strip(doc: dict | None, note: str | None) -> str:
     answers under VISUAL_HTML_CSP (sandbox, default-src 'none'): two layers,
     each alone enough to stop the staged page's script, and the second stops
     it fetching anything. The kit shows agent-written HTML mocks the same way.
+
+    The proposal is a `<dialog>` (owner, 2026-10-02: "can you create a modal rather than place on bottom
+    (button hides under header)"), rendered WITHOUT `open`, so nothing opens on load. console.js upgrades it:
+    it marks the region `data-ck-ready`, shows the fixed "New dashboard page waiting" button and opens the
+    dialog with showModal() only when that button (or the stale-board bar's) is pressed. Until it does, the
+    CSS lays the dialog out inline at the end of the page, as the strip was, so a page whose console script
+    fails still shows the proposal.
     """
     if doc is None:
         if note is NO_SNAPSHOT or note is None:
@@ -225,13 +233,19 @@ def proposal_strip(doc: dict | None, note: str | None) -> str:
     kind = REVIEWED_CLAIM if doc["reviewed"] else "unreviewed"
     line = f"Proposed dashboard: {doc['ref']} @ {doc['commit'][:12]} · {_size(size)} · {kind}"
     return ('<div class="ck-page-proposed" role="region" aria-label="Proposed dashboard page">\n'
+            f'<button type="button" class="ck-page-waiting" aria-haspopup="dialog" hidden>{WAITING}</button>\n'
+            '<dialog class="ck-page-dialog" aria-labelledby="ck-page-dialog-title" tabindex="-1">\n'
+            '<h2 class="ck-page-dialog-title" id="ck-page-dialog-title">New dashboard page</h2>\n'
             f'<p class="ck-page-proposed-line">{H.escape(line)}</p>\n'
-            f'<button type="button" class="ck-page-use" data-commit="{H.escape(doc["commit"])}">{USE}</button>\n'
-            '<p class="ck-page-use-error" role="alert" hidden></p>\n'
-            '<details class="ck-page-preview"><summary>Preview (its scripts do not run here)</summary>\n'
+            '<div class="ck-page-preview"><p class="ck-page-preview-note">Preview (its scripts do not run here)</p>\n'
             '<iframe sandbox="" src="/api/page-staged" title="Proposed dashboard page" '
             'referrerpolicy="no-referrer"></iframe>\n'
-            '</details>\n</div>\n')
+            '</div>\n'
+            '<p class="ck-page-use-error" role="alert" hidden></p>\n'
+            '<div class="ck-page-actions">\n'
+            f'<button type="button" class="ck-page-use" data-commit="{H.escape(doc["commit"])}">{USE}</button>\n'
+            '<button type="button" class="ck-page-not-now">Not now</button>\n'
+            '</div>\n</dialog>\n</div>\n')
 
 
 def staged_page(state: Path) -> bytes | None:
