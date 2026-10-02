@@ -6162,7 +6162,8 @@ class PageStagePublishTests(_Live, unittest.TestCase):
         self.assertIn(f'<p class="ck-page-note" role="status">{html_escape(PS.NO_SNAPSHOT)}</p>', html)
         size = len(DASH.encode())
         self.assertIn(f'<p class="ck-page-proposed-line">Proposed dashboard: origin/main @ c0ffee000000 · '
-                      f'{size} bytes · reviewed</p>', html)
+                      f'{size} bytes · reviewed (agent&#x27;s claim, not checked by the server)</p>', html)
+        self.assertIn("not checked by the server", PS.REVIEWED_CLAIM)   # the label is the agent's, never the server's
         self.assertIn(f'<button type="button" class="ck-page-use" data-commit="{self.C1}">Use this page</button>',
                       html)
         self.assertIn(PREVIEW_IFRAME, html)

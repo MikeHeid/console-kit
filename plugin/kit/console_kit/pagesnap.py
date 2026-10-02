@@ -55,6 +55,8 @@ UNREADABLE = ("The published dashboard page cannot be read, so it is not shown: 
               "agent.py page-snapshot, then press \"Use this page\".")
 STAGED_UNREADABLE = "A proposed dashboard page cannot be read: ask the steward to run agent.py page-snapshot again."
 USE = "Use this page"
+# "reviewed" is what the agent's command said (its ancestor check); this server runs no git and cannot verify it.
+REVIEWED_CLAIM = "reviewed (agent's claim, not checked by the server)"
 
 
 class PublishError(Exception):
@@ -220,7 +222,7 @@ def proposal_strip(doc: dict | None, note: str | None) -> str:
             return ""
         return f'<div class="ck-page-proposed" role="status"><p>{H.escape(note)}</p></div>\n'
     size = len(base64.b64decode(doc["content"]))
-    kind = "reviewed" if doc["reviewed"] else "unreviewed"
+    kind = REVIEWED_CLAIM if doc["reviewed"] else "unreviewed"
     line = f"Proposed dashboard: {doc['ref']} @ {doc['commit'][:12]} · {_size(size)} · {kind}"
     return ('<div class="ck-page-proposed" role="region" aria-label="Proposed dashboard page">\n'
             f'<p class="ck-page-proposed-line">{H.escape(line)}</p>\n'

@@ -376,16 +376,20 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   runs git.
 - **You publish it (owner ruling CONSOLE-kit/Q29).** What `page-snapshot`
   sends is only *proposed*: nothing you are served changes. The console shows
-  a strip, "Proposed dashboard: <ref> @ <commit> · <size> · reviewed" (or
-  "unreviewed"), with a preview and a **Use this page** button. The page is
+  a strip, "Proposed dashboard: <ref> @ <commit> · <size> · reviewed (agent's
+  claim, not checked by the server)" (or "unreviewed"), with a preview and a
+  **Use this page** button. The page is
   served only after you press it, through a route behind your Access login.
   No agent can publish, because the agent socket has no route that does.
   **The cost is one click per dashboard update.** The button sends the commit
   you were shown. If a newer page was staged after your page loaded, it is
   refused, naming both commits. Reload, look, and press again. Publishing
   checks the page again (size, schema, the console injection). It cannot
-  check that the commit is in `origin/main`, because the server runs no git;
-  the steward checked that before sending.
+  check that the commit is in `origin/main`, because the server runs no git.
+  "reviewed" is only what the sending agent's command reported, so judge the
+  commit and the preview, not the label. Any process that can reach the
+  console's agent socket can replace the staged page, but a press on a page
+  that has since been replaced is refused, naming both commits.
 - **The preview never runs the proposed page's scripts.** It is shown in an
   `<iframe sandbox="">` with no allowances. The route it loads from also
   answers under its own `sandbox; default-src 'none'` policy, the one stored
