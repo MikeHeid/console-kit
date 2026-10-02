@@ -115,34 +115,11 @@ server cannot check it.
   agent-6`). One of them, the **steward**, named in your own registry, is the
   only one that processes your requests and folds your answers. The others
   post their questions to your inbox instead of asking you directly.
-
-### Pull requests on the console (unreleased)
-
-- **What you can do.** The inbox has a **PRs** tab: the project's open pull
-  requests first, then those merged or closed in the last 30 days. Each shows
-  its number, title, branch, author, checks (pass, fail, running or none), a
-  draft badge, and when it was opened, merged or closed, and links to the PR
-  on GitHub. A title or branch that names an item or a question the console
-  knows gets an **Open** button for that item. A line says when the steward
-  last pushed the list, so a stale list reads as stale.
-- **How, with no GitHub call in the server.** The steward runs `gh` in its
-  own process and sends the result, as data:
-
-      python3 <kit>/agent.py --state <state dir> prs-push
-
-  run from inside the project's checkout (`--days`, default 30; `--limit`,
-  default 50 of each list). The server checks it against a closed schema:
-  unknown keys, more than 200 PRs, a title over 1024 characters, a branch
-  over 255, and any link other than that PR's own
-  `https://github.com/<repo>/pull/<number>` are refused by name. It keeps the
-  last push in the state dir (`prs.json`), stamped with when it arrived and
-  which agent sent it. Only the agent door takes a push; the owner door can
-  only read it. Titles and branches are shown as text, never as HTML.
-- **Before the first push** the tab says the steward has not pushed pull
-  requests yet. It never shows a blank or invented list.
-- **Not in the Feed.** The Feed lists the console's own records, paged by
-  their sequence number; a pull request has none, so the Feed's footer points
-  to the PRs tab instead.
+- The **PRs** tab lists the project's open pull requests, then those
+  merged or closed in the last 30 days, with checks, draft and merged
+  badges, a link to each on GitHub, and an **Open** button for any item or
+  question a title or branch names. The steward pushes the list
+  (`agent.py prs-push`), and the tab says when it last did.
 
 ## How it fits together
 
@@ -159,8 +136,10 @@ server cannot check it.
 - **`server.py`** serves the console, inside your published dashboard page if
   you have one. Every request without a valid Access token is refused, loopback
   included. **It runs no project code and no git.** Your work items arrive by
-  `agent.py items-push`, git history by `agent.py history-push`, and the page
-  by `agent.py page-snapshot`. The steward runs all three in its own process,
+  `agent.py items-push`, git history by `agent.py history-push`, pull
+  requests by `agent.py prs-push` (`gh` runs in the steward, never in the
+  server), and the page by `agent.py page-snapshot`. The steward runs all
+  four in its own process,
   and each sends data the server checks against a closed schema.
 - **`agent.py`** is the agent's side. Its commands:
 
@@ -170,7 +149,7 @@ server cannot check it.
   | Asking and answering | `ask`, `reply`, `working`, `synced`, `watch` |
   | Deliberation | `fork-context`, `transcript`, `visual`, `visual-export`, `next-step`, `costs` |
   | Stale answers | `check`, `reanchor`, `propose-anchor` |
-  | Pushing data | `items-push`, `history-push`, `page-snapshot` |
+  | Pushing data | `items-push`, `history-push`, `prs-push`, `page-snapshot` |
   | Owner only | `register`, `steward`, `server add`, `server token rotate` |
 
   `--as NAME` names the session.
