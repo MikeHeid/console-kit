@@ -9,7 +9,13 @@ Question states:
     awaiting_you    the agent asked; there is no answer yet
     unlocked        answered, not locked
     locked          locked, and every condition still holds
-    stale           locked, but a condition no longer holds; supersede it (D3), or re-lock it
+    stale           locked, but a condition no longer holds; supersede it (D3), re-lock it, or refactor it
+    withdrawn       the owner withdrew a stale ruling: it no longer applies (CONSOLE-kit/Q30)
+    superseded      a question asked to replace a stale ruling was locked (CONSOLE-kit/Q32)
+
+A stale ruling the owner chose to keep without checking (Q30 "keep, stop
+checking") reads `locked`, with `refactor.outcome.kind` "untracked". Whatever
+was done about a stale answer is under `refactor` (`refactor.summary`).
 
 A locked answer is decided by its lock's anchors when it has them, and by the
 question's `valid_if` otherwise (0.5.0; see `anchors.py`).
@@ -28,11 +34,15 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from . import anchors as A
+from . import refactor as RX
 from . import schema as S
 from .names import named
 from .store import Store
 
-STATES = ("awaiting_you", "unlocked", "locked", "stale")
+STATES = ("awaiting_you", "unlocked", "locked", "stale", "withdrawn", "superseded")
+# Not waiting on the owner: these never enter the inbox.
+SETTLED = ("locked", "withdrawn", "superseded")
+OUTCOME_STATE = {"withdrawn": "withdrawn", "untracked": "locked", "superseded": "superseded"}
 # When a fork is done (owner ruling build_reply, review rounds 1-2): an agent message replying
 # to the fork whose first line starts with RESULT, or - for any fork but an open-question round -
 # its questions. Progress notes never reply to the fork, so they cannot hide a pending round.
@@ -55,6 +65,9 @@ def question_state(store: Store, q: dict, holds: Callable[[dict], bool]) -> str:
         return "awaiting_you"
     if store.lock_of(head["id"]) is None:
         return "unlocked"
+    out = RX.outcome(store, q["qid"])
+    if out is not None:
+        return OUTCOME_STATE[out["kind"]]
     conds, _ = A.conditions_for(store, q)
     return "locked" if all(holds(c) for c in conds) else "stale"
 
@@ -113,16 +126,21 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
             continue
         answers = store.answers(r["qid"])
         conds, origin = A.conditions_for(store, r)
+        state = question_state(store, r, holds)
         questions[r["qid"]] = {
             "question": named(r, names),
-            "state": question_state(store, r, holds),
+            "state": state,
             "answers": [dict(a, locked=store.lock_of(a["id"]) is not None) for a in answers],
-            "failing": [c for c in conds if not holds(c)],
+            # A ruling kept without checking, withdrawn or superseded is no longer checked: nothing "fails".
+            "failing": [c for c in conds if not holds(c)] if state in ("stale", "unlocked", "awaiting_you") else [],
             # Where the conditions deciding it came from: the question's valid_if,
             # the re-lock's own anchors, or an `agent.py reanchor` record.
             "anchored_by": origin,
             "last_seq": last_seq[r["qid"]],
         }
+        rx = RX.summary(store, r["qid"])   # CONSOLE-kit/Q30-Q32: only when something was done or proposed
+        if rx:
+            questions[r["qid"]]["refactor"] = rx
 
     threads: dict[str, list[dict]] = {}
     forks: dict[str, dict] = {}
@@ -183,7 +201,7 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
     # questions the page can show against an item.
     orphaned = sorted(qid for qid, q in questions.items() if q["question"]["item"] not in own)
     inbox = sorted((q for q in questions.values()
-                    if q["state"] != "locked" and q["question"]["item"] in own),
+                    if q["state"] not in SETTLED and q["question"]["item"] in own),
                    key=lambda q: (STATES.index(q["state"]), q["question"]["seq"]))
     return {
         "items": {i: {"own": own[i], "total": total[i]} for i in items},
@@ -519,19 +537,41 @@ def answers_sheet(view: dict, items: Mapping[str, dict], item: str | None = None
             "text": rec["text"], "kind": rec["kind"], "state": q["state"], "failing": q["failing"],
             "star": rec["star"], "options": rec["options"],
             **{k: rec[k] for k in ("star_by", "forked_from", "agent") if k in rec},
+            **({"refactor": q["refactor"]} if "refactor" in q else {}),
             "answers": q["answers"],
         })
     rows.sort(key=lambda r: (r["orphaned"], order.get(r["item"], len(order)), r["item"],
                              int(r["qid"].rsplit("/Q", 1)[1])))
-    counts = dict.fromkeys(STATES, 0)
+    counts = dict.fromkeys(STATES[:4], 0)   # withdrawn / superseded only when some are, as before Q30
     for r in rows:
-        counts[r["state"]] += 1
+        counts[r["state"]] = counts.get(r["state"], 0) + 1
     return {"item": item, "fork": fork, "rows": rows, "counts": counts,
             "answers": sum(len(r["answers"]) for r in rows)}
 
 
 STATE_WORDS = {"awaiting_you": "unanswered", "unlocked": "answered, not locked",
-               "locked": "locked", "stale": "stale"}
+               "locked": "locked", "stale": "stale", "withdrawn": "withdrawn", "superseded": "superseded"}
+
+
+def refactor_lines(rx: dict) -> list[str]:
+    """What was done about a stale ruling (CONSOLE-kit/Q30-Q32), as lines of the sheet; [] when nothing was."""
+    out = []
+    o = rx.get("outcome")
+    if o is not None:
+        why = f": {o['reason']}" if o.get("reason") else ""
+        out.append({"withdrawn": f"Withdrawn by the {o['by']} on {o['at']}{why}",
+                    "untracked": f"Kept by the {o['by']} on {o['at']}, no longer checked against the files{why}",
+                    "superseded": f"Superseded on {o['at']} by {o.get('replaced_by')}, locked by the {o['by']}"}
+                   [o["kind"]])
+    if rx.get("replaced_by") and (o is None or o["kind"] != "superseded"):
+        out.append(f"A replacement is open: {rx['replaced_by']}. This ruling stands until it is locked.")
+    if rx.get("replaces"):
+        out.append(f"Asked to replace {rx['replaces']}.")
+    if rx.get("proposal"):
+        out.append("The steward proposed a new anchor; it waits for the owner to confirm it.")
+    if rx.get("confirmed"):
+        out.append(f"Re-anchored on {rx['confirmed']['at']} from a proposal the {rx['confirmed']['by']} confirmed.")
+    return out
 
 
 def condition_words(c: dict) -> str:
@@ -552,7 +592,8 @@ def sheet_markdown(sheet: dict) -> str:
     out = [f"# Answers: {scope}", "",
            f"{len(sheet['rows'])} questions: {c['awaiting_you']} unanswered, {c['unlocked']} answered, "
            f"{c['locked']} locked, {c['stale']} stale. {sheet['answers']} "
-           f"answer{'' if sheet['answers'] == 1 else 's'} in all.", ""]
+           f"answer{'' if sheet['answers'] == 1 else 's'} in all."
+           + "".join(f" {c[s]} {s}." for s in ("withdrawn", "superseded") if c.get(s)), ""]
     for r in sheet["rows"]:
         labels = {o["id"]: o["label"] for o in r["options"]}
         out.append(f"## {r['qid']}: {STATE_WORDS[r['state']]}" + (" (item no longer in the register)"
@@ -565,6 +606,7 @@ def sheet_markdown(sheet: dict) -> str:
             out.append(f"★{whose}: {labels.get(r['star'], r['star'])}")
         for cnd in r["failing"]:
             out.append(f"Stale because this no longer holds: {condition_words(cnd)}")
+        out += refactor_lines(r.get("refactor") or {})
         if not r["answers"]:
             out.append("No answer yet.")
         for n, a in enumerate(r["answers"], 1):

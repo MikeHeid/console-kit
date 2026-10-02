@@ -860,7 +860,9 @@ class ServerTests(unittest.TestCase):
              "valid_if": [{"kind": "file_sha256", "path": "spec.md",
                            "sha256": hashlib.sha256(self.SPEC.encode()).hexdigest()}],
              "source": source, "nonce": "askspec00001"}
-        self.assertEqual(SV.agent_request(self.cfg.socket, "POST", "/question", q)[0], 200)
+        # Stored as an older kit's ask stored it: `ask` refuses this shape since CONSOLE-kit/Q30 (R1, R2 by name).
+        with self.console._lock:
+            self.console.store.append({**q, "type": "question", "schemaVersion": SV.S.SCHEMA_VERSION, "by": "agent"})
         code, a = self.req("POST", "/api/answer", self.answer(qid="LANE.1/Q2", nonce="answerspec01"), tok=token())
         self.assertEqual(code, 200, a)
         code, lk = self.req("POST", "/api/lock", {"qid": "LANE.1/Q2", "answer": a["record"]["id"],
@@ -2848,6 +2850,20 @@ def git_project(root: Path) -> str:
     return hashlib.sha256(ServerTests.SPEC.encode()).hexdigest()
 
 
+def legacy_ask(store_path: Path, *bodies: dict) -> None:
+    """Write questions straight into a store that no server holds yet, as an older kit's `ask` stored them.
+
+    `spec_question` anchors a whole-file hash on the file its `source` cites
+    lines of: the shape six live answers went stale with, and the one `ask`
+    refuses since CONSOLE-kit/Q30 (R1). Those answers still exist and still
+    need reanchoring, so tests of that path start from a stored question.
+    """
+    from console_kit.store import Store
+    st = Store(store_path)
+    for b in bodies:
+        st.append({**b, "type": "question", "schemaVersion": SV.S.SCHEMA_VERSION, "by": "agent"})
+
+
 def spec_question(v1: str) -> dict:
     return {"qid": "LANE.1/Q2", "item": "LANE.1", "text": "Still?", "kind": "single",
             "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}], "star": None,
@@ -2935,6 +2951,9 @@ s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.clos
 cfg = SV.Config(root=root, page=Path(p.get("page") or root / "page.html"), state=root / "state",
                 adapter=root / "adapter.py", team_domain="team.example.cloudflareaccess.com", aud="a" * 64,
                 hostname=p["host"], port=port, project="audit")
+if p.get("question"):   # stored as an older kit's ask stored it: `ask` refuses this shape since Q30 (R1)
+    from console_kit.store import Store
+    Store(cfg.store).append({**p["question"], "type": "question", "schemaVersion": 1, "by": "agent"})
 threading.Thread(target=SV.serve, args=(cfg, lambda _tok: {"email": "owner@example.com"}), daemon=True).start()
 for _ in range(200):
     try:
@@ -2973,7 +2992,6 @@ call("agent POST /items", agent, "POST", "/items", p.get("items") or
      {"items": {"LANE": {"title": "a lane", "parent": None, "status": "open"},
                 "LANE.1": {"title": "a phase", "parent": "LANE", "status": "open"}},
       "seed_questions": [], "board": None})
-call("agent POST /question", agent, "POST", "/question", p["question"])
 a = call("owner POST /api/answer", owner, "POST", "/api/answer",
          {"qid": "LANE.1/Q2", "picks": ["a"], "own_text": "", "nonce": "nogitanswer1"})
 call("owner POST /api/lock", owner, "POST", "/api/lock",
@@ -3029,6 +3047,7 @@ class NoServerGitTests(_Live, unittest.TestCase):
         (d / "page.html").write_text(PAGE)
         self.cfg = SV.Config(root=d, page=d / "page.html", state=d / "state", adapter=d / "unused.py",
                              team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="test")
+        legacy_ask(self.cfg.store, spec_question(self.v1))   # R1 refuses this shape on a new ask
         self.console = SV.Console(self.cfg, FakeAdapter())
         self.console.seed()
         verify = SV.access_verifier(TEAM, AUD, key_for=lambda _t: KEY.public_key())
@@ -3037,8 +3056,6 @@ class NoServerGitTests(_Live, unittest.TestCase):
         threading.Thread(target=self.owner.serve_forever, daemon=True).start()
         self.agent = SV.agent_server(self.console)
         threading.Thread(target=self.agent.serve_forever, daemon=True).start()
-        code, out = self.agent_post("/question", spec_question(self.v1))
-        self.assertEqual(code, 200, out)
         code, a = self.req("POST", "/api/answer", self.answer(qid="LANE.1/Q2", nonce="nogitanswer1"), tok=token())
         self.assertEqual(code, 200, a)
         code, lk = self.req("POST", "/api/lock", {"qid": "LANE.1/Q2", "answer": a["record"]["id"],
@@ -3436,7 +3453,8 @@ class OneServerTests(_OneServer, unittest.TestCase):
 
     AGENT_GETS = ("/view", "/check", "/health", "/history-wants", "/no-such-route")
     AGENT_POSTS = ("/items", "/cursor", "/working", "/reanchor", "/visual", "/visual-export", "/question",
-                   "/message", "/transcript", "/history-blob", "/history-specs", "/page-snapshot", "/no-such-route")
+                   "/message", "/transcript", "/history-blob", "/history-specs", "/page-snapshot", "/anchor-proposal",
+                   "/no-such-route")
 
     def test_the_seam_is_the_only_admission_point(self):
         # K4 replaces `authorize` alone, so this is behaviour, not source text: with `authorize` refusing, EVERY
@@ -4467,12 +4485,11 @@ class OneServerStewardGitTests(_OneServer, unittest.TestCase):
         import subprocess
         alpha = self.p["alpha"]
         v1 = git_project(alpha["root"])
+        legacy_ask(alpha["state"] / "store.jsonl", spec_question(v1))   # R1 refuses this shape on a new ask
         self.spawn()
         items = {"LANE": {"title": "a lane", "parent": None, "status": "open"},
                  "LANE.1": {"title": "a phase", "parent": "LANE", "status": "open"}}
         self.assertEqual(self.push("alpha", items)[0], 200)
-        code, out = self.agent("POST", "/p/alpha/question", spec_question(v1))
-        self.assertEqual(code, 200, out)
         code, a = self.owner("alpha", "POST", "/api/answer", {"qid": "LANE.1/Q2", "picks": ["a"], "own_text": "",
                                                              "nonce": "k3gitanswer1"})
         self.assertEqual(code, 200, a)
@@ -4515,16 +4532,17 @@ class OneServerStewardGitTests(_OneServer, unittest.TestCase):
         alpha = self.p["alpha"]
         v1 = git_project(alpha["root"])
         trace = self.t / "steward.strace"
+        import base64, hashlib
+        now = (alpha["root"] / "specs/spec.md").read_bytes()
+        v2 = hashlib.sha256(now).hexdigest()                      # a second lock, on the current version
+        pairs = (("LANE.1/Q2", v1), ("LANE.1/Q3", v2))
+        legacy_ask(alpha["state"] / "store.jsonl",                # R1 refuses this shape on a new ask
+                   *({**spec_question(sha), "qid": qid, "nonce": f"k4dirfdque{n}"} for n, (qid, sha) in enumerate(pairs)))
         self.spawn(prefix=("strace", "-f", "-qq", "-e", "trace=%file", "-o", str(trace)))
         items = {"LANE": {"title": "a lane", "parent": None, "status": "open"},
                  "LANE.1": {"title": "a phase", "parent": "LANE", "status": "open"}}
         self.assertEqual(self.push("alpha", items)[0], 200)
-        import base64, hashlib
-        now = (alpha["root"] / "specs/spec.md").read_bytes()
-        v2 = hashlib.sha256(now).hexdigest()                      # a second lock, on the current version
-        for n, (qid, sha) in enumerate((("LANE.1/Q2", v1), ("LANE.1/Q3", v2))):
-            q = {**spec_question(sha), "qid": qid, "nonce": f"k4dirfdque{n}"}
-            self.assertEqual(self.agent("POST", "/p/alpha/question", q)[0], 200)
+        for n, (qid, sha) in enumerate(pairs):
             code, a = self.owner("alpha", "POST", "/api/answer", {"qid": qid, "picks": ["a"], "own_text": "",
                                                                  "nonce": f"k4dirfdans{n}"})
             self.assertEqual(code, 200, a)
