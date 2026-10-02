@@ -5862,7 +5862,7 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
                       html)
         self.assertEqual(os.stat(self.scfg.state / PS.SNAPSHOT).st_mode & 0o777, 0o600)
         self.assertFalse(os.path.lexists(self.scfg.state / PS.STAGED))   # published: no proposal left
-        self.assertNotIn("ck-page-proposed", html)
+        self.assertNotIn('<div class="ck-page-proposed"', html)
         self.assertEqual(self.push(page_body(DASH, ref="feature/x", reviewed=False))[0], 200)
         self.publish()
         html = self.page()
@@ -6177,7 +6177,9 @@ class PageStagePublishTests(_Live, unittest.TestCase):
         # would hand the staged script the console's origin), and the frame pointed anywhere but the gated route.
         import re
         self.stage()
-        frames = re.findall(r"<iframe\b[^>]*>", self.page())
+        html = self.page()
+        strip = html[html.index('<div class="ck-page-proposed"'):html.index(P.BEGIN)]   # console.js has its own
+        frames = re.findall(r"<iframe\b[^>]*>", strip)
         self.assertEqual(frames, [PREVIEW_IFRAME])
 
     def test_the_preview_route_is_gated_and_answers_under_the_sandbox_csp(self):
@@ -6215,7 +6217,7 @@ class PageStagePublishTests(_Live, unittest.TestCase):
         self.assertIn("DASHBOARD-V1", html)
         self.assertIn(f"Dashboard page from origin/main @ {self.C2[:12]} (staged by the steward, published by you)",
                       html)
-        self.assertNotIn("ck-page-proposed", html)
+        self.assertNotIn('<div class="ck-page-proposed"', html)
         self.assertNotIn(html_escape(PS.NO_SNAPSHOT), html)
         self.assertFalse(os.path.lexists(self.cfg.state / PS.STAGED))
         self.assertEqual(self.publish({"commit": self.C2})[0], 404)   # once
