@@ -1309,3 +1309,11 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   @keyframes ck-slide-left { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
   @keyframes ck-roll-up { from { opacity: .4; transform: scaleY(1.6); transform-origin: top; } to { opacity: 1; transform: none; } }
 }
+
+/* CONSOLE-kit/Q40, Q41: scan for a resolve, and the steward's star recommendation */
+.ck-scan-all { margin: 12px 20px; padding: 10px 12px; border: 1px solid var(--c-border); border-radius: 6px; }
+.ck-scan-all p { margin: 0 0 8px; font-size: 13px; }
+.ck-scan-status { font-size: 13px; color: var(--c-fg-muted); align-self: center; }
+.ck-advice { margin-top: 10px; padding: 8px 10px; border-left: 3px solid var(--c-accent, currentColor); }
+.ck-advice p { margin: 4px 0 0; font-size: 13px; }
+.ck-advice-note { color: var(--c-fg-muted); }
