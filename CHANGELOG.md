@@ -488,7 +488,7 @@ skill inside the repository.
   their sequence number; a pull request has none, so the Feed's footer points
   to the PRs tab instead.
 
-## Footer version and the stale-board bar (unreleased)
+## Footer version and the stale-board bar (0.8.14)
 
 - **The footer names the kit version** (owner, 2026-10-01: "version number
   should be in footer"). It reads "console-kit 0.8.13", say, taken from the
