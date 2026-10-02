@@ -192,7 +192,9 @@ Until then the inbox says that items appear when the steward pushes them.
 If the stored items cannot be read (a damaged `items.json` in the state dir,
 or something other than a plain file in its place), the single server still
 starts. It logs one line, shows no items, and the inbox says the stored items
-cannot be read. `health` reports the register as not ok. To recover, run
+cannot be read. `health` still answers 200, since the process is up and a
+restart would not fix the file, with its register marked "error" and a note
+saying to push again. This covers a file the server may not open, too. To recover, run
 `items-push` again: it replaces the file, and the board comes back without a
 restart. A directory found there is renamed aside to `.items.json.set-aside.*`,
 never deleted. The one server (`--all`) still refuses just that project and

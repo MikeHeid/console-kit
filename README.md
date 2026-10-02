@@ -346,7 +346,8 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   again whenever the register changes. `--adapter` is still accepted, so an
   existing unit keeps starting, but it is ignored. If the stored items cannot
   be read, the single server still starts. It shows no items, the inbox says
-  why, and `health` is not ok until the next `items-push` replaces the file.
+  why, and `health` answers 200 with its register marked "error" until the
+  next `items-push` replaces the file.
   The one server refuses just that project.
 - **How it is held.** A test runs the real server under an audit hook, with an
   adapter configured whose import leaves a marker. The test fails if the
