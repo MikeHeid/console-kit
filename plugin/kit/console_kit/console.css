@@ -1145,3 +1145,9 @@ html.ck-footer-on .ck-board-stale { bottom: calc(var(--ck-footer-h, 28px) + 8px)
   html.ck-dock .ck-footer { right: 44px; }
   html.ck-dock-open .ck-footer { right: var(--ck-col); }
 }
+
+/* Q29: a staged dashboard page, offered to the owner; its preview is a sandboxed frame. */
+.ck-page-proposed { margin: 8px 16px; padding: 8px 12px; border: 1px solid #c9a227; border-radius: 6px;
+  background: #fffbea; color: #3a2f00; font: 14px/1.4 system-ui, sans-serif; }
+.ck-page-proposed iframe { width: 100%; height: 60vh; border: 1px solid #ccc; background: #fff; }
+.ck-page-use-error { color: #a40000; }

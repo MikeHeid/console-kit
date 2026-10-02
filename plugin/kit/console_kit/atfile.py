@@ -46,6 +46,24 @@ def read_at(folder: int, name: str, limit: int) -> bytes | None:
         return fh.read(limit + 1)
 
 
+def set_aside_dir(folder: int, name: str) -> str | None:
+    """Rename a DIRECTORY found at `name` to `.<name>.set-aside.<hex>`, unread and kept; None when none is there.
+
+    `write_at`'s rename replaces a file, a symlink or a FIFO at `name` without
+    following it, but cannot replace a directory, so a store whose file was
+    planted as one calls this first: a push is then always the way back.
+    """
+    try:
+        st = os.stat(name, dir_fd=folder, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        return None
+    aside = f".{name}.set-aside.{os.urandom(8).hex()}"
+    os.rename(name, aside, src_dir_fd=folder, dst_dir_fd=folder)
+    return aside
+
+
 def write_at(folder: int, name: str, data: bytes) -> None:
     """`name` in `folder`, whole or not at all: a 0600 temporary created O_EXCL, then renamed over it.
 

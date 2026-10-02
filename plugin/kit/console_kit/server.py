@@ -79,6 +79,7 @@ from . import anchors as A
 from . import doorbell as D
 from . import gitseam as G
 from . import items as IT
+from . import pagesnap as PS
 from . import names as N
 from . import projectcfg as PC
 from . import publish as P
@@ -180,7 +181,7 @@ def access_verifier(team_domain: str, aud: str,
 @dataclass(frozen=True)
 class Config:
     root: Path          # the project checkout: valid_if paths resolve against it
-    page: Path          # the committed lane board the console is injected into
+    page: Path | None   # NOT READ since Q28 (the page is STATE's snapshot); kept so a unit's --page still parses
     state: Path         # store.jsonl, inbox.jsonl, cursor.json and agent.sock live here
     adapter: Path
     team_domain: str
@@ -776,8 +777,46 @@ class Console:
         return {"shape": got["shape"], "values": values}
 
     def page(self) -> str:
+        """The page the owner published from STATE, any proposal, and the console (Q28, Q29); never a project file.
+
+        `cfg.page` is not read, by this server or the one server: a page an agent
+        can edit would put its script in the owner's browser.
+        """
         block = P.console_block(json.dumps({"api": "/api", "project": self.cfg.project}))
-        return P.inject(self.cfg.page.read_text(encoding="utf-8"), block)
+        return PS.render(self.cfg.state, block)
+
+    def push_page_snapshot(self, body: object) -> dict:
+        """`page-snapshot` (Q28): a page the steward read from a commit, as data.
+
+        It is only STAGED (Q29): shown to the owner as a proposal, never served,
+        until they press "Use this page" (`publish_page`, the owner door only).
+        """
+        why = PS.snapshot_problem(body)
+        if why:
+            raise RequestError(400, why)
+        with self._lock:
+            PS.stage(self.cfg.state, body)
+        return {"staged": body["commit"], "ref": body["ref"], "reviewed": body["reviewed"]}
+
+    def publish_page(self, body: object) -> dict:
+        """The owner's "Use this page" (Q29): the staged page, re-checked, becomes the served one.
+
+        No agent route reaches this. `commit` must be the staged commit the
+        owner's page showed, so a page staged after they looked is refused.
+        The ancestor check `agent.py` ran cannot be repeated here: this server
+        runs no git.
+        """
+        if not isinstance(body, dict) or set(body) != {"commit"}:
+            raise RequestError(400, 'page-publish takes {"commit": <the staged commit id>}')
+        with self._lock:
+            try:
+                return PS.publish(self.cfg.state, body["commit"])
+            except PS.PublishError as e:
+                raise RequestError(e.code, str(e)) from None
+
+    def staged_page(self) -> bytes | None:
+        """The staged page's bytes for the owner's sandboxed preview; None when nothing (readable) is staged."""
+        return PS.staged_page(self.cfg.state)
 
     def relock(self, body: object) -> list[dict]:
         """Re-lock a locked answer as it stands: one answer superseding it, word for word, and its lock.
@@ -1285,6 +1324,11 @@ class OwnerHandler(_Handler):
             return self._check()
         if self.path == "/api/usage":  # 0.8.6: the footer's probe
             return self._send(200, read_usage(self.console.cfg))
+        if self.path == "/api/page-staged":   # Q29: the proposal's preview, framed sandbox="" and sandboxed here too
+            data = self.console.staged_page()
+            if data is None:
+                return self._send(404, {"error": "no dashboard page is staged"})
+            return self._send_raw(200, data, "text/html; charset=utf-8", VISUAL_HTML_CSP)
         route, query = self._query()
         live = {"/api/wait": self._wait, "/api/feed": self._feed, "/api/evidence": self._evidence,
                 "/api/visual": self._visual}.get(route)
@@ -1407,7 +1451,7 @@ class OwnerHandler(_Handler):
         if not self._gate():
             return
         kind = OWNER_ROUTES.get(self.path)
-        if kind is None and self.path not in ("/api/relock", "/api/lock-all"):
+        if kind is None and self.path not in ("/api/relock", "/api/lock-all", "/api/page-publish"):
             return self._send(404, {"error": "not found"})
         # Browsers send Origin on every POST, same-origin included, so a missing one is refused too:
         # an absent header must not read as "trusted".
@@ -1418,6 +1462,8 @@ class OwnerHandler(_Handler):
                 return self._send(200, {"records": self.console.relock(self._body())})
             if self.path == "/api/lock-all":
                 return self._send(200, self.console.lock_all(self._body()))
+            if self.path == "/api/page-publish":   # Q29: the owner's "Use this page"; no agent route publishes
+                return self._send(200, self.console.publish_page(self._body()))
             self._send(200, {"record": self.console.write(kind, self._body(), "owner")})
         except RequestError as e:
             self._send(e.code, {**e.extra, "error": str(e)})
@@ -1476,6 +1522,9 @@ class AgentHandler(_Handler):
                 return self._send(200, self.console.push_history_specs(self._body()))
             if self.path == "/items":   # Q24: the ONLY way items reach a server; the adapter ran in the steward
                 return self._send(200, self.console.push_items(self._body()))
+            if self.path == "/page-snapshot":   # Q28: the ONLY way a page reaches a server; git ran in the steward
+                self.max_body = PS.MAX_BODY   # per instance, safe for the same reason as /history-blob above
+                return self._send(200, self.console.push_page_snapshot(self._body()))
             kind = AGENT_ROUTES.get(self.path)
             if kind is None:
                 return self._send(404, {"error": "not found"})
@@ -1608,6 +1657,10 @@ def serve(cfg: Config, verify: Callable[[str | None], dict] | None = None) -> No
     except (PC.ConfigError, N.NamesError, StoreError) as e:   # the register itself, or the project's config
         raise SystemExit(f"console: {e}") from None
     sys.stderr.write(f"console: {len(added)} seed question(s) added; store {cfg.store}\n")
+    if cfg.page is not None:   # Q28: named, never opened, stat'ed or resolved, in a project root or out of one
+        sys.stderr.write(f"console: --page {cfg.page} is not read (CONSOLE-kit/Q28): the page is served from "
+                         f"the steward's snapshot in {cfg.state}; run `agent.py page-snapshot` in the project's "
+                         f"checkout\n")
     agent = agent_server(console)
     threading.Thread(target=agent.serve_forever, daemon=True).start()
     health = health_server(console, cfg.health_port) if cfg.health_port else None
@@ -1653,7 +1706,9 @@ def agent_request(sock_path: Path, method: str, path: str, body: object = None,
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Serve the owner console behind Cloudflare Access.")
     ap.add_argument("--root", type=Path, required=True)
-    ap.add_argument("--page", type=Path, required=True)
+    ap.add_argument("--page", type=Path, default=None,
+                    help="IGNORED since Q28: the server never reads a page from a project; it serves the "
+                         "steward's snapshot (agent.py page-snapshot). Still accepted so an existing unit starts")
     ap.add_argument("--state", type=Path, required=True)
     ap.add_argument("--adapter", type=Path, default=None,
                     help="IGNORED since Q24: the server never runs the adapter; the steward pushes items "

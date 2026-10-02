@@ -3524,6 +3524,38 @@
     });
   }
 
+  // Q29: the owner's "Use this page". The server rendered the proposal strip; this only sends the commit it
+  // showed, so a page staged after the owner looked is refused by name rather than published unseen.
+  function bindPageProposal() {
+    const btn = document.querySelector('.ck-page-proposed .ck-page-use');
+    if (!btn || !config || !config.api) return;
+    const errEl = document.querySelector('.ck-page-proposed .ck-page-use-error');
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Publishing…';
+      let resp = null;
+      let data = {};
+      try {
+        resp = await fetch(config.api + '/page-publish', { method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ commit: btn.getAttribute('data-commit') }) });
+        data = await resp.json().catch(() => ({ error: 'HTTP ' + resp.status }));
+      } catch (e) {
+        data = { error: "Can't reach the console server; nothing was published. Press again when it is back." };
+      }
+      if (resp && resp.ok) {
+        location.reload();
+        return;
+      }
+      btn.disabled = false;
+      btn.textContent = 'Use this page';
+      if (errEl) {
+        errEl.textContent = 'Not published: ' + (data.error || 'refused');
+        errEl.hidden = false;
+      }
+    });
+  }
+
   // Initialize
   function init() {
     // Read config from injected script
@@ -3544,6 +3576,7 @@
     fetchView().then(() => { if (config && config.api) liveLoop(); });
     startBoard();
     startUsage();
+    bindPageProposal();
   }
 
   // Public API

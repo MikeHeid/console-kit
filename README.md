@@ -371,6 +371,67 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   adapter configured whose import leaves a marker. The test fails if the
   server imports, opens, compiles or runs that file.
 
+### The page is a reviewed snapshot (owner ruling CONSOLE-kit/Q28)
+
+- **Why.** The server used to read your page from the project's checkout on
+  every request and put the console into it. Any agent that could edit that
+  file could put a script in your browser, where it could answer and lock as
+  you.
+- **What changed.** No server reads a page from a project any more: not
+  `--page`, and not the one server's `page` entry in `server.json`. The page it
+  serves is a snapshot kept in the console's state dir, and only the steward
+  writes it, from a commit:
+
+      python3 <kit>/agent.py --state <state dir> page-snapshot --path <page path in the repository>
+
+  Run it from inside the project's checkout, after a `git fetch`. It reads the
+  page from `origin/main` (or `--from-ref <ref>`) with git, never from the
+  working tree, so an uncommitted or unmerged edit never reaches your browser.
+  It refuses a commit that is not in `origin/main`, unless you pass
+  `--unreviewed`. On the one server, `--path` defaults to the project's `page`
+  in `server.json`. The server checks what arrives (at most 4 MiB, exactly one
+  `</body>`, no console block already in it) and keeps it as data. It never
+  runs git.
+- **You publish it (owner ruling CONSOLE-kit/Q29).** What `page-snapshot`
+  sends is only *proposed*: nothing you are served changes. The console shows
+  a strip, "Proposed dashboard: <ref> @ <commit> · <size> · reviewed (agent's
+  claim, not checked by the server)" (or "unreviewed"), with a preview and a
+  **Use this page** button. The page is
+  served only after you press it, through a route behind your Access login.
+  No agent can publish, because the agent socket has no route that does.
+  **The cost is one click per dashboard update.** The button sends the commit
+  you were shown. If a newer page was staged after your page loaded, it is
+  refused, naming both commits. Reload, look, and press again. Publishing
+  checks the page again (size, schema, the console injection). It cannot
+  check that the commit is in `origin/main`, because the server runs no git.
+  "reviewed" is only what the sending agent's command reported, so judge the
+  commit and the preview, not the label. Any process that can reach the
+  console's agent socket can replace the staged page, but a press on a page
+  that has since been replaced is refused, naming both commits.
+- **The preview never runs the proposed page's scripts.** It is shown in an
+  `<iframe sandbox="">` with no allowances. The route it loads from also
+  answers under its own `sandbox; default-src 'none'` policy, the one stored
+  visuals use. Each layer alone stops the page's scripts, so the preview shows
+  the page's markup and styles, never its behaviour. Its scripts first run
+  when you publish it.
+- **What you see.** A line at the end of the page names where it came from:
+  "Dashboard page from origin/main @ <commit> (staged by the steward,
+  published by you)", or "(staged from an unreviewed ref, published by you)"
+  for a page sent with `--unreviewed`. Until you publish one, the server
+  serves the console alone, with a note saying to run `agent.py page-snapshot`
+  and then press **Use this page**. The console works either way. Your
+  page's own scripts still run once published. Stage and publish again
+  whenever the page's merged version changes. `--page` is still accepted, so
+  an existing unit keeps starting, but it is never read, and the server logs
+  one line saying so.
+- **How it is held.** A test runs the real server under strace with `--page`
+  naming a page in the project, and with it naming a symlink to a page
+  outside. No system call names either path. Another test edits the page in
+  the working tree, stages it and runs `page-snapshot` again, and the edit
+  never reaches the page served. A test drives every agent route, and none
+  changes the served page. A browser test shows that the proposed page's
+  script does not run in the preview and does run once published.
+
 ## How it fits together
 
 ```
@@ -445,8 +506,9 @@ a whole-file hash was locked against, `reanchor` re-anchors nothing (rule 2
 cannot be checked) and lists each lock with that reason, and a refine chip
 shows the spec's file time and says the last-commit time is unavailable.
 
-- **`server.py`** serves one page (yours) with the console injected. It
-  refuses every request without a valid Access token, loopback included.
+- **`server.py`** serves one page (yours, as the steward last snapshotted it
+  from a merged commit) with the console injected. It refuses every request
+  without a valid Access token, loopback included.
 - **`agent.py`** is the agent's side: `view`, `ask` (one question or a batch), `reply`, `inbox`,
   `working` (shows you "agent active" on the items it has picked up),
   `synced`, `fork-context`, `check` (why each stale answer is stale), `reanchor`,

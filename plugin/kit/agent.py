@@ -594,6 +594,86 @@ def _items_push(a) -> int:
     return 0
 
 
+REVIEWED = "origin/main"   # Q28: "reviewed and merged" is an ancestor of this, after a fetch the user runs
+GIT_SECONDS = 60
+
+
+def _page_snapshot(a) -> int:
+    """`page-snapshot` (Q28): the page read from a COMMIT here, never from the working tree; sent as data.
+
+    The server stores what it is given and never runs git. So the guard is
+    here: the commit must be an ancestor of origin/main (reviewed and merged)
+    unless `--unreviewed` says otherwise, and then the footer says so. The
+    page is the blob at `--path` in that commit, a plain file (never a link),
+    read with `git cat-file`; an edit in the working tree never reaches it.
+    """
+    import base64
+    from console_kit import pagesnap as PS
+    from console_kit import serverfile as SF
+
+    def refuse(why: str, rc: int = 1) -> int:
+        print(f"refused, nothing sent: {why}", file=sys.stderr)
+        return rc
+
+    state = os.path.realpath(a.state)
+    found = R.enclosing(a.project)
+    if found is None or found[1].get("state") != state:
+        return refuse(f"{Path(a.project).resolve()} is not a project registered on the console at {state}")
+    root = Path(found[0])
+    door = _door(a.state)
+    if door.project is None and not door.sock.is_socket():
+        return refuse(f"no console server answers for {state}: no {door.sock}, and server.json hosts no project "
+                      f"there", 2)
+    path = a.path
+    if path is None and door.project is not None:   # the one server: server.json's page is the default
+        path = SF.load()["projects"].get(door.project, {}).get("page")
+    if path is None:
+        return refuse("pass --path, the page's path in the repository (e.g. docs/dashboard/index.html)")
+    why = SF._page_problem(path)
+    if why:
+        return refuse(why)
+    if not PS.REF.match(a.from_ref):
+        return refuse(f"--from-ref {a.from_ref!r}: a ref of plain characters, such as origin/main or a tag")
+    out = G.run(["rev-parse", "--verify", "--quiet", f"{a.from_ref}^{{commit}}"], root, timeout=GIT_SECONDS,
+                text=True)
+    if not out:
+        return refuse(f"{a.from_ref} names no commit in {root}; for origin/main, run `git fetch` first")
+    commit = out.strip()
+    if not a.unreviewed:
+        if not G.run(["rev-parse", "--verify", "--quiet", f"{REVIEWED}^{{commit}}"], root, timeout=GIT_SECONDS):
+            return refuse(f"{REVIEWED} is not in {root}: run `git fetch`, or pass --unreviewed to send a page "
+                          f"nobody reviewed (the footer will say so)")
+        if G.run(["merge-base", "--is-ancestor", commit, REVIEWED], root, timeout=GIT_SECONDS) is None:
+            return refuse(f"{a.from_ref} @ {commit[:12]} is not in {REVIEWED}, so it was not reviewed and merged. "
+                          f"Merge it first, or pass --unreviewed (the footer will say \"unreviewed ref\")")
+    entry = G.run(["ls-tree", "-z", commit, "--", path], root, timeout=GIT_SECONDS)
+    head, _, name = (entry or b"").rstrip(b"\0").partition(b"\t")
+    fields = head.split()
+    if name.decode("utf-8", "replace") != path or len(fields) != 3 or fields[1] != b"blob" \
+            or fields[0] not in (b"100644", b"100755"):
+        return refuse(f"{path} is not a plain file at {a.from_ref} @ {commit[:12]} (absent, a link or a folder)")
+    raw = G.run(["cat-file", "blob", fields[2].decode("ascii")], root, timeout=GIT_SECONDS)
+    if raw is None:
+        return refuse(f"git could not read {path} at {commit[:12]}")
+    body = {"content": base64.b64encode(raw).decode("ascii"), "ref": a.from_ref, "commit": commit, "path": path,
+            "reviewed": not a.unreviewed}
+    why = PS.snapshot_problem(body)   # the server's own check, here first, so a bad page is named before sending
+    if why:
+        return refuse(why)
+    try:
+        code, out = door.request("POST", "/page-snapshot", body, agent=a.agent)
+    except OSError as e:
+        return refuse(f"the console server is not answering on {door.sock}: {e}", 2)
+    if code != 200:
+        print(f"refused ({code}): {out.get('error')}", file=sys.stderr)
+        return 1
+    sys.stdout.write(_json(out))
+    # Q29: staged only. Nothing served changes until the owner presses the button; no agent can.
+    print(f"staged {commit[:12]}: the console shows it as a proposal; it is served once the owner presses "
+          f"\"{PS.USE}\"", file=sys.stderr)
+    return 0
+
+
 def _history_push(a) -> int:
     """`history-push` (Q23 part 2): git runs HERE; the server gets past versions and spec times as data."""
     from console_kit import stewardgit as SG
@@ -734,6 +814,17 @@ def main(argv=None) -> int:
                        "code. Run it after an upgrade, and whenever the register changes.")
     s.add_argument("--adapter", required=True, help="the adapter, a path inside the project")
     s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
+    s = sub.add_parser("page-snapshot", description="Read the console's page from a COMMIT here (git cat-file, "
+                       "never the working tree) and send it to the console server, which serves only that "
+                       "snapshot (CONSOLE-kit/Q28). Refuses a commit that is not in origin/main unless "
+                       "--unreviewed. Run it after an upgrade, and whenever the page's merged version changes.")
+    s.add_argument("--from-ref", default=REVIEWED, help=f"the ref to read the page from (default: {REVIEWED}, "
+                   "after a `git fetch` you run)")
+    s.add_argument("--path", default=None, help="the page's path in the repository (default on the one server: "
+                   "the project's page in server.json)")
+    s.add_argument("--unreviewed", action="store_true", help=f"send a commit that is not in {REVIEWED}; the footer "
+                   "says \"unreviewed ref\" instead of \"from the steward\"")
+    s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
     s = sub.add_parser("history-push", description="Read git HERE, in your own process, for what the console "
                        "server asks (the version each stale lock was taken against, the cited specs' last-commit "
                        "times) and send it as data. The server starts no git (CONSOLE-kit/Q23).")
@@ -832,6 +923,8 @@ def _run(a, bell: Path) -> int:
         return _items_push(a)
     if a.cmd == "history-push":
         return _history_push(a)
+    if a.cmd == "page-snapshot":
+        return _page_snapshot(a)
     if a.cmd == "server" and a.server_cmd == "token":
         from console_kit import serverfile as SF
         try:

@@ -36,7 +36,6 @@ import errno
 import fcntl
 import hashlib
 import hmac
-import json
 import os
 import re
 import socket
@@ -52,7 +51,6 @@ from . import gitseam as G
 from .items import (ITEM_FIELDS, ITEMS, MAX_ITEM_COUNT, MAX_ITEMS, SnapshotAdapter,  # noqa: F401 (MS.<name>)
                     snapshot_problem)
 from . import projectcfg as PC
-from . import publish as P
 from . import registry as R
 from . import rootfs as RF
 from . import names as N
@@ -63,13 +61,12 @@ from .store import StoreError
 LOCK = "server.lock"
 OLD_SOCKET = "agent.sock"
 SOCKET = "server.sock"
-MAX_PAGE = 4 << 20
 PROJECT_PATH = re.compile(r"^/p/([a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31})(/[^?#]*)\Z")
 FORBIDDEN = {"error": "forbidden"}   # one body for every refusal at the agent door: it names nothing (§3.5)
 # The agent POST routes the base handler serves; anything else is the 404 below. `_Handler.finish` drains the
 # unread body of that 404, and of every 403 and 503 here, within its own total deadline.
 POST_ROUTES = {"/cursor", "/working", "/reanchor", "/visual", "/visual-export", "/history-blob", "/history-specs",
-               "/items", *SV.AGENT_ROUTES}
+               "/items", "/page-snapshot", *SV.AGENT_ROUTES}
 BEARER = re.compile(r"^Bearer (ck1_[A-Za-z0-9_-]{43})\Z")
 NO_HASH = "0" * 64   # compared against when a project has no hash, so an unknown project costs the same compare
 
@@ -128,12 +125,8 @@ class ProjectConsole(SV.Console):
     the page renders for a single-project server: nothing here adds a second label.
     """
 
-    def page(self) -> str:
-        """The host page, read beneath the held root with no symlink followed (§3.6); RF.Refused otherwise."""
-        rel = Path(self.cfg.page).relative_to(self.cfg.root).as_posix()
-        html = RF.read(self.cfg.root, rel, MAX_PAGE).decode("utf-8")
-        block = P.console_block(json.dumps({"api": "/api", "project": self.cfg.project}))
-        return P.inject(html, block)
+    # page() is Console's: the project's STATE snapshot (CONSOLE-kit/Q28). server.json's "page" names only the
+    # default path `agent.py page-snapshot` reads from a commit; this server never reads it from the root.
 
     def board(self) -> dict | None:
         """None (the door's 404) until a push carries a board; a pushed one is checked as the adapter's was."""
@@ -184,7 +177,7 @@ def open_project(name: str, entry: dict, team_domain: str, registry: dict | str)
         h.fault = f"{name}'s root cannot be opened: {e.strerror}"
         h.close()
         return h
-    cfg = SV.Config(root=root, page=root / entry["page"], state=state, adapter=Path(os.devnull),
+    cfg = SV.Config(root=root, page=None, state=state, adapter=Path(os.devnull),   # Q28: no page is read here
                     team_domain=team_domain, aud=entry["aud"], hostname=entry["hostname"], port=entry["port"],
                     project=name)
     try:
@@ -314,21 +307,7 @@ class MultiAgentHandler(SV.AgentHandler):
 
 
 class MultiOwnerHandler(SV.OwnerHandler):
-    """A project's owner door on the one server: today's gate and routes; the host page read confined."""
-
-    def do_GET(self) -> None:
-        if self.path in ("/", "/index.html"):
-            if not self._gate():
-                return
-            try:
-                html = self.console.page()
-            except (OSError, ValueError, UnicodeDecodeError) as e:   # RF.Refused, absent, too large: the path as given
-                return self._send(404, {"error": str(e) if isinstance(e, (RF.Refused, FileNotFoundError))
-                                        else "the host page could not be read"})
-            except P.PublishError as e:   # no single </body>: named by count, never by the page's own text
-                return self._send(404, {"error": f"the host page cannot carry the console: {e}"})
-            return self._send(200, html, "text/html; charset=utf-8")
-        super().do_GET()
+    """A project's owner door on the one server: today's gate and routes, the page from STATE's snapshot (Q28)."""
 
 
 FAULT_BODY = {"error": "this project is not being served right now; the console server's log names why"}

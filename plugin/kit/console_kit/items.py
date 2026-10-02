@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import sys
 import threading
 from pathlib import Path
@@ -36,7 +35,7 @@ NOT_PUSHED = ("No items yet: the server never runs the project's adapter, so ite
 # ... and what it says when a stored items.json cannot be read (the single server tolerates it, below).
 UNREADABLE = ("The stored items cannot be read, so none are shown: the steward should push them again "
               "(agent.py items-push).")
-SET_ASIDE = ".items.json.set-aside."   # a directory found where items.json goes is renamed to this + hex, never removed
+SET_ASIDE = ".items.json.set-aside."   # what AF.set_aside_dir renames a directory at items.json to, + hex
 
 
 def snapshot_problem(doc: object) -> str | None:
@@ -95,13 +94,8 @@ def store_snapshot(state: Path, body: dict) -> None:
         raise ValueError(f"the pushed items are over {MAX_ITEMS} bytes")
     sfd = os.open(state, STATE_FLAGS)
     try:
-        try:
-            st = os.stat(ITEMS, dir_fd=sfd, follow_symlinks=False)
-        except FileNotFoundError:
-            st = None
-        if st is not None and stat.S_ISDIR(st.st_mode):
-            aside = SET_ASIDE + os.urandom(8).hex()
-            os.rename(ITEMS, aside, src_dir_fd=sfd, dst_dir_fd=sfd)
+        aside = AF.set_aside_dir(sfd, ITEMS)
+        if aside:
             sys.stderr.write(f"console items: a directory at {Path(state, ITEMS)} was set aside as {aside}\n")
         AF.write_at(sfd, ITEMS, data)
     finally:
