@@ -5,7 +5,7 @@ install and run it, and what a normal day looks like on each side, the owner's
 and the agents'. It links to the reference docs instead of repeating them:
 
 - [INSTALL.md](../INSTALL.md): installing the plugin, onboarding, release-by-release upgrade notes;
-- [README.md](../README.md): every feature, by release;
+- [README.md](../README.md): what the kit does today; [CHANGELOG.md](../CHANGELOG.md): every feature, by release;
 - [kit/docs/CLOUDFLARE.md](../plugin/kit/docs/CLOUDFLARE.md): the Access application, tunnel and DNS;
 - [kit/docs/ADAPTER.md](../plugin/kit/docs/ADAPTER.md): connecting the console to your project's work items and record;
 - [kit/docs/DEPLOY.md](../plugin/kit/docs/DEPLOY.md) and [kit/docs/RUNBOOK.md](../plugin/kit/docs/RUNBOOK.md): running it, and fixing it;
