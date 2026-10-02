@@ -37,7 +37,12 @@ def read_at(folder: int, name: str, limit: int) -> bytes | None:
     if not regular:
         os.close(fd)
         return None
-    with os.fdopen(fd, "rb") as fh:
+    try:
+        fh = os.fdopen(fd, "rb")
+    except BaseException:   # fdopen failed: nothing owns the descriptor yet, so close it here
+        os.close(fd)
+        raise
+    with fh:
         return fh.read(limit + 1)
 
 

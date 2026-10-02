@@ -135,9 +135,11 @@ class SnapshotAdapter:
         with self._lock:
             try:
                 doc = self._read()
-            except StoreError as e:
+            except (StoreError, OSError) as e:
+                if isinstance(e, OSError):   # EACCES, EIO, ELOOP on a parent...: as unreadable as a bad file
+                    e = StoreError(f"{self.path} cannot be read: {e.strerror or type(e).__name__}")
                 if not self.tolerant:
-                    raise
+                    raise e from None
                 if str(e) != self.problem:   # once per distinct problem, not once per request
                     sys.stderr.write(f"console items: {e}; serving no items until the steward pushes again\n")
                 self.problem, self._seen = str(e), None

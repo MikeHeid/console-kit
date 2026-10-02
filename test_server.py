@@ -438,6 +438,27 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.req("GET", "/api/view", tok=token())[0], 200)
         self.assertEqual(SV.agent_request(self.cfg.socket, "GET", "/view")[0], 200)
 
+    def test_a_stored_items_file_that_cannot_be_opened_is_503_on_both_views_and_names_no_path(self):
+        # Lane 5 re-review (MEDIUM): on the refusing adapter (the one server's), a mode-0000 items.json raised a
+        # bare PermissionError past _view, which catches StoreError, so the caller saw a dropped connection. It is
+        # now the same named StoreError: a 503 with no path, like a file that fails its check.
+        import io
+        from unittest import mock
+        if os.geteuid() == 0:
+            self.skipTest("root reads a mode-0000 file, so this cannot provoke EACCES")
+        state = Path(self.cfg.state, "items-state")
+        state.mkdir()
+        (state / IT.ITEMS).write_text(json.dumps({"items": {}}))
+        os.chmod(state / IT.ITEMS, 0)
+        self.console.adapter = IT.SnapshotAdapter(state)
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            code_owner, owner = self.req("GET", "/api/view", tok=token())
+            code_agent, agent = SV.agent_request(self.cfg.socket, "GET", "/view")
+        for route, code, body in (("/api/view", code_owner, owner), ("/view", code_agent, agent)):
+            with self.subTest(route=route):
+                self.assertEqual((code, body), (503, {"error": SV.VIEW_UNREADABLE}))
+        self.assertEqual(err.getvalue().count("cannot be read: Permission denied"), 2, err.getvalue())
+
     def test_board_is_404_when_the_adapter_offers_none(self):
         # The kit is project-neutral: a project without board() keeps its static page.
         code, body = self.req("GET", "/api/board", tok=token())
@@ -5463,6 +5484,27 @@ class SingleServerStartTests(unittest.TestCase):
         self.assertEqual(len(aside), 1, os.listdir(cfg.state))
         self.assertEqual((cfg.state / aside[0] / "kept").read_text(), "whatever was here")
 
+    def test_a_file_that_cannot_be_opened_does_not_stop_the_start(self):
+        # Lane 5 re-review (MEDIUM): tolerance caught only StoreError, so a mode-0000 items.json raised
+        # PermissionError out of serve() (the restart loop again), out of /view (no answer) and into /health (503).
+        # Any OSError reading the file is now the same unreadable store.
+        if os.geteuid() == 0:
+            self.skipTest("root reads a mode-0000 file, so this cannot provoke EACCES")
+
+        def plant(p, _base):
+            p.write_text(json.dumps(LANE_ITEMS))
+            os.chmod(p, 0)
+        self.check_starts_unreadable_then_recovers(plant, "cannot be read: Permission denied")
+
+
+SET_ASIDE_CHILD = r'''
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from console_kit import items as IT
+IT.store_snapshot(Path(sys.argv[2]), json.loads(sys.argv[3]))
+'''
+
 
 class SingleServerItemsTests(_SingleServer, unittest.TestCase):
     """Q24: the single server never imports or runs the project's adapter; items reach it by push only."""
@@ -5613,6 +5655,51 @@ class SingleServerItemsTests(_SingleServer, unittest.TestCase):
         safe, unsafe = dirfd_ops(trace.read_text(), (IT.ITEMS,))
         self.assertEqual(unsafe, [])
         self.assertGreaterEqual(safe, 3)          # a stat, a read and a rename at least
+
+    def test_a_directory_is_set_aside_relative_to_the_held_state_descriptor(self):
+        # Lane 5 re-review (LOW, a surviving mutant): the set-aside rename done by path, which a link swapped in
+        # for STATE would redirect. Under strace, the store with a directory at items.json: every call naming it,
+        # the set-aside rename included, is an *at call on a real dirfd with one component.
+        need_strace(self)
+        state = self.base / "state2"
+        (state / IT.ITEMS).mkdir(parents=True)
+        child = self.base / "aside_child.py"
+        child.write_text(SET_ASIDE_CHILD)
+        trace = self.base / "aside.strace"
+        r = subprocess.run(["strace", "-f", "-qq", "-e", "trace=%file", "-o", str(trace), sys.executable, str(child),
+                            str(HERE / "plugin" / "kit"), str(state), json.dumps(LANE_ITEMS)],
+                           capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        text = trace.read_text()
+        safe, unsafe = dirfd_ops(text, (IT.ITEMS,))
+        self.assertEqual(unsafe, [])
+        aside = [ln for ln in text.splitlines() if "rename" in ln and IT.SET_ASIDE in ln]
+        self.assertEqual(len(aside), 1, text[-2000:])   # the set-aside rename happened, and it is among the safe
+        self.assertGreaterEqual(safe, 3)                # the stat, the set-aside rename and the write's rename
+
+    def test_a_push_replaces_a_bad_file_or_a_link_and_sets_only_a_directory_aside(self):
+        # Lane 5 re-review (LOW, a surviving mutant): the S_ISDIR guard dropped, so ANY file at items.json would be
+        # set aside instead of replaced. A plain bad file and a symlink are replaced in place; only a directory,
+        # which a rename cannot replace, is set aside.
+        state = self.scfg.state
+        outside = self.base / "outside.json"
+        outside.write_text(json.dumps({"items": {"OUTSIDE": {"title": "not pushed"}}}))
+        p = state / IT.ITEMS
+        for kind, asides in (("bad file", 0), ("link", 0), ("dir", 1)):
+            with self.subTest(kind=kind):
+                if p.exists() or p.is_symlink():
+                    p.unlink()
+                if kind == "bad file":
+                    p.write_bytes(b"{not json")
+                elif kind == "link":
+                    p.symlink_to(outside)
+                else:
+                    p.mkdir()
+                self.assertEqual(SV.agent_request(self.scfg.socket, "POST", "/items", LANE_ITEMS)[0], 200)
+                self.assertTrue(stat.S_ISREG(os.lstat(p).st_mode))
+                self.assertEqual(len([n for n in os.listdir(state) if n.startswith(IT.SET_ASIDE)]), asides)
+                self.assertEqual(self.sview()["items"], LANE_ITEMS["items"])
+        self.assertIn("OUTSIDE", outside.read_text())   # the link's target, untouched
 
     def test_the_cli_pushes_to_the_single_server_and_the_adapter_runs_in_the_steward(self):
         # AC 3. The real `agent.py items-push`, a separate process, against the single server's own socket.
