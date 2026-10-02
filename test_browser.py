@@ -167,6 +167,13 @@ STATE = """() => {
 FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
 
 
+def _expand(page, qid=None) -> None:
+    """CONSOLE-kit/Q37: a locked question is one line until opened; open it (or every one) to reach its controls."""
+    sel = f".ck-q-line[data-qid='{qid}'][aria-expanded='false']" if qid else ".ck-q-line[aria-expanded='false']"
+    while page.locator(sel).count():
+        page.locator(sel).first.click()
+
+
 def _playwright():
     try:
         from playwright.sync_api import sync_playwright
@@ -809,6 +816,7 @@ class AnswerFollowUpTests(unittest.TestCase):
             for width in (1280, 375):
                 with self.subTest(browser=kind, width=width):
                     page, posted = self._open(kind, width)
+                    _expand(page)
                     # 0.8.0: the follow-up is one of three next steps, behind "Next step ▾".
                     nxt = page.locator("button[aria-label^='Next step for']")
                     self.assertEqual(nxt.count(), 1)  # Q1 is locked; Q2 is unanswered and offers none
@@ -913,6 +921,7 @@ class DeliberateOpenQuestionTests(unittest.TestCase):
             for width in (1280, 375):
                 with self.subTest(browser=kind, width=width):
                     page, posted = self._open(kind, width)
+                    _expand(page)
                     sel = "button[aria-label^='Deliberate before answering:']"
                     self.assertEqual(page.locator(sel).count(), 2)
                     self.assertEqual(self.card(page, 1).locator(sel).count(), 0)
@@ -972,6 +981,7 @@ class DeliberateOpenQuestionTests(unittest.TestCase):
         for kind in BROWSERS:
             with self.subTest(browser=kind):
                 page, _ = self._open(kind, 1280, _open_view(lock_q3=True))
+                _expand(page)
                 card = self.card(page, 3)
                 self.assertEqual(card.locator("button[aria-label^='Deliberate before answering:']").count(), 0)
                 text = card.locator(".ck-asked").text_content()
@@ -2135,6 +2145,7 @@ class NextStepAndVisualTests(unittest.TestCase):
                     self.locked_question(own_text="Keep the `ZoneMaster` out of the grid.")
                     page = self.page(kind, width, url)
                     self.open_item(page)
+                    _expand(page)
                     page.wait_for_selector(".ck-question .ck-tag[data-step='refine']")
                     chips = page.eval_on_selector_all(".ck-question .ck-tag", """cs => cs.map(c => ({
                         step: c.dataset.step, title: c.title,
@@ -2180,6 +2191,7 @@ class NextStepAndVisualTests(unittest.TestCase):
                 self.locked_question()
                 page = self.page(kind, 1280, url)
                 self.open_item(page)
+                _expand(page)
                 page.wait_for_selector(".ck-question .ck-tag[data-step='refine']")
                 title = page.get_attribute(".ck-question .ck-tag[data-step='refine']", "title")
                 said = page.text_content(".ck-question .ck-tag[data-step='refine'] .ck-sr-only")
@@ -2199,6 +2211,7 @@ class NextStepAndVisualTests(unittest.TestCase):
 
                     def roar_once():
                         if page.locator(".ck-next-menu").count() == 0:
+                            _expand(page)
                             page.locator("button[aria-label^='Next step for']").click()
                         page.locator(".ck-next-menu button[data-step='follow']").click()
                         form = page.locator(".ck-followup")
@@ -2271,6 +2284,389 @@ class NextStepAndVisualTests(unittest.TestCase):
                     alone.wait_for_timeout(300)
                     self.assertIsNone(alone.locator("body").get_attribute("data-ran"))
                     self.assert_not_reloaded(page)
+
+
+# A host whose own header is sticky at the top, stacked the way a lane board's is (z-index 100).
+STICKY_HOST = LIVE_HOST.replace(
+    "<body>", '<body><header id="host-header" style="position:sticky;top:0;z-index:100;height:64px;'
+              'background:#222;color:#fff">host header</header><div style="height:2000px">')
+STICKY_HOST = STICKY_HOST.replace("</body>", "</div></body>")
+
+
+class InboxUXTests(unittest.TestCase):
+    """Owner rulings CONSOLE-kit/Q33-Q37 (2026-10-02, all ★), and the console half of Q38's motion."""
+
+    setUpClass = classmethod(LiveConsoleTests.setUpClass.__func__)
+    tearDownClass = classmethod(LiveConsoleTests.tearDownClass.__func__)
+    serve = LiveConsoleTests.serve
+    agent_post = LiveConsoleTests.agent_post
+    ask = LiveConsoleTests.ask
+    bell = LiveConsoleTests.bell
+    page = LiveConsoleTests.page
+    open_inbox = LiveConsoleTests.open_inbox
+    assert_not_reloaded = LiveConsoleTests.assert_not_reloaded
+
+    # -- helpers ------------------------------------------------------------------------
+
+    def answer(self, qid, pick="fix", own_text=""):
+        return self.console.write("answer", {"qid": qid, "picks": [pick], "own_text": own_text,
+                                             "nonce": "ans" + qid.replace("/", "").replace(".", "")}, "owner")
+
+    def lock(self, qid):
+        head = self.console.store.head(qid)
+        return self.console.write("lock", {"qid": qid, "answer": head["id"],
+                                           "nonce": "lk" + qid.replace("/", "").replace(".", "")}, "owner")
+
+    def locked(self, qid):
+        head = self.console.store.head(qid)
+        return bool(head) and self.console.store.lock_of(head["id"]) is not None
+
+    def locks(self):
+        return [r for r in self.console.store.records() if r["type"] == "lock"]
+
+    def open_item(self, page, item="LANE.1"):
+        page.evaluate("ConsoleKit.open(%s)" % json.dumps(item))
+        page.wait_for_selector(".ck-questions-heading")
+
+    def said(self, page, text, timeout=3000):
+        page.wait_for_function("t => document.querySelector('.ck-live').textContent.includes(t)", arg=text,
+                               timeout=timeout)
+
+    def ask_as(self, n, agent, item="LANE.1", at=None, **over):
+        """An agent question asked under a session name (kit 0.8.2), at a chosen store time."""
+        if at is not None:
+            self.console.store.clock = lambda: at
+        body = {"qid": f"{item}/Q{n}", "item": item, "text": f"Question {n}: which way?", "kind": "single",
+                "options": [{"id": "fix", "label": "Fix now"}, {"id": "record", "label": "Record in findings.md"},
+                            {"id": "leave", "label": "Leave it"}],
+                "star": "fix", "source": "docs/spec.md:1", "valid_if": [], "nonce": f"uxq{n:04d}{agent or 'none'}"}
+        body.update(over)
+        return self.console.write("question", body, "agent", agent=agent)
+
+    # -- Q33: one tap, a countdown, then the lock --------------------------------------
+
+    def test_q33_one_tap_locks_only_when_the_countdown_ends(self):
+        # Catches: a lock sent at the tap with a cosmetic countdown (nothing may reach the store before it ends);
+        # a countdown that never sends; a second confirm step left in (one tap must be enough); and an Undo
+        # that is not where focus lands, so a keyboard owner cannot stop it.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                self.ask(1)
+                self.answer("LANE.1/Q1")
+                page = self.page(kind, 1280, url)
+                self.open_item(page)
+                page.click(".ck-lock-one")
+                page.wait_for_selector(".ck-lock-countdown")
+                self.assertIn("Locking in 5 s", page.locator(".ck-lock-countdown").text_content())
+                self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-lock-undo')"))
+                self.said(page, "Locking in 5 seconds")
+                self.assertEqual(page.locator(".ck-confirm").count(), 0, "a second confirmation step is left in")
+                page.wait_for_timeout(3500)
+                self.assertEqual(self.locks(), [], "the lock reached the store before the countdown ended")
+                self.assertIn(page.locator(".ck-lock-left").text_content(), ("Locking in 2 s", "Locking in 1 s"))
+                page.wait_for_function("document.querySelector('.ck-lock-countdown') === null", timeout=6000)
+                self.assertTrue(self.locked("LANE.1/Q1"))
+                self.assertEqual(len(self.locks()), 1)
+                self.said(page, "Locked.")
+                # Focus was on the Undo the lock removed: it lands on the question's own line.
+                page.wait_for_selector(".ck-q-line[data-qid='LANE.1/Q1']")
+                self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-q-line')"))
+
+    def test_q33_undo_leaving_the_question_and_leaving_the_page_send_nothing(self):
+        # Catches: an Undo that hides the countdown but lets its timer fire; a countdown that keeps running
+        # after the owner left the question (a lock from a place they can no longer see); and a page that
+        # sends the lock as it unloads (a beacon or fetch keepalive on pagehide).
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                self.ask(1)
+                self.answer("LANE.1/Q1")
+                page = self.page(kind, 1280, url)
+                self.open_item(page)
+                # 1. Undo, by keyboard: Enter on the focused Undo.
+                page.click(".ck-lock-one")
+                page.wait_for_selector(".ck-lock-undo")
+                page.keyboard.press("Enter")
+                page.wait_for_selector(".ck-lock-one")
+                self.said(page, "Nothing was sent")
+                self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-lock-one')"))
+                # A second tap after an Undo counts the full five seconds again (no timer left running from the first).
+                page.keyboard.press("Enter")
+                page.wait_for_selector(".ck-lock-undo")
+                page.wait_for_timeout(3200)
+                self.assertEqual(self.locks(), [], "a timer left from the undone count ran the new one fast")
+                page.keyboard.press("Enter")
+                page.wait_for_selector(".ck-lock-one")
+                # 2. Leaving the question: another item mid-count.
+                page.click(".ck-lock-one")
+                page.wait_for_selector(".ck-lock-countdown")
+                page.evaluate("ConsoleKit.open('LANE')")
+                self.said(page, "you left the question")
+                # 3. Leaving the page mid-count.
+                self.open_item(page)
+                page.click(".ck-lock-one")
+                page.wait_for_selector(".ck-lock-countdown")
+                page.goto("about:blank")
+                page.wait_for_timeout(6500)   # past every countdown above
+                self.assertEqual(self.locks(), [], "a lock was sent without the countdown ending on show")
+
+    def test_q33_a_live_redraw_mid_count_keeps_the_countdown_and_the_undo_focus(self):
+        # Catches: a countdown lost to a live redraw (it would lock with nothing on show, or not at all), focus
+        # thrown off the Undo by the redraw, and a lock landing under a box the owner is typing in.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                self.ask(1)
+                self.ask(2)
+                self.answer("LANE.1/Q1")
+                page = self.page(kind, 1280, url)
+                self.open_item(page)
+                page.click(".ck-lock-one")
+                page.wait_for_selector(".ck-lock-countdown")
+                self.ask(3)   # arrives live while the count runs
+                page.wait_for_selector(".ck-question:has-text('Question 3')", timeout=6000)
+                self.assertEqual(page.locator(".ck-lock-countdown").count(), 1)
+                self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-lock-undo')"))
+                # Now type in Q2's own-words box while the lock lands: the box is not redrawn under the owner.
+                box = page.locator(".ck-question:has-text('Question 2') textarea").first
+                box.click()
+                box.type("half a thought")
+                deadline = time.monotonic() + 9
+                while not self.locked("LANE.1/Q1") and time.monotonic() < deadline:
+                    page.wait_for_timeout(200)   # not time.sleep: the sync route relaying POSTs runs only inside a Playwright call
+                self.assertTrue(self.locked("LANE.1/Q1"), page.evaluate("document.querySelector('.ck-live').textContent"))
+                # Not redrawn, yet not left saying "Locking in 1 s" over a question that is locked.
+                page.wait_for_function("document.querySelector('.ck-lock-left').textContent === 'Locked.'")
+                self.assertEqual(page.locator(".ck-lock-undo").get_attribute("aria-disabled"), "true")
+                self.assertEqual(box.input_value(), "half a thought")
+                self.assertTrue(page.evaluate("document.activeElement.tagName === 'TEXTAREA'"))
+
+    # -- Q37: a settled question is one line ------------------------------------------
+
+    def test_q37_locked_questions_roll_up_to_one_line_and_open_on_click(self):
+        # Catches: locked questions left at full size; an open question rolled up (it still asks something);
+        # a line without the pick; an expand that a live redraw closes again; and a toggle a keyboard or
+        # screen reader cannot use (a div, or no aria-expanded).
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                self.ask(1)
+                self.ask(2)
+                self.ask(3)
+                self.answer("LANE.1/Q1", pick="record")
+                self.lock("LANE.1/Q1")
+                self.answer("LANE.1/Q2")
+                page = self.page(kind, 1280, url)
+                self.open_item(page)
+                line = page.locator(".ck-q-line[data-qid='LANE.1/Q1']")
+                self.assertEqual(line.get_attribute("aria-expanded"), "false")
+                self.assertEqual(line.evaluate("e => e.tagName"), "BUTTON")
+                text = " ".join(line.text_content().split())
+                for part in ("LANE.1/Q1", "Record in findings.md", "locked"):
+                    self.assertIn(part, text)
+                card = page.locator(".ck-question[data-qid='LANE.1/Q1']")
+                self.assertEqual(card.locator(".ck-receipt").count(), 0, "a rolled-up question shows its receipt")
+                for qid in ("LANE.1/Q2", "LANE.1/Q3"):   # unlocked and unanswered stay whole
+                    self.assertEqual(page.locator(f".ck-question-rolled[data-qid='{qid}']").count(), 0, qid)
+                line.focus()
+                page.keyboard.press("Enter")
+                page.wait_for_selector(".ck-question[data-qid='LANE.1/Q1'] .ck-receipt")
+                self.assertEqual(page.locator(".ck-q-line[data-qid='LANE.1/Q1']").get_attribute("aria-expanded"),
+                                 "true")
+                self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-q-line')"))
+                self.ask(4)   # a live redraw keeps it open
+                page.wait_for_selector(".ck-question:has-text('Question 4')", timeout=6000)
+                self.assertEqual(page.locator(".ck-question[data-qid='LANE.1/Q1'] .ck-receipt").count(), 1)
+                page.click(".ck-q-line[data-qid='LANE.1/Q1']")
+                page.wait_for_selector(".ck-question-rolled[data-qid='LANE.1/Q1']")
+
+    def test_q37_a_stale_question_stays_whole(self):
+        # Catches: rolling up every question with a lock, so a stale ruling (which needs the owner) hides.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                spec = self.cfg.root / "docs" / "spec.md"
+                spec.parent.mkdir(parents=True)
+                spec.write_text("The cap is 64 KiB.\n")
+                self.ask(1, valid_if=[{"kind": "excerpt", "path": "docs/spec.md", "text": "The cap is 64 KiB."}])
+                self.answer("LANE.1/Q1")
+                self.lock("LANE.1/Q1")
+                spec.write_text("The cap is 32 KiB.\n")
+                page = self.page(kind, 1280, url)
+                self.open_item(page)
+                page.wait_for_selector(".ck-stale-banner")
+                self.assertEqual(page.locator(".ck-question-rolled").count(), 0)
+
+    # -- Q36: the send bar -------------------------------------------------------------
+
+    def test_q36_the_send_bar_counts_sends_the_process_signal_and_goes(self):
+        # Catches: a bar shown before any answer; counts that are not answered/left; a bar under a host's
+        # sticky header or scrolled away with the questions; a different signal from today's button (another
+        # text or intent); two send controls at once; and a bar that stays after the send.
+        for kind in BROWSERS:
+            for width in (1280, 375):
+                with self.subTest(browser=kind, width=width):
+                    url = self.serve(page=STICKY_HOST)
+                    for n in (1, 2, 3):
+                        self.ask(n)
+                    page = self.page(kind, width, url)
+                    self.open_item(page)
+                    self.assertEqual(page.locator(".ck-send-bar").count(), 0, "a bar before any answer")
+                    self.answer("LANE.1/Q1")
+                    page.wait_for_selector(".ck-send-bar", timeout=6000)
+                    self.assertEqual(page.locator(".ck-send-bar-count").text_content(), "1 answered · 2 left")
+                    self.answer("LANE.1/Q2", pick="leave")
+                    page.wait_for_function("document.querySelector('.ck-send-bar-count').textContent === "
+                                           "'2 answered · 1 left'", timeout=6000)
+                    self.assertEqual(page.get_by_role("button", name="Answers are in: process them").count(), 0)
+                    # Under the panel's header, never covered: what is drawn at its centre is the bar.
+                    page.evaluate("document.querySelector('.ck-body').scrollTop = 99999; window.scrollTo(0, 400)")
+                    geo = page.evaluate("""() => {
+                        const b = document.querySelector('.ck-send-bar').getBoundingClientRect();
+                        const h = document.querySelector('.ck-panel .ck-header').getBoundingClientRect();
+                        const hit = document.elementFromPoint(b.left + 8, b.top + b.height / 2);
+                        return {below: b.top >= h.bottom - 1, top: b.top, mine: !!hit.closest('.ck-send-bar')};
+                    }""")
+                    self.assertTrue(geo["below"], geo)
+                    self.assertTrue(geo["mine"], f"something covers the bar: {geo}")
+                    self.assertLess(geo["top"], 200, geo)
+                    self.assertEqual([b for b in self.bell() if b.get("intent") == "process"], [])
+                    page.click(".ck-send-bar-go")
+                    page.wait_for_function("document.querySelector('.ck-send-bar') === null", timeout=6000)
+                    sent = [r for r in self.console.store.records()
+                            if r["type"] == "message" and r.get("intent") == "process"]
+                    self.assertEqual([(r["item"], r["text"], r["by"]) for r in sent],
+                                     [("LANE.1", "Answers are in: process them.", "owner")])
+                    self.assertEqual(len([b for b in self.bell() if b.get("intent") == "process"]), 1)
+                    self.said(page, "Sent to the agent")
+                    self.assertFalse(page.evaluate("document.activeElement === document.body"))
+                    # The next answer brings it back, counting only what came after the send.
+                    self.answer("LANE.1/Q3")
+                    page.wait_for_function("document.querySelector('.ck-send-bar-count') && document.querySelector("
+                                           "'.ck-send-bar-count').textContent === '1 answered · 0 left'", timeout=6000)
+
+    # -- Q34: a single pick moves on ----------------------------------------------------
+
+    def round_of(self, kinds):
+        f = self.console.write("message", {"item": "LANE.1", "text": "go", "intent": "fork", "mode": "explore",
+                                           "nonce": "uxfork0001"}, "owner")
+        for n, k in enumerate(kinds, 1):
+            self.ask(n, forked_from=f["id"], star_by="panel", kind=k)
+        return f["id"]
+
+    def test_q34_a_single_pick_moves_to_the_next_unanswered_question_and_says_so(self):
+        # Catches: no move at all; a move to the next question even when it is already picked (it must be the
+        # next UNANSWERED one); a move that is not announced; a move after a multi-choice pick, after a pick
+        # on a question being commented on, or for every ↑/↓ step through the options (each is a change);
+        # and a move onto the review page, whose Lock button an Enter would then press.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                fid = self.round_of(["single", "single", "multi", "single", "single"])
+                page = self.page(kind, 1280, url)
+                page.evaluate("ConsoleKit.openRound(%s)" % json.dumps(fid))
+                page.wait_for_selector(".ck-round-step")
+                count = "document.querySelector('.ck-round-count').textContent"
+                at = lambda n: page.evaluate(count + f".startsWith('Question {n} of 5')")
+                page.click(".ck-round-dot >> nth=1")   # pick Q2 first: it moves on to Q3, the next unanswered
+                page.click(".ck-round-options input[value='leave']")
+                page.wait_for_function(count + ".startsWith('Question 3 of 5')", timeout=3000)
+                page.click(".ck-round-dot >> nth=0")
+                page.wait_for_function(count + ".startsWith('Question 1 of 5')")
+                page.click(".ck-round-options input[value='fix']")
+                # Q2 is picked already: the next UNANSWERED is Q3.
+                page.wait_for_function(count + ".startsWith('Question 3 of 5')", timeout=3000)
+                self.said(page, "Moved on to question 3 of 5")
+                self.assertTrue(page.evaluate("document.activeElement.classList.contains('ck-round-qtext')"))
+                # Q3 is multi: a pick never moves (Q4 and Q5 are still open, so a move had somewhere to go).
+                page.click(".ck-round-options input[value='fix']")
+                page.wait_for_timeout(900)
+                self.assertTrue(at(3))
+                page.click(".ck-round-dot >> nth=3")
+                page.wait_for_function(count + ".startsWith('Question 4 of 5')")
+                # ↑/↓ walk Q4's options without moving on, though Q5 is open.
+                page.locator(".ck-round-options input[value='fix']").focus()
+                page.keyboard.press("ArrowDown")
+                page.wait_for_timeout(900)
+                self.assertTrue(at(4))
+                self.assertTrue(page.locator(".ck-round-options input[value='record']").is_checked())
+                # Commenting on Q4, then a pick: it stays.
+                page.fill("#ck-round-words", "thinking about it")
+                page.click(".ck-round-options input[value='leave']")
+                page.wait_for_timeout(900)
+                self.assertTrue(at(4))
+                page.click(".ck-round-dot >> nth=4")
+                page.wait_for_function(count + ".startsWith('Question 5 of 5')")
+                # Every question picked now: a pick moves nowhere, and never onto the review page.
+                page.click(".ck-round-options input[value='fix']")
+                self.said(page, "Every question has a pick")
+                page.wait_for_timeout(600)
+                self.assertTrue(at(5))
+                self.assertEqual(page.locator(".ck-review-heading").count(), 0)
+                self.assertEqual(self.console.store.head("LANE.1/Q1"), None, "a pick wrote something")
+
+    # -- Q35: loose questions from one agent, together -----------------------------------
+
+    def test_q35_one_agents_loose_questions_on_one_item_are_offered_together(self):
+        # Catches: grouping by item alone (two agents' questions merged), grouping unnamed questions (nothing
+        # shows they are one agent's), a group spanning a long gap, a card that opens something other than
+        # the round form, and a group lock that skips the owner door (it must be /answer then /lock, then
+        # one 'process' message), or that locks before the owner presses its Lock.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                self.ask_as(1, "agent-5", at="2026-10-02T10:00:00Z")
+                self.ask_as(2, "agent-5", at="2026-10-02T10:03:00Z")
+                self.ask_as(3, "agent-5", at="2026-10-02T10:06:00Z")
+                self.ask_as(4, "agent-5", at="2026-10-02T11:30:00Z")   # after a long gap: alone
+                self.ask_as(5, "agent-6", at="2026-10-02T10:04:00Z")   # another agent
+                self.ask_as(6, None, at="2026-10-02T10:05:00Z")        # no name
+                self.ask_as(7, None, at="2026-10-02T10:05:30Z")
+                page = self.page(kind, 1280, url)
+                self.open_inbox(page, 1280)
+                cards = page.locator(".ck-cluster")
+                self.assertEqual(cards.count(), 1)
+                self.assertEqual(cards.locator(".ck-cluster-go").text_content(), "Answer these 3 together")
+                self.assertEqual(cards.locator(".ck-inbox-item").evaluate_all("rs => rs.map(r => r.dataset.qid)"),
+                                 ["LANE.1/Q1", "LANE.1/Q2", "LANE.1/Q3"])
+                self.assertIn("agent-5", cards.locator(".ck-cluster-head").text_content())
+                cards.locator(".ck-cluster-go").click()
+                page.wait_for_selector(".ck-round-step")
+                self.assertIn("Together: LANE.1", page.locator(".ck-round-title").text_content())
+                self.assertTrue(page.evaluate("document.querySelector('.ck-round-count').textContent"
+                                              ".startsWith('Question 1 of 3')"))
+                for _ in range(3):
+                    page.keyboard.press("2")
+                    page.wait_for_timeout(600)
+                page.get_by_role("button", name="Review all").click()
+                page.wait_for_selector(".ck-review-heading")
+                self.assertEqual(self.locks(), [], "locked before the owner pressed Lock")
+                page.click(".ck-lock-all")
+                page.wait_for_selector(".ck-result-heading", timeout=10000)
+                for n in (1, 2, 3):
+                    head = self.console.store.head(f"LANE.1/Q{n}")
+                    self.assertEqual((head["picks"], head["by"]), (["record"], "owner"))
+                    self.assertTrue(self.locked(f"LANE.1/Q{n}"))
+                for n in (4, 5, 6, 7):
+                    self.assertIsNone(self.console.store.head(f"LANE.1/Q{n}"))
+                self.assertEqual(len([b for b in self.bell() if b.get("intent") == "process"]), 1)
+
+    # -- Q38 (console half): motion only without a reduced-motion preference ---------------
+
+    def test_q38_motion_runs_only_when_the_viewer_has_not_asked_for_less(self):
+        # Catches: animation that ignores prefers-reduced-motion, and the send bar's slide never wired.
+        for kind in BROWSERS:
+            for reduced in (False, True):
+                with self.subTest(browser=kind, reduced=reduced):
+                    url = self.serve()
+                    self.ask(1)
+                    page = self.page(kind, 1280, url, reduced=reduced)
+                    self.open_item(page)
+                    self.answer("LANE.1/Q1")
+                    page.wait_for_selector(".ck-send-bar", timeout=6000)
+                    name = page.evaluate("getComputedStyle(document.querySelector('.ck-send-bar')).animationName")
+                    self.assertEqual(name, "none" if reduced else "ck-slide-down")
 
 
 if __name__ == "__main__":

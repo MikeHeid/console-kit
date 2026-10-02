@@ -41,6 +41,12 @@
   const openForms = new Set(); // disclosure keys the owner left open
   let lockingAll = null;        // 0.8.5: the item whose answers are being locked in turn, or null
   const lockAllError = {};      // 0.8.5: item -> why its last 'Lock all' stopped
+  // CONSOLE-kit/Q33: one tap locks one answer after a countdown this page holds. Nothing is sent before it
+  // ends; Undo, leaving the question or leaving the page sends nothing. There is no server record of it.
+  const LOCK_DELAY_S = 5;
+  const pendingLocks = new Map(); // qid -> { answer, item, left, timer }
+  const lockErrors = {};          // qid -> why its last lock was refused
+  const justLocked = new Set();   // qids locked from this page and not yet drawn rolled up (Q37's roll-up)
   // 0.7.0: the inbox's tabs, the round form, and the live loop.
   let currentTab = 'inbox';     // 'inbox' | 'feed' | 'prs' | 'chat', inside inbox mode
   let arrived = new Set();      // qids and message ids that arrived with the latest live update
@@ -677,6 +683,7 @@
   // Close panel
   function closePanel() {
     panelEl.setAttribute('data-open', 'false');
+    dropLocksNotOnShow();
     applyDock();
     // Back to what opened it; when that was the strip, it is the strip again.
     if (lastFocused && lastFocused.focus && document.contains(lastFocused)) lastFocused.focus();
@@ -684,6 +691,7 @@
 
   // Render panel content
   function renderPanel() {
+    dropLocksNotOnShow();
     panelEl.textContent = '';
     pendingLive = false;
     if (currentMode === 'inbox') {
@@ -794,23 +802,10 @@
     if (loose.length) {
       body.appendChild(el('div', { className: 'ck-section-heading' }, ['Questions for you']));
       const list = el('div', { className: 'ck-inbox-list' });
-      for (const q of loose) {
-        const itemData = items[q.question.item];
-        const item = el('div', { className: 'ck-inbox-item' + (arrived.has(q.question.qid) ? ' ck-arrived' : ''),
-          tabindex: '0', dataQid: q.question.qid }, [
-          el('span', { className: 'ck-q-state', dataState: q.state }, [
-            GLYPH[q.state] || '', ' ', q.state.replace('_', ' ')
-          ]),
-          el('span', { className: 'ck-inbox-item-id' }, [q.question.item]),
-          el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : ''])
-        ]);
-        const go = () => openFromInbox(q.question.item);
-        item.addEventListener('click', go);
-        item.addEventListener('keydown', e => {
-          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
-        });
-        list.appendChild(item);
-      }
+      const clusters = looseClusters(loose);
+      const inCluster = new Set(clusters.flatMap(c => c.qs.map(q => q.question.qid)));
+      for (const c of clusters) list.appendChild(renderClusterCard(c));
+      for (const q of loose) if (!inCluster.has(q.question.qid)) list.appendChild(looseRow(q));
       body.appendChild(list);
     }
 
@@ -849,6 +844,95 @@
       body.appendChild(el('p', { style: 'color: var(--c-fg-muted); text-align: center; padding: 20px;' },
         ['No pending items.']));
     }
+  }
+
+  function looseRow(q) {
+    const itemData = items[q.question.item];
+    const item = el('div', { className: 'ck-inbox-item' + (arrived.has(q.question.qid) ? ' ck-arrived' : ''),
+      tabindex: '0', dataQid: q.question.qid }, [
+      el('span', { className: 'ck-q-state', dataState: q.state }, [
+        GLYPH[q.state] || '', ' ', q.state.replace('_', ' ')
+      ]),
+      el('span', { className: 'ck-inbox-item-id' }, [q.question.item]),
+      el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : ''])
+    ]);
+    const go = () => openFromInbox(q.question.item);
+    item.addEventListener('click', go);
+    item.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
+    });
+    return item;
+  }
+
+  // CONSOLE-kit/Q35 (owner, 2026-10-02, the ★): loose questions about one item, asked by one agent within a
+  // few minutes, are offered as one round: "Answer these N together" opens the round form on them.
+  // "One agent" is the name the asking session gave (names.jsonl, kit 0.8.2): it is the only thing the view
+  // carries about who asked. A question asked with no name can't be shown to be the same agent's as another,
+  // so it is never grouped. The run breaks at a gap of more than CLUSTER_GAP_MS between two asks.
+  const CLUSTER_GAP_MS = 5 * 60 * 1000;
+
+  function askedAt(q) { const t = Date.parse(q.question.ts); return Number.isFinite(t) ? t : 0; }
+
+  function looseClusters(loose) {
+    const byKey = new Map();
+    for (const q of loose) {
+      const who = q.question.agent;
+      if (!who) continue;
+      const k = q.question.item + '\u0000' + who;
+      if (!byKey.has(k)) byKey.set(k, []);
+      byKey.get(k).push(q);
+    }
+    const out = [];
+    const flush = run => {
+      if (run.length < 2) return;
+      out.push({ id: 'loose:' + run[0].question.qid, item: run[0].question.item, agent: run[0].question.agent,
+        qs: run });
+    };
+    for (const qs of byKey.values()) {
+      qs.sort((a, b) => askedAt(a) - askedAt(b) || qNum(a.question.qid) - qNum(b.question.qid));
+      let run = [qs[0]];
+      for (const q of qs.slice(1)) {
+        if (askedAt(q) - askedAt(run[run.length - 1]) <= CLUSTER_GAP_MS) run.push(q);
+        else { flush(run); run = [q]; }
+      }
+      flush(run);
+    }
+    return out;
+  }
+
+  function renderClusterCard(c) {
+    const n = c.qs.length;
+    const btn = el('button', { className: 'ck-btn ck-btn-primary ck-cluster-go', type: 'button', dataFocusKey: c.id,
+      'aria-label': 'Answer these ' + n + ' questions from ' + c.agent + ' on ' + c.item + ' together' },
+    ['Answer these ' + n + ' together']);
+    btn.addEventListener('click', () => openLooseRound(c));
+    const card = el('div', { className: 'ck-cluster', dataCluster: c.id }, [
+      el('div', { className: 'ck-cluster-head' }, [
+        el('span', { className: 'ck-inbox-item-id' }, [c.item]),
+        ' ' + n + ' questions from ' + c.agent + ' · asked ' + relTime(c.qs[n - 1].question.ts)]),
+      btn
+    ]);
+    const rows = el('div', { className: 'ck-cluster-rows' });
+    for (const q of c.qs) rows.appendChild(looseRow(q));
+    card.appendChild(rows);
+    return card;
+  }
+
+  // A group is fixed when it is opened: answering one of its questions mid-way never reshapes the round under
+  // the owner (it is kept with the drafts, so a reload resumes it).
+  const looseGroups = {};   // 'loose:<first qid>' -> [qid, ...]
+  function isLoose(id) { return typeof id === 'string' && id.startsWith('loose:'); }
+  function looseQids(id) {
+    if (!looseGroups[id]) {
+      const saved = memGet('loose-group:' + id);
+      looseGroups[id] = Array.isArray(saved) ? saved.filter(x => typeof x === 'string') : [];
+    }
+    return looseGroups[id];
+  }
+  function openLooseRound(c) {
+    looseGroups[c.id] = c.qs.map(q => q.question.qid);
+    memSet('loose-group:' + c.id, looseGroups[c.id]);
+    openRound(c.id);
   }
 
   // 0.8.5: the inbox opens an item in its own panel, so the item must offer the way back.
@@ -900,6 +984,8 @@
     header.querySelector('.ck-back-btn').addEventListener('click', fromInbox ? backToInbox : closePanel);
     header.querySelector('.ck-close-btn').addEventListener('click', closePanel);
     panelEl.appendChild(header);
+    const sendBar = view ? renderSendBar(itemId) : null;
+    if (sendBar) panelEl.appendChild(sendBar);
 
     // Status bar with item counts
     const statusBar = renderStatusBar(itemId);
@@ -1121,10 +1207,49 @@
   }
 
   // Render a question card
+  // CONSOLE-kit/Q37 (owner, 2026-10-02, the ★): a settled question is one line, qid · pick · state, and opens
+  // on click. Open and stale questions stay whole: they are the ones that still ask something of the owner.
+  const ROLLED_STATES = ['locked', 'withdrawn', 'superseded'];
+
+  function pickWords(qData, answer) {
+    if (!answer) return 'no answer';
+    const labels = optionLabels(qData);
+    const picks = (answer.picks || []).map(p => labels[p] || p);
+    return picks.length ? picks.join(', ') : (answer.own_text ? 'your own words' : 'no pick');
+  }
+
+  function rollLine(q, open) {
+    const qData = q.question;
+    const head = q.answers && q.answers.length ? q.answers[q.answers.length - 1] : null;
+    const line = el('button', { className: 'ck-q-line', type: 'button', dataQid: qData.qid,
+      dataFocusKey: 'line-' + qData.qid, 'aria-expanded': open ? 'true' : 'false',
+      'aria-label': qData.qid + ', ' + (STATE_WORDS[q.state] || q.state) + ': ' + pickWords(qData, head) +
+        '. ' + truncateText(qData.text, 60) + (open ? ' Collapse.' : ' Expand.') }, [
+      el('span', { className: 'ck-q-line-caret', 'aria-hidden': 'true' }, [open ? '▾' : '▸']),
+      el('span', { className: 'ck-inbox-item-id' }, [qData.qid]),
+      el('span', { className: 'ck-q-line-pick' }, [pickWords(qData, head)]),
+      el('span', { className: 'ck-q-state', dataState: q.state }, [(GLYPH[q.state] || '') + ' ' +
+        (STATE_WORDS[q.state] || q.state)])
+    ]);
+    line.addEventListener('click', () => {
+      if (open) openForms.delete('expand-' + qData.qid); else openForms.add('expand-' + qData.qid);
+      redrawKeepingPlace();
+    });
+    return line;
+  }
+
   function renderQuestion(q) {
     const qData = q.question;
     const state = q.state;
-    const card = el('div', { className: 'ck-question' });
+    const rolled = ROLLED_STATES.includes(state);
+    const open = rolled && openForms.has('expand-' + qData.qid);
+    if (rolled && !open) {
+      const card = el('div', { className: 'ck-question ck-question-rolled', dataQid: qData.qid }, [rollLine(q, false)]);
+      if (justLocked.delete(qData.qid)) card.classList.add('ck-rolling');   // the motion runs once, on the lock
+      return card;
+    }
+    const card = el('div', { className: 'ck-question', dataQid: qData.qid });
+    if (open) card.appendChild(rollLine(q, true));
 
     // Header
     const hdr = el('div', { className: 'ck-q-header' }, [
@@ -1227,32 +1352,35 @@
       const asked = askedLine(qData.qid);
       if (asked) bodyEl.appendChild(asked);
     } else if (state === 'unlocked') {
-      // Fix #4: Two-step locking — first show receipt and "Lock this answer..." button
+      // CONSOLE-kit/Q33: one tap, then a countdown with Undo; the lock is sent only when it ends.
       bodyEl.appendChild(renderReceipt(qData, headAnswer));
+      if (lockErrors[qData.qid]) {
+        bodyEl.appendChild(el('p', { className: 'ck-error-msg ck-lock-error' }, ['Not locked: ' + lockErrors[qData.qid]]));
+      }
       const actions = el('div', { className: 'ck-actions' });
       const truncText = truncateText(qData.text, 40);
-      const lockTriggerBtn = el('button', {
-        className: 'ck-btn ck-btn-primary',
-        type: 'button',
-        'aria-label': 'Lock this answer: ' + truncText
-      }, ['Lock this answer…']);
-      lockTriggerBtn.addEventListener('click', () => {
-        // Replace actions with confirmation step
-        actions.textContent = '';
-        actions.appendChild(renderLockConfirm(q, headAnswer));
-      });
-      actions.appendChild(lockTriggerBtn);
-      // Also allow re-answering
-      const changeBtn = el('button', {
-        className: 'ck-btn',
-        type: 'button',
-        'aria-label': 'Re-answer before locking: ' + truncText
-      }, ['Re-answer before locking']);
-      changeBtn.addEventListener('click', () => {
-        bodyEl.textContent = '';
-        bodyEl.appendChild(renderAnswerForm(q, false, null));
-      });
-      actions.appendChild(changeBtn);
+      if (pendingLocks.has(qData.qid)) {
+        actions.appendChild(renderLockCountdown(qData));
+      } else {
+        const lockBtn = el('button', {
+          className: 'ck-btn ck-btn-primary ck-lock-one',
+          type: 'button',
+          dataFocusKey: 'lock-' + qData.qid,
+          'aria-label': 'Lock this answer: ' + truncText
+        }, ['Lock this answer']);
+        lockBtn.addEventListener('click', () => startLock(q, headAnswer));
+        actions.appendChild(lockBtn);
+        const changeBtn = el('button', {
+          className: 'ck-btn',
+          type: 'button',
+          'aria-label': 'Re-answer before locking: ' + truncText
+        }, ['Re-answer before locking']);
+        changeBtn.addEventListener('click', () => {
+          bodyEl.textContent = '';
+          bodyEl.appendChild(renderAnswerForm(q, false, null));
+        });
+        actions.appendChild(changeBtn);
+      }
       bodyEl.appendChild(actions);
       bodyEl.appendChild(deliberateOpen(q));
     } else {
@@ -1854,35 +1982,109 @@
   }
 
   // Render lock confirmation step (fix #4: two-step with Cancel)
-  function renderLockConfirm(q, answer) {
-    const truncText = truncateText(q.question.text, 40);
-    const wrap = el('div', { className: 'ck-confirm' }, [
-      el('div', { className: 'ck-confirm-heading' }, ['Lock this answer?'])
-    ]);
-    wrap.appendChild(renderReceipt(q.question, answer));
-    const actions = el('div', { className: 'ck-actions', style: 'margin-top: 12px;' });
-    const lockBtn = el('button', {
-      className: 'ck-btn ck-btn-primary',
-      type: 'button',
-      'aria-label': 'Lock answer: ' + truncText
-    }, ['Lock answer']);
-    lockBtn.addEventListener('click', async () => {
-      lockBtn.disabled = true;
-      const result = await apiPost('/lock', { qid: q.question.qid, answer: answer.id }, 'lock-' + q.question.qid);
-      lockBtn.disabled = false;
-      if (result.error) {
-        announce('Error: ' + result.error);
-      } else {
-        renderPanel();
-      }
+  // CONSOLE-kit/Q33 (owner, 2026-10-02, the ★): locking one answer is one tap. The page counts down
+  // LOCK_DELAY_S seconds with an Undo, and only then sends the lock: the same POST the old confirm sent, so
+  // the owner door's checks are unchanged. The countdown is this page's alone: no record, no route, and a
+  // page that is closed, reloaded or navigated away mid-count has sent nothing.
+  function startLock(q, answer) {
+    const qid = q.question.qid;
+    if (pendingLocks.has(qid) || !answer) return;
+    delete lockErrors[qid];
+    const p = { answer: answer.id, item: q.question.item, left: LOCK_DELAY_S, timer: null };
+    p.timer = setInterval(() => tickLock(qid), 1000);
+    pendingLocks.set(qid, p);
+    redrawKeepingPlace();
+    const undo = panelEl.querySelector('.ck-lock-undo[data-focus-key="undo-' + CSS.escape(qid) + '"]');
+    if (undo) undo.focus();
+    announce('Locking in ' + LOCK_DELAY_S + ' seconds. Press Undo to keep it unlocked.');
+  }
+
+  function renderLockCountdown(qData) {
+    const p = pendingLocks.get(qData.qid);
+    const wrap = el('div', { className: 'ck-lock-countdown', dataQid: qData.qid });
+    // Not a live region: it changes every second. The start, Undo and the outcome are announced once each.
+    wrap.appendChild(el('span', { className: 'ck-lock-left' }, ['Locking in ' + p.left + ' s']));
+    const undo = el('button', { className: 'ck-btn ck-lock-undo', type: 'button', dataFocusKey: 'undo-' + qData.qid,
+      'aria-label': 'Undo: do not lock ' + truncateText(qData.text, 40) }, ['Undo']);
+    undo.addEventListener('click', () => {
+      // Once the count ends the lock is on its way: an Undo then would say something untrue.
+      if (!undoLock(qData.qid, 'Not locked. Nothing was sent.')) return;
+      redrawKeepingPlace();
+      const again = panelEl.querySelector('.ck-lock-one[data-focus-key="lock-' + CSS.escape(qData.qid) + '"]');
+      if (again) again.focus();
     });
-    actions.appendChild(lockBtn);
-    // Cancel button to dismiss confirmation
-    const cancelBtn = el('button', { className: 'ck-btn', type: 'button' }, ['Cancel']);
-    cancelBtn.addEventListener('click', () => renderPanel());
-    actions.appendChild(cancelBtn);
-    wrap.appendChild(actions);
+    wrap.appendChild(el('span', { 'aria-hidden': 'true' }, [' · ']));
+    wrap.appendChild(undo);
     return wrap;
+  }
+
+  function tickLock(qid) {
+    const p = pendingLocks.get(qid);
+    if (!p) return;
+    p.left -= 1;
+    if (p.left > 0) { setCountdown(qid, 'Locking in ' + p.left + ' s', false); return; }
+    // Out of the map BEFORE the request: nothing can send this lock twice, or Undo it once it is on its way.
+    clearInterval(p.timer);
+    pendingLocks.delete(qid);
+    setCountdown(qid, 'Locking…', true);
+    sendLock(qid, p);
+  }
+
+  // The countdown's words, changed in place: a box the owner is typing in elsewhere is never redrawn for it.
+  function setCountdown(qid, words, done) {
+    for (const c of panelEl.querySelectorAll('.ck-lock-countdown[data-qid="' + CSS.escape(qid) + '"]')) {
+      const left = c.querySelector('.ck-lock-left');
+      if (left) left.textContent = words;
+      const undo = c.querySelector('.ck-lock-undo');
+      if (done && undo) undo.setAttribute('aria-disabled', 'true');
+    }
+  }
+
+  async function sendLock(qid, p) {
+    // Asked before the request: its own refresh redraws the panel, and the Undo is gone by the time it answers.
+    const ae = document.activeElement;
+    const wasHere = !!(ae && ae.getAttribute && ae.getAttribute('data-focus-key') === 'undo-' + qid);
+    const result = await apiPost('/lock', { qid: qid, answer: p.answer }, 'lock-' + qid);
+    if (result.error) {
+      lockErrors[qid] = result.error;
+      announce('Not locked: ' + result.error);
+      setCountdown(qid, 'Not locked: ' + result.error, true);
+    } else {
+      justLocked.add(qid);
+      announce('Locked.');
+      setCountdown(qid, 'Locked.', true);
+    }
+    if (panelEl.getAttribute('data-open') !== 'true') return;
+    if (busyInPanel()) { pendingLive = true; return; }
+    redrawKeepingPlace();
+    // The Undo that had focus is gone: land on the question's own line, which the lock just rolled up.
+    if (wasHere) {
+      const line = panelEl.querySelector('.ck-q-line[data-qid="' + CSS.escape(qid) + '"]') ||
+        panelEl.querySelector('.ck-questions-heading');
+      if (line) { if (!line.hasAttribute('tabindex') && line.tagName !== 'BUTTON') line.setAttribute('tabindex', '-1'); line.focus(); }
+    }
+  }
+
+  function undoLock(qid, words) {
+    const p = pendingLocks.get(qid);
+    if (!p) return false;
+    clearInterval(p.timer);
+    pendingLocks.delete(qid);
+    if (words) announce(words);
+    return true;
+  }
+
+  // Leaving the question, the panel or the page takes the countdown with it: a lock is never sent from a
+  // place the owner can no longer see, so it can never land by accident.
+  function dropLocksNotOnShow() {
+    let dropped = 0;
+    for (const [qid, p] of [...pendingLocks]) {
+      const shown = panelEl && panelEl.getAttribute('data-open') === 'true' && currentMode === 'item' &&
+        currentItem === p.item;
+      if (!shown && undoLock(qid, null)) dropped += 1;
+    }
+    if (dropped) announce(dropped === 1 ? 'Not locked: you left the question before it locked.'
+      : dropped + ' answers not locked: you left them before they locked.');
   }
 
   // Render thread/messages
@@ -2152,10 +2354,73 @@
     wrap.appendChild(el('div', { className: 'ck-actions' }, [answersBtn, forkBtn, visBtn]));
     wrap.appendChild(slot);
     wrap.appendChild(visSlot);
-    const sheet = answersSheet(itemId, null);
-    wrap.appendChild(renderReadyButton(itemId, sheet.counts));
+    // Q36: while the send bar is up it is the one way to send; two controls for one signal would only differ.
+    if (!sendCounts(itemId).answered) wrap.appendChild(renderReadyButton(itemId, answersSheet(itemId, null).counts));
     return wrap;
   }
+
+  // CONSOLE-kit/Q36 (owner, 2026-10-02, the ★): once an answer is in, a bar at the top of the item says how
+  // many are answered and how many are left, with "Send to agent": the same 'process' message as the button
+  // it stands in for. Everything it shows comes from the view: "answered" is each question of the item whose
+  // newest owner answer came after the item's newest 'process' message, so the bar goes once that is sent,
+  // here or from another tab, and comes back with the next answer. It is the panel's own row, under the
+  // header, so it scrolls with nothing and a host's sticky header (stacked at 100) never covers the panel
+  // (1000, docked 997), the way the kit-version chip sits above it too.
+  function sendCounts(itemId) {
+    const out = { answered: 0, left: 0 };
+    if (!view) return out;
+    const sent = (view.threads[itemId] || []).filter(m => m.by === 'owner' && m.intent === 'process')
+      .reduce((s, m) => Math.max(s, m.seq || 0), 0);
+    for (const q of Object.values(view.questions)) {
+      if (q.question.item !== itemId) continue;
+      if (q.state === 'awaiting_you') { out.left += 1; continue; }
+      const owners = (q.answers || []).filter(a => a.by === 'owner');
+      const head = owners.length ? owners[owners.length - 1] : null;
+      if (head && (head.seq || 0) > sent) out.answered += 1;
+    }
+    return out;
+  }
+
+  let sendingItem = null;   // the item whose 'process' message is in flight
+
+  function renderSendBar(itemId) {
+    const c = sendCounts(itemId);
+    if (!c.answered) { sendBarShown.delete(itemId); return null; }
+    const words = c.answered + ' answered · ' + c.left + ' left';
+    const bar = el('div', { className: 'ck-send-bar', role: 'region', 'aria-label': 'Answers to send' }, [
+      el('span', { className: 'ck-send-bar-count' }, [words])]);
+    const btn = el('button', { className: 'ck-btn ck-btn-primary ck-send-bar-go', type: 'button',
+      dataFocusKey: 'send-' + itemId,
+      'aria-label': 'Send to agent: ' + words + '. An open session watching starts now; otherwise the next one does.'
+    }, [sendingItem === itemId ? 'Sending…' : 'Send to agent']);
+    btn.disabled = sendingItem === itemId;
+    btn.addEventListener('click', async () => {
+      sendingItem = itemId;
+      btn.disabled = true;
+      btn.textContent = 'Sending…';
+      // The same message, body and nonce key as "Answers are in: process them".
+      const result = await apiPost('/message',
+        { item: itemId, text: 'Answers are in: process them.', intent: 'process' }, 'ready-' + itemId);
+      sendingItem = null;
+      if (result.error) {
+        announce('Not sent: ' + result.error);
+        btn.disabled = false;
+        btn.textContent = 'Send to agent';
+        return;
+      }
+      announce('Sent to the agent: ' + words + '.');
+      redrawKeepingPlace();
+      // The bar is gone with the button that had focus: land on the item's questions.
+      if (!panelEl.contains(document.activeElement) || document.activeElement.classList.contains('ck-close-btn')) {
+        const h = panelEl.querySelector('.ck-questions-heading') || panelEl.querySelector('.ck-close-btn');
+        if (h) { if (!h.hasAttribute('tabindex') && h.tagName !== 'BUTTON') h.setAttribute('tabindex', '-1'); h.focus(); }
+      }
+    });
+    bar.appendChild(btn);
+    if (!sendBarShown.has(itemId)) { sendBarShown.add(itemId); bar.classList.add('ck-send-bar-in'); }
+    return bar;
+  }
+  const sendBarShown = new Set();   // items whose bar has already appeared: the slide-in runs once per showing
 
   // "Answers are in: process them" (§7.3): one owner message, intent 'process'.
   function renderReadyButton(itemId, counts) {
@@ -2563,9 +2828,10 @@
 
   // Every question of the round, in qid order, and the ones the form walks (not yet locked).
   function roundQuestions(forkId) {
-    const f = view && view.forks[forkId];
-    if (!f) return [];
-    return f.questions.map(qid => view.questions[qid]).filter(Boolean)
+    if (!view) return [];
+    const f = view.forks[forkId];
+    const qids = isLoose(forkId) ? looseQids(forkId) : f ? f.questions : [];   // Q35: a loose group is a round too
+    return qids.map(qid => view.questions[qid]).filter(Boolean)
       .sort((a, b) => a.question.item.localeCompare(b.question.item) || qNum(a.question.qid) - qNum(b.question.qid));
   }
   function roundSteps(forkId) { return roundQuestions(forkId).filter(q => OPEN_STATES.includes(q.state)); }
@@ -2616,6 +2882,7 @@
   }
 
   function leaveRound() {
+    cancelAdvance();
     currentMode = 'inbox';
     currentTab = 'inbox';
     renderPanel();
@@ -2644,16 +2911,19 @@
   }
 
   function renderRound(forkId) {
-    const f = view && view.forks[forkId];
+    const loose = isLoose(forkId);
+    const f = view && !loose && view.forks[forkId];
     const m = f ? f.message : null;
+    const first = loose ? roundQuestions(forkId)[0] : null;
     const title = el('span', { className: 'ck-round-title', tabindex: '-1' },
-      [m ? 'Round: ' + m.item + ' · ' + m.mode : 'Round']);
+      [m ? 'Round: ' + m.item + ' · ' + m.mode
+        : first ? 'Together: ' + first.question.item + ' · from ' + (first.question.agent || 'an agent') : 'Round']);
     panelEl.appendChild(makeHeader([title], leaveRound, 'Back to inbox'));
     panelEl.appendChild(renderStatusBar(null));
     const body = el('div', { className: 'ck-body ck-round' });
     panelEl.appendChild(body);
     if (!view) { body.appendChild(renderOffline()); return; }
-    if (!f) { body.appendChild(el('p', {}, ['This round is not in the console any more.'])); return; }
+    if (!f && !first) { body.appendChild(el('p', {}, ['This round is not in the console any more.'])); return; }
     const mem = roundFor(forkId);
     if (mem.result) return renderRoundResult(body, forkId, mem);
     const steps = roundSteps(forkId);
@@ -2695,7 +2965,46 @@
     });
   }
 
+  // CONSOLE-kit/Q34 (owner, 2026-10-02, the ★): in a round, a single-choice pick moves to the next question
+  // still without a pick, ADVANCE_MS later, and says so through the live region. Multi-choice, free answers
+  // and a question being commented on never move by themselves; nothing moves when no question is left
+  // without a pick (the review page, with its Lock button, is only ever reached by the owner's own press).
+  const ADVANCE_MS = 400;
+  let advanceTimer = null;
+  let arrowPickAt = -Infinity;  // when an ↑/↓ last moved a pick: the change it makes is a walk, not a choice
+
+  function cancelAdvance() {
+    if (advanceTimer) { clearTimeout(advanceTimer); advanceTimer = null; }
+  }
+
+  function scheduleAdvance(forkId, qid) {
+    cancelAdvance();
+    advanceTimer = setTimeout(() => {
+      advanceTimer = null;
+      if (currentMode !== 'round' || currentFork !== forkId || panelEl.getAttribute('data-open') !== 'true') return;
+      const mem = roundFor(forkId);
+      const steps = roundSteps(forkId);
+      if (mem.review || mem.result || !steps[mem.step] || steps[mem.step].question.qid !== qid) return;
+      if (!drafted(mem.drafts[qid])) return;   // the pick was cleared in the meantime
+      const after = steps.map((q, i) => i).filter(i => i !== mem.step && !drafted(mem.drafts[steps[i].question.qid]));
+      const next = after.find(i => i > mem.step) ?? after[0];
+      if (next === undefined) {
+        announce('Every question has a pick. Review when you are ready.');
+        return;
+      }
+      mem.step = next;
+      saveRound(forkId);
+      advancedTo = steps[next].question.qid;
+      renderPanel();
+      focusRoundStep();
+      announce('Moved on to question ' + (next + 1) + ' of ' + steps.length + ': ' +
+        truncateText(steps[next].question.text, 80));
+    }, ADVANCE_MS);
+  }
+  let advancedTo = null;        // the step just reached by an auto-advance: its card slides in, once
+
   function roundGo(forkId, delta) {
+    cancelAdvance();
     const mem = roundFor(forkId);
     const steps = roundSteps(forkId);
     const next = mem.step + delta;
@@ -2715,9 +3024,10 @@
     const q = steps[mem.step];
     const qData = q.question;
     const draft = mem.drafts[qData.qid] || (mem.drafts[qData.qid] = { picks: [], text: '' });
-    const tighten = view.forks[forkId].message.mode === 'tighten';
+    const tighten = !isLoose(forkId) && view.forks[forkId].message.mode === 'tighten';
     body.appendChild(roundProgress(forkId, mem, steps));
     const card = el('div', { className: 'ck-round-step', role: 'group', 'aria-labelledby': 'ck-round-qtext' });
+    if (advancedTo === qData.qid) { advancedTo = null; card.classList.add('ck-advance-in'); }
     card.appendChild(el('div', { className: 'ck-q-header' }, [
       el('span', { className: 'ck-q-state', dataState: q.state }, [GLYPH[q.state] + ' ' + STATE_WORDS[q.state]]),
       el('span', { className: 'ck-inbox-item-id' }, [qData.qid])
@@ -2752,6 +3062,19 @@
           }
           saveRound(forkId);
           refreshRoundProgress(forkId, mem, steps);
+          // Q34: a single-choice pick moves on by itself, unless an arrow key made it (↑/↓ walk the options,
+          // and every step of that walk is a change) or the owner is commenting on this question.
+          const byArrow = performance.now() - arrowPickAt < 250;
+          if (!multi && qData.kind === 'single' && input.checked && !byArrow && !(draft.text && draft.text.trim()) &&
+              document.activeElement !== words) {
+            scheduleAdvance(forkId, qData.qid);
+          } else {
+            cancelAdvance();
+          }
+        });
+        input.addEventListener('keydown', e => {
+          // ←/→ never reach a radio here (onRoundKey takes them to move between questions); ↑/↓ do.
+          if (e.key === 'ArrowUp' || e.key === 'ArrowDown') arrowPickAt = performance.now();
         });
         inputs.push(input);
         const content = el('div', { className: 'ck-option-content' }, [
@@ -2772,6 +3095,7 @@
       card.appendChild(fs);
       const clear = el('button', { className: 'ck-btn ck-btn-quiet', type: 'button' }, ['Clear my pick']);
       clear.addEventListener('click', () => {
+        cancelAdvance();
         draft.picks = [];
         for (const i of inputs) i.checked = false;
         saveRound(forkId);
@@ -2787,9 +3111,11 @@
     words.value = draft.text || '';
     words.addEventListener('input', () => {
       draft.text = words.value;
+      cancelAdvance();   // a question being commented on never moves by itself
       saveRound(forkId);
       refreshRoundProgress(forkId, mem, steps);
     });
+    words.addEventListener('focus', cancelAdvance);
     card.appendChild(words);
     card.appendChild(renderEvidence(qData));
     body.appendChild(card);
@@ -2963,14 +3289,17 @@
     const go = el('button', { className: 'ck-btn ck-btn-primary ck-lock-all', type: 'button' }, [
       'Lock all & process (' + toLock.length + ')']);
     go.disabled = toLock.length === 0;
-    go.addEventListener('click', () => lockAll(forkId, go));
+    go.addEventListener('click', () => (isLoose(forkId) ? lockLoose : lockAll)(forkId, go));
     const back = el('button', { className: 'ck-btn', type: 'button' }, ['Back to the questions']);
     back.disabled = steps.length === 0;
     back.addEventListener('click', () => { mem.review = false; saveRound(forkId); renderPanel(); focusRoundStep(); });
     body.appendChild(el('div', { className: 'ck-actions ck-round-nav' }, [go, back]));
-    body.appendChild(el('p', { className: 'ck-muted' }, [
-      'Each picked answer is locked, then one "Answers are in" request goes to the agent. If the server would ' +
-      'refuse any of them, it locks none and says which. A locked answer can later be superseded, with a reason.']));
+    body.appendChild(el('p', { className: 'ck-muted' }, [isLoose(forkId)
+      ? 'Each picked answer is sent and locked in turn, then one "Answers are in" request goes to the agent. ' +
+        'If one is refused, it stops there and names it; the ones before it stay locked. A locked answer can ' +
+        'later be superseded, with a reason.'
+      : 'Each picked answer is locked, then one "Answers are in" request goes to the agent. If the server would ' +
+        'refuse any of them, it locks none and says which. A locked answer can later be superseded, with a reason.']));
   }
 
   function renderLockFailure(f) {
@@ -3021,6 +3350,65 @@
     if (h) h.focus();
   }
 
+  // Q35: a loose group has no fork, so the server's one-request /lock-all (which needs a fork message) is not
+  // open to it. Its review page sends what the item page would: each answer, then its lock, through the
+  // owner door's own /answer and /lock, then the one 'process' message. Nothing new on the server.
+  function sameList(a, b) { return (a || []).length === (b || []).length && (a || []).every((x, i) => x === b[i]); }
+
+  async function lockLoose(forkId, btn) {
+    const mem = roundFor(forkId);
+    const todo = roundSteps(forkId).filter(q => drafted(mem.drafts[q.question.qid]));
+    if (!todo.length) return;
+    btn.disabled = true;
+    btn.textContent = 'Locking…';
+    const results = [];
+    let failure = null;
+    for (const q of todo) {
+      const qid = q.question.qid;
+      const d = mem.drafts[qid];
+      const picks = [...d.picks];
+      const own = (d.text || '').trim();
+      const head = q.answers && q.answers.length ? q.answers[q.answers.length - 1] : null;
+      let answerId = q.state === 'unlocked' && head && sameList(head.picks, picks) && (head.own_text || '') === own
+        ? head.id : null;
+      if (!answerId) {
+        const a = await apiPost('/answer', { qid: qid, picks: picks, own_text: own }, 'answer-' + qid);
+        if (a.error || !a.record) { failure = { qid: qid, error: a.error || 'refused' }; break; }
+        answerId = a.record.id;
+      }
+      const l = await apiPost('/lock', { qid: qid, answer: answerId }, 'lock-' + qid);
+      if (l.error) { failure = { qid: qid, error: l.error }; break; }
+      results.push({ qid: qid, status: 'locked' });
+    }
+    let processed = false;
+    if (results.length) {
+      const item = todo[0].question.item;
+      const m = await apiPost('/message', { item: item, text: 'Answers are in: process them.', intent: 'process' },
+        'ready-' + item);
+      processed = !m.error;
+      if (m.error && !failure) failure = { qid: null, error: 'Locked, but the request to the agent was not sent: ' + m.error };
+    }
+    if (!failure) {
+      mem.result = { results: results, process: processed };
+      mem.failure = null;
+      mem.drafts = {};
+      mem.review = false;
+      mem.step = 0;
+      memSet('round:' + forkId, null);
+      announce('Locked ' + results.length + ' answers; the agent was asked to process them.');
+    } else {
+      const head = 'Locked ' + results.length + ' of ' + todo.length + '. ';
+      mem.failure = { status: 0, error: head + (failure.qid ? failure.qid + ' was not locked: ' : '') + failure.error,
+        results: failure.qid ? [{ qid: failure.qid, status: 'refused', error: failure.error }] : [] };
+      saveRound(forkId);
+      announce(mem.failure.error);
+    }
+    await fetchView();
+    renderPanel();
+    const h = panelEl.querySelector(mem.result ? '.ck-result-heading' : '.ck-review-heading');
+    if (h) h.focus();
+  }
+
   function renderRoundResult(body, forkId, mem) {
     const r = mem.result;
     body.appendChild(el('h2', { className: 'ck-result-heading', tabindex: '-1' }, ['Locked, and sent to the agent']));
@@ -3037,7 +3425,11 @@
     const back = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' }, ['Back to inbox']);
     back.addEventListener('click', () => { mem.result = null; leaveRound(); });
     const sheet = el('button', { className: 'ck-btn', type: 'button' }, ['Answers from this round']);
-    sheet.addEventListener('click', () => { mem.result = null; showSheet(view.forks[forkId].message.item, forkId); });
+    sheet.addEventListener('click', () => {
+      mem.result = null;
+      if (isLoose(forkId)) { const first = roundQuestions(forkId)[0]; showSheet(first ? first.question.item : null, null); }
+      else showSheet(view.forks[forkId].message.item, forkId);
+    });
     body.appendChild(el('div', { className: 'ck-actions' }, [back, sheet]));
   }
 
@@ -3546,9 +3938,16 @@
     const bodyEl = panelEl.querySelector('.ck-body');
     const top = bodyEl ? bodyEl.scrollTop : 0;
     const hadFocus = panelEl.contains(document.activeElement) && document.activeElement !== document.body;
+    // A control that names itself (data-focus-key) gets focus back on its redrawn twin: an Undo mid-countdown
+    // must keep focus through a live redraw, or Enter would land somewhere else.
+    const focusKey = hadFocus && document.activeElement.getAttribute('data-focus-key');
     renderPanel();
     const again = panelEl.querySelector('.ck-body');
     if (again && currentTab !== 'chat') again.scrollTop = top;
+    if (focusKey) {
+      const twin = panelEl.querySelector('[data-focus-key="' + CSS.escape(focusKey) + '"]');
+      if (twin) twin.focus();
+    }
     // Focus was on a control the redraw replaced: put it somewhere stable in the panel, never on the board.
     if (hadFocus && !panelEl.contains(document.activeElement)) {
       const t = panelEl.querySelector('[role="tab"][aria-selected="true"]') || panelEl.querySelector('.ck-close-btn');
@@ -3885,6 +4284,9 @@
     document.addEventListener('keydown', onRoundKey);
     panelEl.addEventListener('focusout', onPanelFocusOut);
     document.addEventListener('visibilitychange', onVisibility);
+    // Q33: a page leaving drops every countdown. Timers would die with it anyway, but a page kept in the
+    // back-forward cache resumes its timers when shown again, and its lock must not land then.
+    window.addEventListener('pagehide', () => { for (const qid of [...pendingLocks.keys()]) undoLock(qid, null); });
     injectItemButtons();
     // Initial fetch, then the live loop (0.7.0) keeps the page current
     bindPageProposal();   // before the board: a stale bar offers the dialog only once it is bound
