@@ -508,7 +508,7 @@ skill inside the repository.
   and cannot be dismissed, because polling has stopped and it is the only
   sign the numbers on the page are frozen.
 
-## Reviewing a new dashboard page in a dialog (unreleased)
+## Reviewing a new dashboard page in a dialog (0.8.15)
 
 - **A staged page is reviewed in a modal dialog** (owner, 2026-10-02: "can
   you create a modal rather than place on bottom (button hides under
