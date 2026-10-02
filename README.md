@@ -88,7 +88,7 @@ which check failed.
   stands until you lock the new answer.
 
 Only the owner can do any of these, and only on a stale answer. Nothing is
-deleted: each act is appended beside the store, and the fold records the
+deleted: each act is recorded in a file beside the store, and the fold records the
 outcome in your project. New questions are refused a whole-file hash where an
 excerpt fits, which is what made most rulings go stale.
 
@@ -137,12 +137,12 @@ server cannot check it.
 
   | Purpose | Commands |
   |---|---|
-  | Reading | `todo`, `view`, `answers` (capped at 64 KiB, with a narrower command named when a read is too big) |
+  | Reading | `inbox`, `todo`, `view`, `answers` (capped at 64 KiB, with a narrower command named when a read is too big), `health` |
   | Asking and answering | `ask`, `reply`, `working`, `synced`, `watch` |
-  | Deliberation | `fork-context`, `transcript`, `visual`, `visual-export` |
+  | Deliberation | `fork-context`, `transcript`, `visual`, `visual-export`, `next-step`, `costs` |
   | Stale answers | `check`, `reanchor`, `propose-anchor` |
   | Pushing data | `items-push`, `history-push`, `page-snapshot` |
-  | Owner only | `register`, `steward` |
+  | Owner only | `register`, `steward`, `server add`, `server token rotate` |
 
   `--as NAME` names the session.
 - **`fold.py`** writes locked answers, and what became of them, into your
