@@ -31,6 +31,7 @@ from typing import Protocol
 
 from . import anchors as A
 from . import names as N
+from . import refactor as RX
 from . import registry as R
 from . import schema as S
 from . import sessions as SN
@@ -117,6 +118,14 @@ def export(store: Store, names: dict[str, str] | None = None) -> dict[str, dict]
         entry.update({k: q[k] for k in ("forked_from", "star_by", "evidence") if k in q})
         if names and names.get(q["id"]):
             entry["asked_by_agent"] = names[q["id"]]
+        # CONSOLE-kit/Q30-Q32: what became of a stale ruling, and the ruling a question was asked to replace.
+        # Only when there is one, so every other file is byte for byte what 0.8.12 exported.
+        settled = RX.outcome(store, q["qid"])
+        if settled is not None:
+            entry["outcome"] = settled
+        link = RX.replaces_of(store, q["qid"])
+        if link is not None:
+            entry["replaces"] = link["replaces"]
         if "forked_from" in q:
             # The fork message travels with the file, so `fold`, which never reads
             # the store (R1), can still check the id against the message it names.
@@ -172,7 +181,10 @@ def _entry_anchors(store: Store, q: dict, lk: dict) -> dict:
     if origin == "question":
         return {}
     out = {"anchored_by": origin, "anchors": conds}
-    if rec is not None:
+    if origin == "confirmed":   # CONSOLE-kit/Q31: the owner's confirm, with the steward's proposal as the basis
+        c, p = RX.confirmed(store, lk["id"])
+        out.update({"anchor_id": c["id"], "anchor_basis": p["basis"], "anchored_at": c["ts"]})
+    elif rec is not None:
         out.update({"anchor_id": rec["id"], "anchor_basis": rec["basis"], "anchored_at": rec["ts"]})
     return out
 
@@ -243,7 +255,46 @@ def check_entry(name: str, e: object, items: dict[str, dict]) -> list[str]:
             errs += _check_earlier_answer(name, a, ids, labels)
     errs += _check_fork(name, e)
     errs += _check_sequence(name, e, chain, earlier if isinstance(earlier, list) else [])
+    errs += _check_outcome(name, e)
     return errs
+
+
+OUTCOME_KEYS = {"withdrawn": ({"kind", "by", "at", "record", "reason"}, set()),
+                "untracked": ({"kind", "by", "at", "record"}, {"reason"}),
+                "superseded": ({"kind", "by", "at", "record", "replaced_by"}, set())}
+
+
+def _check_outcome(name: str, e: dict) -> list[str]:
+    """What became of a stale ruling (CONSOLE-kit/Q30-Q32), printed into the record, so checked as strictly."""
+    errs = []
+    if "replaces" in e and (not isinstance(e["replaces"], str) or not S.QID.match(e["replaces"])
+                            or e["replaces"] == e.get("qid")):
+        errs.append(f"{name}: replaces {e['replaces']!r} is not another question's qid")
+    if "outcome" not in e:
+        return errs
+    o = e["outcome"]
+    keys = OUTCOME_KEYS.get(o.get("kind")) if isinstance(o, dict) else None
+    if keys is None or not keys[0] <= set(o) <= keys[0] | keys[1]:
+        return errs + [f"{name}: outcome is withdrawn (with reason), untracked (reason optional) or superseded "
+                       f"(with replaced_by), each with by, at and record"]
+    if o["by"] != "owner":
+        errs.append(f"{name}: outcome {o['kind']} by {o['by']!r}; only the owner settles a ruling")
+    if not isinstance(o["at"], str) or not TS.match(o["at"]):
+        errs.append(f"{name}: outcome at {o['at']!r} is not a store timestamp")
+    if not isinstance(o["record"], str) or not RECORD_ID.match(o["record"]):
+        errs.append(f"{name}: outcome record {o['record']!r} is not a record id")
+    if "reason" in o and (not isinstance(o["reason"], str) or not o["reason"].strip()
+                          or len(o["reason"]) > S.MAX_TEXT):
+        errs.append(f"{name}: outcome reason must be non-empty text of at most {S.MAX_TEXT} characters")
+    if "replaced_by" in o and (not isinstance(o["replaced_by"], str) or not S.QID.match(o["replaced_by"])
+                               or o["replaced_by"] == e.get("qid")):
+        errs.append(f"{name}: outcome replaced_by {o['replaced_by']!r} is not another question's qid")
+    return errs
+
+
+def outcome_key(e: dict) -> str | None:
+    """The ledger key for an entry's outcome: folded once, separately from the lock it settles."""
+    return f"outcome:{e['outcome']['record']}" if "outcome" in e else None
 
 
 def _check_sequence(name: str, e: dict, chain: list, earlier: list) -> list[str]:
@@ -387,12 +438,13 @@ def _check_anchor_fields(name: str, a: dict) -> list[str]:
         return []
     aid = a.get("answer_id")
     origin = a.get("anchored_by")
-    want = {"anchored_by", "anchors"} | ({"anchor_id", "anchor_basis", "anchored_at"} if origin == "reanchor" else set())
-    if origin not in ("lock", "reanchor") or keys & set(a) != want:
-        return [f"{name}: answer {aid}: anchored_by is 'lock' (with anchors) or 'reanchor' (with anchors, "
-                f"anchor_id, anchor_basis and anchored_at)"]
+    sourced = origin in ("reanchor", "confirmed")
+    want = {"anchored_by", "anchors"} | ({"anchor_id", "anchor_basis", "anchored_at"} if sourced else set())
+    if origin not in ("lock", "reanchor", "confirmed") or keys & set(a) != want:
+        return [f"{name}: answer {aid}: anchored_by is 'lock' (with anchors), or 'reanchor' or 'confirmed' (with "
+                f"anchors, anchor_id, anchor_basis and anchored_at)"]
     errs = [f"{name}: answer {aid}: {m}" for m in S.check_conditions(a["anchors"], "anchors", allow_empty=False)]
-    if origin == "reanchor":
+    if sourced:
         if not isinstance(a["anchor_id"], str) or not RECORD_ID.match(a["anchor_id"]):
             errs.append(f"{name}: answer {aid}: anchor_id {a['anchor_id']!r} is not a store record id")
         if not isinstance(a["anchored_at"], str) or not TS.match(a["anchored_at"]):
@@ -430,7 +482,8 @@ def fold(locked_dir: Path, ledger: Path, adapter: ProjectAdapter, *, dry_run: bo
             continue
         # Every file counts toward its fork's cap, folded before or not.
         forks.setdefault(e.get("forked_from"), []).append(p.name)
-        if e["locked"]["lock_id"] in done:
+        okey = outcome_key(e)
+        if e["locked"]["lock_id"] in done and (okey is None or okey in done):
             skipped.append(f"{p.name}: lock {e['locked']['lock_id']} already folded")
             continue
         todo.append(e)
@@ -438,13 +491,22 @@ def fold(locked_dir: Path, ledger: Path, adapter: ProjectAdapter, *, dry_run: bo
     for fid, names in sorted(forks.items()):
         if len(names) > MAX_FORK_QUESTIONS:
             refusals.append(f"fork {fid}: {len(names)} questions ({', '.join(names)}); the limit is {MAX_FORK_QUESTIONS}")
+    settled = [e["qid"] for e in todo if "outcome" in e]
+    if settled and getattr(adapter, "RECORDS_OUTCOMES", False) is not True:
+        # Property 5: a ruling must never vanish from the record because an older adapter ignored `outcome`.
+        refusals.append(f"{', '.join(settled)}: each carries an outcome (withdrawn, kept unchecked or superseded), "
+                        f"and this project's adapter does not say it records outcomes. Update its record() to "
+                        f"write entry['outcome'] and add RECORDS_OUTCOMES = True to it (docs/MIGRATION.md)")
     if refusals:
         raise FoldError("refused, nothing folded:\n  " + "\n  ".join(refusals))
     written = adapter.record(todo, dry_run) if todo else []
     if todo and not dry_run:
         with open(ledger, "a", encoding="utf-8") as fh:
             for e in todo:
-                fh.write(f"{e['locked']['lock_id']} {e['qid']}\n")
+                if e["locked"]["lock_id"] not in done:
+                    fh.write(f"{e['locked']['lock_id']} {e['qid']}\n")
+                if outcome_key(e) is not None:
+                    fh.write(f"{outcome_key(e)} {e['qid']}\n")
     return written, skipped
 
 

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from . import gitseam as G
+from . import refactor as RX
 from . import rootfs as RF
 from . import schema as S
 
@@ -164,9 +165,15 @@ def conditions_for(store, q: dict) -> tuple[list[dict], str]:
 def lock_conditions(store, q: dict, lk: dict) -> tuple[list[dict], str, dict | None]:
     """The conditions that decide one lock, where they came from, and the `anchor` record if one decides.
 
-    The same order everywhere, the view and the export alike: the lock's latest
-    `anchor` record, then the lock's own `anchors`, then the question's `valid_if`.
+    The same order everywhere, the view and the export alike: an anchor the
+    owner confirmed from a proposal (CONSOLE-kit/Q31, `refactor.py`), the
+    lock's latest `anchor` record, then the lock's own `anchors`, then the
+    question's `valid_if`. A confirmed anchor lives beside the store, so a kit
+    that predates it decides by the rest and reads the answer stale, never fresh.
     """
+    c = RX.confirmed(store, lk["id"])
+    if c is not None:
+        return c[1]["anchors"], "confirmed", c[1]
     a = store.anchor_of(lk["id"])
     if a is not None:
         return a["anchors"], "reanchor", a
@@ -396,6 +403,8 @@ def check(store, root: Path, item_status: Mapping[str, str | None],
         head = store.head(q["qid"])
         if head is None or store.lock_of(head["id"]) is None or all(tree.holds(c) for c in conds):
             continue
+        if RX.outcome(store, q["qid"]) is not None:   # withdrawn, kept unchecked or superseded: not stale
+            continue
         out[q["qid"]] = {"anchored_by": origin,
                          "conditions": [explain(c, tree, history, q["source"]) for c in conds]}
     return out
@@ -423,7 +432,7 @@ def plan_reanchor(store, root: Path, item_status: Mapping[str, str | None],
         if lk is None:
             continue
         conds, origin = conditions_for(store, q)
-        if all(tree.holds(c) for c in conds):
+        if all(tree.holds(c) for c in conds) or RX.outcome(store, q["qid"]) is not None:
             continue
         new, changes, kept = [], [], []
         for c in conds:

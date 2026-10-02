@@ -312,6 +312,8 @@ def _view(state: Path, item: str | None, since: int | None, full: bool) -> int:
         except KeyError as e:
             print(e.args[0], file=sys.stderr)
             return 1
+    else:   # a proposal's text can be 40 KB: a whole read names it by digest, `--item` prints it
+        out = {**out, "view": V.slim_refactor(out["view"])}
     if since is not None:
         out = {**out, "view": V.since(out["view"], since)}
     what = "view" + (f" --item {item}" if item is not None else "") + (f" --since {since}" if since is not None else "")
@@ -339,7 +341,7 @@ def _answers(state: Path, item: str | None, fork: str | None, as_json: bool, sin
     if fork is not None and fork not in out["view"]["forks"]:
         print(f"no fork {fork!r}", file=sys.stderr)
         return 1
-    view = out["view"]
+    view = out["view"] if item is not None else V.slim_refactor(out["view"])   # as `view`: --item keeps the text
     if since is not None:  # only the questions changed after SEQ (E5); the forks stay for --fork
         view = {**view, "questions": V.since(view, since)["questions"]}
     sheet = V.answers_sheet(view, out["items"], item=item, fork=fork)
@@ -768,6 +770,15 @@ def main(argv=None) -> int:
     s.add_argument("--reply-to")
     s = sub.add_parser("ask")
     s.add_argument("files", type=Path, nargs="+", metavar="file")
+    s = sub.add_parser("propose-anchor", description=(
+        "PROPOSE a new anchor for a stale answer (CONSOLE-kit/Q31). Name the lines the ruling rests on; the "
+        "server reads them now, each must be in its file exactly once, and nothing changes until the owner "
+        "confirms the proposal on the console. To replace a stale ruling with a new question instead, `ask` it "
+        "with \"replaces\": \"<qid>\" in the question file."))
+    s.add_argument("qid")
+    s.add_argument("--cite", action="append", required=True, metavar="PATH:FIRST-LAST",
+                   help="lines the ruling rests on, read by the server; repeat for up to 4")
+    s.add_argument("--basis", required=True, help="why these lines carry the ruling now, shown to the owner")
     s = sub.add_parser("transcript")
     s.add_argument("fork")
     s.add_argument("file", type=Path)
@@ -1026,6 +1037,9 @@ def _run(a, bell: Path) -> int:
                                                   "nonce": secrets.token_urlsafe(12)}, agent=a.agent)
     if a.cmd == "visual-export":
         return _visual_export(a.state, a.project, a.visual)
+    if a.cmd == "propose-anchor":
+        return _call(a.state, "POST", "/anchor-proposal", {"qid": a.qid, "cites": a.cite, "basis": a.basis,
+                                                           "nonce": secrets.token_urlsafe(12)}, agent=a.agent)
     if a.cmd == "ask":
         for n, f in enumerate(a.files):
             try:

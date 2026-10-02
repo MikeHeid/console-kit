@@ -432,6 +432,69 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   changes the served page. A browser test shows that the proposed page's
   script does not run in the preview and does run once published.
 
+### Settling a stale answer (unreleased, owner rulings CONSOLE-kit/Q30, Q31 and Q32)
+
+- **Why.** A stale answer used to have one way out: re-lock it as it stands.
+  A ruling that no longer applies, one whose anchor was the wrong check, or
+  one that needs a new question stayed in the inbox for good.
+- **What you can do now.** Each act is yours alone, and each works only on a
+  stale answer. On anything else it is refused, naming why.
+  - **Withdraw…** says the ruling no longer applies. It leaves the inbox and
+    reads *withdrawn*, with the reason you give. A reason is required.
+  - **Keep, stop checking…** says the ruling stands but is no longer checked
+    against the files. It leaves the inbox and reads *locked*, with a note
+    saying it is no longer checked. A reason is optional.
+  - **Confirm a proposed anchor.** The steward may propose new lines that the
+    ruling depends on (`agent.py propose-anchor QID --cite PATH:A-B --basis
+    TEXT`). The server reads those lines itself, so the steward names lines and
+    never supplies the text. The banner shows what failed beside what is
+    proposed. Nothing changes until you press **Confirm**. The server reads the
+    file again at that moment, and a proposal that no longer holds is refused,
+    naming why. The steward never re-anchors a ruling to a passage it chose.
+    (`agent.py reanchor` is unchanged.) A proposal may hold about 40 KB of
+    text, so whole `view` and `answers` reads name it by its cites and a
+    digest. `view --item` and your page show the text.
+  - **Replace.** The steward asks a new question with `"replaces": "<old
+    qid>"` in its file. The old ruling stays in force, still stale and linked
+    to the new question, until you lock the new one. Then it reads
+    *superseded*. One open replacement per ruling. If the question is stored
+    but its link is not, the ask fails naming its `nonce`. Sending the same
+    ask again with that nonce writes the link, while nobody has answered it.
+
+  Neither withdraw nor keep is a default; the page offers both side by side.
+- **Nothing is deleted.** These acts are written to `refactor.jsonl`, beside
+  `store.jsonl` in the console's state dir. The store is not changed, and the
+  old lock, answer and anchor stay readable. Every act names the lock you were
+  shown. A page loaded before a re-lock is refused rather than settling a
+  ruling you never saw.
+- **The fold records each outcome.** The export carries `outcome` (withdrawn,
+  untracked or superseded, with who, when, and the reason or the replacing
+  question), and `replaces` on a replacement. fold passes the entry to the
+  adapter again when an outcome arrives for a lock it already folded. An
+  adapter that does not declare `RECORDS_OUTCOMES = True` is refused such an
+  entry and nothing is folded, so a ruling never silently vanishes from your
+  project's record. The starter `adapter_template.py` declares it. To update
+  an existing adapter, see `docs/MIGRATION.md`.
+- **New asks: no whole-file hash where an excerpt fits.** Most answers that go
+  stale were anchored to a hash of a whole file that kept changing. A new
+  question is refused a `file_sha256` check when its `source` or an evidence
+  cite names lines of that same file (the refusal shows the `excerpt` to use
+  instead), and on any file over 100 lines. Questions already in the store
+  are not affected.
+- **If `refactor.jsonl` is damaged** (an edited or torn line, a link, not a
+  plain file), the console keeps running and names the problem on the page.
+  Withdraw, keep, confirm, propose and replace are refused until the file is
+  fixed or moved aside, and every answer reads as if the file were empty, so a
+  settled answer reads stale again, never fresh.
+- **Rolling back.** An older kit never opens `refactor.jsonl` and reads the
+  store as it always did. Every withdrawn, kept or superseded answer reads
+  stale again, and every confirmed anchor reads as the old anchor. Nothing is
+  lost. Upgrade again and the outcomes return.
+- **How it is held.** A test drives every agent route with each act's body,
+  and no answer's state changes. Another shows a proposal confirmed after its
+  file changed is refused. A test moves the sidecar aside and the answer reads
+  stale. A test shows fold refuses an adapter without `RECORDS_OUTCOMES`.
+
 ## How it fits together
 
 ```
@@ -511,7 +574,7 @@ shows the spec's file time and says the last-commit time is unavailable.
   without a valid Access token, loopback included.
 - **`agent.py`** is the agent's side: `view`, `ask` (one question or a batch), `reply`, `inbox`,
   `working` (shows you "agent active" on the items it has picked up),
-  `synced`, `fork-context`, `check` (why each stale answer is stale), `reanchor`,
+  `synced`, `fork-context`, `check` (why each stale answer is stale), `reanchor`, `propose-anchor`,
   `transcript` (a roar's transcript), `visual` (an answer to a visual request),
   `visual-export`, and `register` and `steward`, which **only you** run.
   `--as NAME` names the session (0.8.2).

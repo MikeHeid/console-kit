@@ -83,6 +83,7 @@ from . import pagesnap as PS
 from . import names as N
 from . import projectcfg as PC
 from . import publish as P
+from . import refactor as RX
 from . import schema as S
 from . import stewardgit as SG
 from . import tags as T
@@ -127,12 +128,40 @@ WRITER_FIELDS = ("by", "type", "schemaVersion")
 # Fields only the server computes on a lock (0.5.0): a page that sends one is refused.
 SERVER_LOCK_FIELDS = ("anchors",)
 DEFAULT_RELOCK_REASON = "Re-locked unchanged: the owner checked what changed and the answer still holds."
+# A new question may not anchor on a whole file of more than this many lines (`ask` refusal R2, an architect
+# default): a hash of a big living file goes stale on any unrelated edit, which is how six answers went stale.
+WHOLE_FILE_MAX_LINES = 100
+# The owner's refactor acts on a stale answer (CONSOLE-kit/Q30, Q31): the body each one takes.
+REFACTOR_BODIES = {"withdraw": {"action", "qid", "lock", "reason", "nonce"},
+                   "untrack": {"action", "qid", "lock", "reason", "nonce"},
+                   "confirm": {"action", "qid", "proposal", "nonce"}}
 SECURITY_HEADERS = (
     ("Cache-Control", "no-store"),
     ("X-Content-Type-Options", "nosniff"),
     ("Referrer-Policy", "no-referrer"),
     ("Content-Security-Policy", "frame-ancestors 'none'"),
 )
+
+
+def proposal_problem(anchors: list[dict], tree: A.Tree) -> str | None:
+    """Why proposed anchors cannot be confirmed against `tree` as it is now; None when they can (property 4).
+
+    Every condition holds, and every excerpt is found EXACTLY once: an
+    excerpt found in several places would hold while the one meant changed.
+    """
+    for c in anchors:
+        if c["kind"] == "excerpt":
+            n = tree.norm(c["path"])
+            want = A.normalise(c["text"])
+            seen = 0 if n is None else n.count(want)
+            if len(want) < S.MIN_EXCERPT:
+                return f"the cited text in {c['path']} is under {S.MIN_EXCERPT} characters, too short to anchor on"
+            if seen != 1:
+                return (f"the cited text is in {c['path']} {seen} times now; it must be there exactly once"
+                        if n is not None else f"{c['path']} cannot be read now")
+        elif not tree.holds(c):
+            return f"{V.condition_words(c)} no longer holds"
+    return None
 
 
 class BoardError(Exception):
@@ -749,9 +778,7 @@ class Console:
         before = self.store.locks(q["qid"]) if q is not None else []
         if not before:
             return
-        prev = before[-1]
-        a = self.store.anchor_of(prev["id"])
-        base = a["anchors"] if a else prev.get("anchors", q["valid_if"])
+        base, _, _ = A.lock_conditions(self.store, q, before[-1])   # a confirmed anchor too (CONSOLE-kit/Q31)
         fresh = A.fresh_anchors(base, A.Tree(self.cfg.root, self._status(items)))
         if fresh != q["valid_if"]:
             body["anchors"] = fresh
@@ -847,6 +874,180 @@ class Console:
                                               "nonce": nonce + "-a"}, "owner", items)
             return [ans, self._append("lock", {"qid": qid, "answer": ans["id"], "nonce": nonce + "-l"},
                                       "owner", items)]
+
+    # -- refactoring a stale answer (CONSOLE-kit/Q30, Q31, Q32) ----------------------------------
+
+    def _stale_lock(self, qid: object, items: dict[str, dict], what: str) -> tuple[dict, dict, list[dict], A.Tree]:
+        """(question, its current lock, the conditions deciding it, the tree) when that lock is STALE; else refused.
+
+        Property 2 of the lane: only a stale answer is refactored. An answer
+        with no lock, one already withdrawn, kept or superseded, and one whose
+        anchor holds are each refused by name. The caller holds `self._lock`.
+        """
+        q = self.store.question(qid) if isinstance(qid, str) else None
+        if q is None:
+            raise RequestError(404, f"no question {qid}")
+        lk = RX.current_lock(self.store, qid)
+        if lk is None:
+            raise RequestError(409, f"{qid} has no locked answer; only a stale ruling can be {what}")
+        out = RX.outcome(self.store, qid)
+        if out is not None:
+            raise RequestError(409, f"{qid} is already {out['kind']} ({out['at']}); it is not stale, so it cannot "
+                                    f"be {what}")
+        tree = A.Tree(self.cfg.root, self._status(items))
+        conds, _ = A.conditions_for(self.store, q)
+        if all(tree.holds(c) for c in conds):
+            raise RequestError(409, f"{qid} is not stale: every condition its lock is checked against still holds, "
+                                    f"so it cannot be {what}. Only a stale answer is refactored")
+        return q, lk, conds, tree
+
+    def _refactor_problem(self) -> None:
+        if self.store.refactor.problem:
+            raise RequestError(503, self.store.refactor.problem)
+
+    def _rx_append(self, rec: dict) -> dict:
+        """Append one refactor record; the caller holds `self._lock`. A retry with the same nonce returns the first."""
+        try:
+            out = self.store.refactor.append(rec, self.store)
+        except RX.RefactorError as e:
+            raise RequestError(409, str(e)) from None
+        self._bump()
+        return out
+
+    def refactor(self, body: object) -> dict:
+        """The owner's act on a stale answer: withdraw it, keep it without checking, or confirm a proposed anchor.
+
+        Owner door only (property 1). Each act names what the owner was shown
+        (the lock, or the proposal), so a page loaded before something changed
+        is refused rather than acting on what the owner never saw. A confirm
+        reads the proposal's files AGAIN, now (property 4).
+        """
+        action = body.get("action") if isinstance(body, dict) else None
+        keys = REFACTOR_BODIES.get(action) if isinstance(action, str) else None
+        if keys is None or not set(body) <= keys or not keys - {"reason"} <= set(body):
+            raise RequestError(400, 'refactor takes {"action": "withdraw"|"untrack", "qid", "lock", "reason", '
+                                    '"nonce"} or {"action": "confirm", "qid", "proposal", "nonce"}; withdraw needs '
+                                    'a reason')
+        if action == "withdraw" and "reason" not in body:
+            raise RequestError(400, "withdraw needs the owner's reason: why this ruling no longer applies")
+        self._refactor_problem()
+        rec = {k: v for k, v in body.items() if k != "action"}
+        rec.update(type=action, by="owner")
+        with self._lock:
+            if action == "confirm":
+                # A confirm names the lock its proposal was made for, so a later re-lock stops it applying. It is
+                # taken from the proposal (checked against the current lock below), before the retry lookup,
+                # so a retry hashes to the record that landed.
+                p = self.store.refactor.get(body.get("proposal"))
+                if isinstance(p, dict) and isinstance(p.get("lock"), str):
+                    rec["lock"] = p["lock"]
+            done = self.store.refactor.existing(rec)
+            if done is not None:
+                return {"record": done}   # a retry of an act that landed
+            items = self.items()
+            q, lk, conds, tree = self._stale_lock(body.get("qid"), items, {"withdraw": "withdrawn",
+                                                                             "untrack": "kept unchecked",
+                                                                             "confirm": "re-anchored"}[action])
+            if action == "confirm":
+                self._confirm_check(body, q, lk, conds, tree)
+            rec = self._rx_append(rec)
+        # No doorbell line: the doorbell's seq is the store's, and nothing here asks the agent to act.
+        return {"record": rec}
+
+    def _confirm_check(self, body: dict, q: dict, lk: dict, conds: list[dict], tree: A.Tree) -> None:
+        """Property 4: the proposal still holds against the files as they are NOW, and was made against these anchors."""
+        p = self.store.refactor.get(body.get("proposal"))
+        if p is None or p["type"] != "proposal" or p["qid"] != q["qid"]:
+            raise RequestError(404, f"no proposal {body.get('proposal')!r} for {q['qid']}")
+        if p["lock"] != lk["id"]:
+            raise RequestError(409, f"proposal {p['id'][:8]} was made for an earlier lock of {q['qid']}; reload")
+        if p["base"] != conds:
+            raise RequestError(409, f"{q['qid']}'s anchors changed since proposal {p['id'][:8]} was made; ask the "
+                                    f"steward to propose again")
+        why = proposal_problem(p["anchors"], tree)
+        if why:
+            raise RequestError(409, f"proposal {p['id'][:8]} no longer holds: {why}. Nothing changed; ask the "
+                                    f"steward to propose again")
+
+    def propose_anchor(self, body: object, agent: str | None = None) -> dict:
+        """The steward PROPOSES a new anchor for a stale answer (CONSOLE-kit/Q31); it changes nothing until confirmed.
+
+        Agent door only. The steward names lines (`path:a-b`); this server
+        reads them, now, and each must be found exactly once in its file. The
+        proposal keeps every condition that still holds and adds those
+        excerpts. `reanchor` (re-pin the locked lines at the locked commit) is
+        a different thing and is untouched.
+        """
+        if not isinstance(body, dict) or set(body) != {"qid", "cites", "basis", "nonce"}:
+            raise RequestError(400, 'anchor-proposal takes {"qid", "cites": ["path:first-last", ...], "basis", '
+                                    '"nonce"}')
+        errs = RX.cites_problem(body["cites"]) + S._text(body, "basis")
+        if errs:
+            raise RequestError(400, "; ".join(errs))
+        self._refactor_problem()
+        with self._lock:
+            items = self.items()
+            q, lk, conds, tree = self._stale_lock(body["qid"], items, "re-anchored")
+            rows, errs = A.fill_evidence([{"cite": c} for c in body["cites"]], tree)
+            if errs:
+                raise RequestError(400, "; ".join(e.replace("evidence row", "cite") for e in errs))
+            excerpts = [{"kind": "excerpt", "path": S.cite_parts(r["cite"])[0], "text": r["text"]} for r in rows]
+            why = proposal_problem(excerpts, tree)
+            if why:
+                raise RequestError(400, why)
+            anchors = [c for c in conds if tree.holds(c)]
+            anchors += [e for e in excerpts if e not in anchors]
+            rec = self._rx_append({"type": "proposal", "by": "agent", "qid": q["qid"], "lock": lk["id"],
+                                   "base": conds, "anchors": anchors, "cites": body["cites"],
+                                   "basis": body["basis"], "nonce": body["nonce"]})
+            self._name(rec, agent)
+        return {"record": rec}
+
+    def _whole_file_refusals(self, body: dict, items: dict[str, dict]) -> list[str]:
+        """`ask` refusals R1 and R2: a whole-file hash where an excerpt is meant, or of a file too long to hold still.
+
+        R1: the question's `source`, or one of its evidence cites, names lines
+        of that same file, so the ruling rests on those lines: anchor on them.
+        R2: the file is over WHOLE_FILE_MAX_LINES lines now. Both refuse,
+        naming the excerpt form; neither touches a question already asked.
+        """
+        conds = body.get("valid_if")
+        if not isinstance(conds, list):
+            return []
+        cited = {S.cite_parts(r.get("cite"))[0] for r in body.get("evidence") or []
+                 if isinstance(r, dict) and S.cite_parts(r.get("cite"))}
+        tree = A.Tree(self.cfg.root, self._status(items))
+        errs = []
+        for c in conds:
+            if not isinstance(c, dict) or c.get("kind") != "file_sha256" or not isinstance(c.get("path"), str):
+                continue
+            path = c["path"]
+            form = (f'{{"kind": "excerpt", "path": "{path}", "text": "<the lines the ruling rests on>"}}')
+            rng = A.cited_range(body.get("source") or "", path) if isinstance(body.get("source"), str) else None
+            if rng is not None or path in cited:
+                where = f"lines {rng[0]}-{rng[1]}" if rng else "lines"
+                errs.append(f"valid_if: file_sha256 on {path}, but the question cites {where} of that same file; "
+                            f"anchor on those lines with an excerpt instead: {form}")
+                continue
+            status, text = tree.text(path)
+            n = len(A._split(text)) if status == "ok" and text else 0
+            if text and text.endswith("\n"):
+                n -= 1
+            if n > WHOLE_FILE_MAX_LINES:
+                errs.append(f"valid_if: file_sha256 on {path}, which is {n} lines; a whole-file hash of a file over "
+                            f"{WHOLE_FILE_MAX_LINES} lines goes stale on any unrelated edit. Anchor on the lines "
+                            f"the ruling rests on with an excerpt instead: {form}")
+        return errs
+
+    def _replacement_link(self, old: object, items: dict[str, dict]) -> dict:
+        """Check that `old` may be replaced now (CONSOLE-kit/Q32); the caller holds `self._lock`."""
+        if not isinstance(old, str) or not S.QID.match(old):
+            raise RequestError(400, "replaces must be the qid (<itemId>/Q<n>) of the stale ruling this replaces")
+        _, lk, _, _ = self._stale_lock(old, items, "replaced")
+        other = RX.replacement_of(self.store, old)
+        if other is not None:
+            raise RequestError(409, f"{old} is already being replaced by {other['qid']}; answer that question")
+        return lk
 
     def lock_all(self, body: object) -> dict:
         """"Lock all & process" (0.7.0): answer and lock each drafted question of one round, then send ONE process request.
@@ -983,20 +1184,54 @@ class Console:
         named = [f for f in WRITER_FIELDS + (SERVER_LOCK_FIELDS if kind == "lock" else ()) if f in body]
         if named:
             raise RequestError(400, f"{', '.join(named)} is the server's to set, not the writer's")
+        replaces = None
         if kind == "question":
             secrets_named = S.secret_condition_paths(body.get("valid_if"))
             if secrets_named:
                 raise RequestError(400, "; ".join(secrets_named))
+            if "replaces" in body:   # CONSOLE-kit/Q32: kept beside the store, never a field of the question
+                body = dict(body)
+                replaces = body.pop("replaces")
+                self._refactor_problem()
             body = self._fill_evidence(body)  # reads files: outside the write lock
         with self._lock:
+            items = self.items()
+            if kind == "question":
+                again = self.store.existing({**body, "type": kind, "by": by})
+                if again is not None:   # a retry of an ask that landed: refused nothing then, refuses nothing now
+                    link = RX.replaces_of(self.store, again["qid"])
+                    if replaces is not None and link is None:
+                        # The ask landed and its link did not (the named 500 below): the retry writes it, while
+                        # nobody has answered the question yet. Once answered, the owner answered it unlinked.
+                        if self.store.head(again["qid"]) is not None:
+                            raise RequestError(409, f"{again['qid']} has an answer already, given without its link "
+                                                    f"to {replaces}; ask a new question to replace {replaces}")
+                        old_lock = self._replacement_link(replaces, items)
+                        link = self._rx_append({"type": "replaces", "by": "agent", "qid": again["qid"],
+                                                "replaces": replaces, "lock": old_lock["id"],
+                                                "nonce": again["nonce"]})
+                    return {**again, "replaces": link["replaces"]} if link and replaces else again
+                errs = self._whole_file_refusals(body, items)   # new asks only
+                if errs:
+                    raise RequestError(400, "; ".join(errs))
+            old_lock = self._replacement_link(replaces, items) if replaces is not None else None
             chat = kind == "message" and by == "owner" and body.get("item") == S.CHAT_ITEM
             if chat and self.store.existing({**body, "type": kind, "by": by}) is None:
                 self._chat_gate()  # a retry of a message already stored is not a new message
             before = self.store.seq()
-            rec = self._append(kind, body, by, self.items())
+            rec = self._append(kind, body, by, items)
             if chat and self.store.seq() > before:
                 self._chat_times.append(time.monotonic())
             self._name(rec, agent)
+            if old_lock is not None:
+                try:
+                    link = self._rx_append({"type": "replaces", "by": "agent", "qid": rec["qid"],
+                                            "replaces": replaces, "lock": old_lock["id"], "nonce": rec["nonce"]})
+                except RequestError as e:
+                    raise RequestError(500, f"{rec['qid']} was asked, but its link to {replaces} was not written "
+                                            f"({e}). Send the same ask again with \"nonce\": \"{rec['nonce']}\" "
+                                            f"in its file to write the link") from None
+                return {**rec, "replaces": link["replaces"]}
             return rec
 
     def _name(self, rec: dict, agent: str | None) -> None:
@@ -1451,7 +1686,7 @@ class OwnerHandler(_Handler):
         if not self._gate():
             return
         kind = OWNER_ROUTES.get(self.path)
-        if kind is None and self.path not in ("/api/relock", "/api/lock-all", "/api/page-publish"):
+        if kind is None and self.path not in ("/api/relock", "/api/lock-all", "/api/page-publish", "/api/refactor"):
             return self._send(404, {"error": "not found"})
         # Browsers send Origin on every POST, same-origin included, so a missing one is refused too:
         # an absent header must not read as "trusted".
@@ -1460,6 +1695,8 @@ class OwnerHandler(_Handler):
         try:
             if self.path == "/api/relock":
                 return self._send(200, {"records": self.console.relock(self._body())})
+            if self.path == "/api/refactor":   # Q30/Q31: withdraw, keep unchecked, confirm; the owner's alone
+                return self._send(200, self.console.refactor(self._body()))
             if self.path == "/api/lock-all":
                 return self._send(200, self.console.lock_all(self._body()))
             if self.path == "/api/page-publish":   # Q29: the owner's "Use this page"; no agent route publishes
@@ -1520,6 +1757,8 @@ class AgentHandler(_Handler):
                 return self._send(200, self.console.push_history_blob(self._body()))
             if self.path == "/history-specs":  # Q23 part 2: spec last-commit times, and a prune of the blobs
                 return self._send(200, self.console.push_history_specs(self._body()))
+            if self.path == "/anchor-proposal":   # Q31: a proposal only; confirming it is the owner's
+                return self._send(200, self.console.propose_anchor(self._body(), agent))
             if self.path == "/items":   # Q24: the ONLY way items reach a server; the adapter ran in the steward
                 return self._send(200, self.console.push_items(self._body()))
             if self.path == "/page-snapshot":   # Q28: the ONLY way a page reaches a server; git ran in the steward

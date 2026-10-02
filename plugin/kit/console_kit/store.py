@@ -33,6 +33,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
+from . import refactor as RF
 from . import schema as S
 
 
@@ -66,6 +67,9 @@ class Store:
         self._records: list[dict] = []
         self._by_id: dict[str, dict] = {}
         self._load()
+        # CONSOLE-kit/Q30-Q32: what the owner did about stale answers, in a file of its own beside this one,
+        # so a kit that predates it never meets a record kind it would refuse the whole store over.
+        self.refactor = RF.Log(self.path.parent, clock)
 
     def set_items(self, items: Mapping[str, dict]) -> None:
         """Take the register as it is now: the ids a write may name (R7) and each item's parent."""
@@ -179,6 +183,7 @@ class Store:
         t.known_items = self.known_items
         t.item_parents = self.item_parents
         t.clock = self.clock
+        t.refactor = self.refactor   # read only here: a trial writes no refactor record
         t._lock = threading.Lock()
         with self._lock:
             t._records = list(self._records)

@@ -61,7 +61,23 @@ def _render(e: dict) -> str:
     if e.get("asked_by_agent"):
         # Which agent session asked (0.8.2), only when it gave a name; fold has checked its shape.
         out += ["", f"**Agent:** `{e['asked_by_agent']}`."]
+    if e.get("replaces"):
+        out += ["", f"**Replaces:** `{e['replaces']}`."]
+    o = e.get("outcome")
+    if o:
+        # A stale ruling the owner settled (CONSOLE-kit/Q30-Q32). fold passes the entry again when an outcome
+        # arrives after its lock was folded, so this section is the record that the ruling ended, and how.
+        words = {"withdrawn": "withdrawn by the owner", "untracked": "kept by the owner, no longer checked",
+                 "superseded": f"superseded by `{o.get('replaced_by', '')}`"}.get(o.get("kind"), str(o.get("kind")))
+        out += ["", f"**Outcome:** {words}, {o.get('at', '')}."]
+        if str(o.get("reason", "")).strip():
+            out += ["", "**The owner's reason:**", "", _quote(o["reason"])]
     return "\n".join(out) + "\n"
+
+
+# This adapter writes `entry['outcome']` (see _render), so fold may pass it a withdrawn, kept-unchecked or
+# superseded ruling. An adapter without this line is refused such an entry rather than silently dropping it.
+RECORDS_OUTCOMES = True
 
 
 def record(entries: list[dict], dry_run: bool) -> list[str]:

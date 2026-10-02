@@ -3369,6 +3369,31 @@ class RoarTraceTests(Tmp):
         self.assertEqual(mod._render(files["LANE.1__Q1.json"]), mod._render(plain["LANE.1__Q1.json"]))
         self.assertNotIn("Agent:", mod._render(files["LANE.1__Q1.json"]))
 
+    def test_the_starter_adapter_records_each_outcome_and_says_so(self):
+        # CONSOLE-kit/Q30-Q32. Catches: a starter adapter fold would refuse (no RECORDS_OUTCOMES), one that
+        # declares it but drops the outcome or the owner's reason, and a ruling with no outcome changed.
+        import importlib.util
+        st = self.store()
+        st.append(question())
+        st.append(lock(st.append(answer())))
+        plain = F.export(st)["LANE.1__Q1.json"]
+        spec = importlib.util.spec_from_file_location("adapter_tpl", KIT / "adapter_template.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertIs(mod.RECORDS_OUTCOMES, True)
+        self.assertNotIn("Outcome", mod._render(plain))
+        at, rid = "2026-10-01T00:00:00Z", "a" * 24
+        for o, want in (({"kind": "withdrawn", "reason": "the rule went"},
+                         ("**Outcome:** withdrawn by the owner", "> the rule went")),
+                        ({"kind": "untracked"}, ("kept by the owner, no longer checked",)),
+                        ({"kind": "superseded", "replaced_by": "LANE.1/Q9"}, ("superseded by `LANE.1/Q9`",))):
+            e = {**plain, "outcome": {"by": "owner", "at": at, "record": rid, **o}}
+            self.assertEqual(F.check_entry("LANE.1__Q1.json", e, ITEMS), [])
+            text = mod._render(e)
+            for w in want:
+                self.assertIn(w, text)
+        self.assertIn("**Replaces:** `LANE.1/Q7`.", mod._render({**plain, "replaces": "LANE.1/Q7"}))
+
 
 class VisualMarkdownTests(Tmp):
     """Review LOW: an agent's title never becomes a link, image, heading or tag in the generated Markdown."""
