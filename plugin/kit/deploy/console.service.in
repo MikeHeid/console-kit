@@ -11,7 +11,6 @@ EnvironmentFile=@PROJECT@/.console-kit/console.env
 WorkingDirectory=@PROJECT@
 ExecStart=@PYTHON@ @KIT@/server.py \
   --root @PROJECT@ \
-  --page @PROJECT@/${CONSOLE_PAGE} \
   --state %h/.local/state/console-kit/@NAME@ \
   --adapter @PROJECT@/${CONSOLE_ADAPTER} \
   --team-domain ${CONSOLE_TEAM_DOMAIN} \
