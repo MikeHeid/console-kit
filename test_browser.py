@@ -1175,19 +1175,22 @@ class LiveConsoleTests(unittest.TestCase):
 
     # -- the real server ------------------------------------------------------------
 
-    def serve(self, snapshot=False):
-        """The real Console and doors; `snapshot` gives it what `serve` gives it since Q24 (pushed items only)."""
+    def serve(self, snapshot=False, page=LIVE_HOST):
+        """The real Console and doors; `snapshot` gives it what `serve` gives it since Q24 (pushed items only).
+
+        `page` is pushed as the steward's page snapshot (Q28), the only page the server serves.
+        """
         import tempfile
         from console_kit import items as IT
         from console_kit import server as SV
-        from test_server import AUD, HOSTNAME, KEY, TEAM, token
+        from test_server import AUD, HOSTNAME, KEY, TEAM, page_body, token
         td = tempfile.mkdtemp(prefix="ck-live-")
         self.addCleanup(lambda: __import__("shutil").rmtree(td, ignore_errors=True))
         root = Path(td)
-        (root / "page.html").write_text(LIVE_HOST)
-        cfg = SV.Config(root=root, page=root / "page.html", state=root / "state", adapter=root / "unused.py",
+        cfg = SV.Config(root=root, page=None, state=root / "state", adapter=root / "unused.py",
                         team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="live-test")
         console = SV.Console(cfg, IT.SnapshotAdapter(cfg.state) if snapshot else _LiveAdapter())
+        console.push_page_snapshot(page_body(page))   # Q28: the page is the steward's snapshot in STATE
         verify = SV.access_verifier(TEAM, AUD, key_for=lambda _t: KEY.public_key())
         owner = SV.owner_server(console, verify, 0)
         threading.Thread(target=owner.serve_forever, daemon=True).start()
@@ -1274,6 +1277,18 @@ class LiveConsoleTests(unittest.TestCase):
                 self.assertEqual(code, 200, out)
                 page.wait_for_function("document.querySelector('.ck-items-note') === null", timeout=10000)
                 self.assert_not_reloaded(page)
+
+    def test_the_snapshot_pages_own_script_runs_beside_the_console(self):
+        # Q28 point 4. Catches: a CSP or an injection change that stops the page's own inline script (the dashboard
+        # breaks) or the console's (the owner loses the console), and the page's provenance line not shown.
+        html = LIVE_HOST.replace("</body>", '<script>document.body.dataset.pageScript = "ran";</script></body>')
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve(page=html)
+                page = self.page(kind, 1280, url)
+                page.wait_for_function("document.body.dataset.pageScript === 'ran'", timeout=10000)
+                self.open_inbox(page, 1280)   # the console's own script built its dock and inbox
+                self.assertIn("(from the steward)", page.locator(".ck-page-source").text_content())
 
     def test_a_new_question_appears_without_reload_and_the_chip_counts_it(self):
         # Catches: a page that only refreshes on open or on Refresh (the owner sees nothing
@@ -1757,18 +1772,18 @@ class NextStepAndVisualTests(unittest.TestCase):
         """LiveConsoleTests.serve, with a project that sets specs_dir and visuals_dir."""
         import tempfile
         from console_kit import server as SV
-        from test_server import AUD, HOSTNAME, KEY, TEAM, token
+        from test_server import AUD, HOSTNAME, KEY, TEAM, page_body, token
         td = tempfile.mkdtemp(prefix="ck-p4-")
         self.addCleanup(lambda: __import__("shutil").rmtree(td, ignore_errors=True))
         root = Path(td)
-        (root / "page.html").write_text(LIVE_HOST)
         (root / "specs").mkdir()
         (root / "specs/grid.md").write_text("# Grid\n\nA session block holds the cells.\n")
         os.utime(root / "specs/grid.md", (1_600_000_000, 1_600_000_000))   # long before any lock
         (root / ".console-kit.json").write_text(json.dumps({"specs_dir": "specs/", "visuals_dir": "visuals/"}))
-        cfg = SV.Config(root=root, page=root / "page.html", state=root / "state", adapter=root / "unused.py",
+        cfg = SV.Config(root=root, page=None, state=root / "state", adapter=root / "unused.py",
                         team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="p4-test")
         console = SV.Console(cfg, _LiveAdapter())
+        console.push_page_snapshot(page_body(LIVE_HOST))   # Q28: the page is the steward's snapshot in STATE
         verify = SV.access_verifier(TEAM, AUD, key_for=lambda _t: KEY.public_key())
         owner = SV.owner_server(console, verify, 0)
         threading.Thread(target=owner.serve_forever, daemon=True).start()
