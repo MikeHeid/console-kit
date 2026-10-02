@@ -141,6 +141,8 @@ def build(store: Store, items: Mapping[str, dict], holds: Callable[[dict], bool]
         rx = RX.summary(store, r["qid"])   # CONSOLE-kit/Q30-Q32: only when something was done or proposed
         if rx:
             questions[r["qid"]]["refactor"] = rx
+        if state == "stale":   # the lock an owner act names, so one taken on a page that is out of date is refused
+            questions[r["qid"]]["lock"] = RX.current_lock(store, r["qid"])["id"]
 
     threads: dict[str, list[dict]] = {}
     forks: dict[str, dict] = {}

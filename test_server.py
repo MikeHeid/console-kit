@@ -6323,5 +6323,499 @@ class PageParityTests(_OneServer, _SingleServer, unittest.TestCase):
         self.assertNotIn("SENTINEL-PAGE-TARGET", one)
 
 
+# -- CONSOLE-kit/Q30-Q32: refactoring a stale answer ---------------------------------------------------------
+
+RULES = ("# Rules\n\nRULE-ALPHA: every release is reviewed by a second agent before it ships.\n"
+         "RULE-BETA: the console never runs the project's code.\n\nNotes follow.\n")
+REFACTOR_ACTIONS = {
+    "withdraw": lambda t: {"action": "withdraw", "qid": t.QID, "lock": t.lock_id, "reason": "obsolete"},
+    "untrack": lambda t: {"action": "untrack", "qid": t.QID, "lock": t.lock_id},
+    "confirm": lambda t: {"action": "confirm", "qid": t.QID, "proposal": t.proposal_id or "0" * 24},
+    "propose": lambda t: {"qid": t.QID, "cites": ["rules.md:4"], "basis": "the rule moved"},
+}
+
+
+class RefactorTests(_Live, unittest.TestCase):
+    """CONSOLE-kit/Q30 both, Q31 owner_confirms, Q32 stands_until: the six properties of lane 7."""
+
+    QID = "LANE.1/Q2"
+
+    def setUp(self):
+        ServerTests.setUp(self)
+        seam_closed(self)
+        self.proposal_id = None
+        (self.cfg.root / "rules.md").write_text(RULES)
+        q = {"qid": self.QID, "item": "LANE.1", "text": "Is RULE-ALPHA still the rule?", "kind": "single",
+             "options": [{"id": "a", "label": "Yes"}, {"id": "b", "label": "No"}], "star": "a",
+             "valid_if": [{"kind": "excerpt", "path": "rules.md",
+                           "text": "RULE-ALPHA: every release is reviewed by a second agent"}],
+             "source": "rules.md:3", "nonce": "rxask000001"}
+        code, out = self.agent_post("/question", q)
+        self.assertEqual(code, 200, out)
+        code, a = self.req("POST", "/api/answer", self.answer(qid=self.QID, nonce="rxanswer01"), tok=token())
+        self.assertEqual(code, 200, a)
+        code, lk = self.req("POST", "/api/lock", {"qid": self.QID, "answer": a["record"]["id"], "nonce": "rxlock0001"},
+                            tok=token())
+        self.assertEqual(code, 200, lk)
+        self.lock_id = lk["record"]["id"]
+
+    def go_stale(self, extra=""):
+        """The rule is reworded: the excerpt no longer holds. `extra` adds lines a proposal can cite."""
+        (self.cfg.root / "rules.md").write_text(RULES.replace("every release is reviewed by a second agent",
+                                                               "a release ships after one review") + extra)
+
+    def act(self, body, **kw):
+        if isinstance(body, dict) and "action" in body and "nonce" not in body:
+            body = {**body, "nonce": "rxact" + os.urandom(5).hex()}
+        return self.req("POST", "/api/refactor", body, tok=kw.pop("tok", token()), **kw)
+
+    def view_q(self, qid=None):
+        code, out = self.req("GET", "/api/view", tok=token())
+        self.assertEqual(code, 200, out)
+        return out["view"], out["view"]["questions"][qid or self.QID]
+
+    def propose(self, cites=("rules.md:4",), basis="RULE-BETA carries the ruling now"):
+        return self.agent_post("/anchor-proposal", {"qid": self.QID, "cites": list(cites), "basis": basis,
+                                                    "nonce": "rxprop" + os.urandom(4).hex()})
+
+    def store_kinds(self):
+        return [json.loads(ln)["type"] for ln in self.cfg.store.read_text().splitlines()]
+
+    # -- property 2: only a stale answer -------------------------------------------------------
+
+    def test_every_act_on_an_answer_whose_anchor_holds_is_refused_by_name(self):
+        # Catches: refactoring a ruling that still holds (a withdraw that needs no reason to exist), and a
+        # proposal against a fresh answer. Each refusal names why, and nothing is written.
+        for name in ("withdraw", "untrack"):
+            code, out = self.act(REFACTOR_ACTIONS[name](self))
+            self.assertEqual(code, 409, out)
+            self.assertIn(f"{self.QID} is not stale", out["error"])
+        code, out = self.propose()
+        self.assertEqual(code, 409, out)
+        self.assertIn("is not stale", out["error"])
+        code, out = self.act({"action": "withdraw", "qid": "LANE.1/Q1", "lock": self.lock_id, "reason": "x"})
+        self.assertEqual(code, 409, out)
+        self.assertIn("has no locked answer", out["error"])
+        self.assertFalse((self.cfg.state / "refactor.jsonl").exists())
+
+    # -- Q30: withdraw, keep unchecked ---------------------------------------------------------------
+
+    def test_withdraw_needs_a_reason_settles_the_ruling_and_deletes_nothing(self):
+        # Catches: a withdraw without the owner's reason, a withdrawn ruling still in the inbox or counted stale,
+        # and the old answer, lock or anchor removed (property 3: nothing is deleted).
+        self.go_stale()
+        before = self.cfg.store.read_bytes()
+        code, out = self.act({"action": "withdraw", "qid": self.QID, "lock": self.lock_id})
+        self.assertEqual(code, 400, out)
+        self.assertIn("reason", out["error"])
+        code, out = self.act(REFACTOR_ACTIONS["withdraw"](self))
+        self.assertEqual(code, 200, out)
+        view, q = self.view_q()
+        self.assertEqual(q["state"], "withdrawn")
+        self.assertNotIn(self.QID, view["inbox"])
+        self.assertEqual(view["items"]["LANE.1"]["own"]["stale"], 0)
+        o = q["refactor"]["outcome"]
+        self.assertEqual((o["kind"], o["by"], o["reason"]), ("withdrawn", "owner", "obsolete"))
+        self.assertEqual(self.cfg.store.read_bytes(), before)   # the store is untouched; the act is beside it
+        self.assertEqual(self.store_kinds().count("lock"), 1)
+        self.assertEqual(self.console.check()["stale"], {})
+        code, out = self.act(REFACTOR_ACTIONS["untrack"](self))   # settled once
+        self.assertEqual(code, 409, out)
+        self.assertIn("already withdrawn", out["error"])
+
+    def test_keep_unchecked_takes_an_optional_reason_and_the_ruling_stands(self):
+        # Catches: keep needing a reason (agent-5's ruling: optional), a kept ruling read as withdrawn, and one
+        # still checked against the files.
+        self.go_stale()
+        code, out = self.act(REFACTOR_ACTIONS["untrack"](self))
+        self.assertEqual(code, 200, out)
+        view, q = self.view_q()
+        self.assertEqual(q["state"], "locked")
+        self.assertEqual(q["failing"], [])
+        self.assertEqual(q["refactor"]["outcome"]["kind"], "untracked")
+        self.assertNotIn("reason", q["refactor"]["outcome"])
+        self.assertNotIn(self.QID, view["inbox"])
+
+    def test_an_act_on_a_page_that_is_out_of_date_is_refused(self):
+        # Catches: an act that ignores the lock the page showed: after a supersede and re-lock the old page's
+        # Withdraw would settle a ruling the owner never saw.
+        self.go_stale()
+        code, out = self.act({**REFACTOR_ACTIONS["withdraw"](self), "lock": "f" * 24})
+        self.assertEqual(code, 409, out)
+        self.assertIn("is not the current lock", out["error"])
+        for bad in ({"action": "nuke", "qid": self.QID}, {"action": "withdraw"}, [1],
+                    {**REFACTOR_ACTIONS["untrack"](self), "proposal": "x"}):
+            self.assertEqual(self.act(bad)[0], 400, bad)
+
+    # -- Q31: propose, then confirm --------------------------------------------------------------------
+
+    def test_a_proposal_changes_nothing_until_the_owner_confirms_it(self):
+        # Catches: a proposal that re-anchors by itself (the steward choosing its own passage), and a confirm that
+        # does not make the confirmed anchor decide the lock.
+        self.go_stale()
+        code, out = self.propose()
+        self.assertEqual(code, 200, out)
+        p = out["record"]
+        self.assertEqual(p["anchors"], [{"kind": "excerpt", "path": "rules.md",
+                                         "text": "RULE-BETA: the console never runs the project's code."}])
+        _, q = self.view_q()
+        self.assertEqual(q["state"], "stale")                     # proposed is not confirmed
+        self.assertEqual(q["refactor"]["proposal"]["id"], p["id"])
+        self.assertEqual(q["lock"], self.lock_id)
+        code, out = self.act({"action": "confirm", "qid": self.QID, "proposal": p["id"]})
+        self.assertEqual(code, 200, out)
+        _, q = self.view_q()
+        self.assertEqual((q["state"], q["anchored_by"]), ("locked", "confirmed"))
+        self.assertEqual(q["refactor"]["confirmed"]["proposal"], p["id"])
+        self.assertNotIn("proposal", q["refactor"])
+        code, out = self.act({"action": "confirm", "qid": self.QID, "proposal": p["id"]})
+        self.assertEqual(code, 409, out)   # fresh now: not stale, so nothing to confirm
+
+    def test_a_proposal_is_checked_when_proposed_and_again_when_confirmed(self):
+        # Property 4. Catches: a cite to text found twice (it would hold while the one meant changed), a cite past
+        # the end, a secrets file, and a confirm that trusts what was read at propose time.
+        self.go_stale(extra="RULE-BETA: the console never runs the project's code.\n")
+        code, out = self.propose()
+        self.assertEqual(code, 400, out)
+        self.assertIn("2 times", out["error"])
+        self.go_stale()
+        for cites, why in ((["rules.md:400"], "runs past the end"), ([".env:1"], "secrets"),
+                           (["rules.md:2"], "blank")):
+            code, out = self.propose(cites=cites)
+            self.assertEqual(code, 400, (cites, out))
+            self.assertIn(why, out["error"])
+        code, out = self.propose()
+        self.assertEqual(code, 200, out)
+        pid = out["record"]["id"]
+        (self.cfg.root / "rules.md").write_text(RULES.replace("every release is reviewed by a second agent", "x")
+                                                .replace("never runs", "runs"))   # the proposed text is gone now
+        code, out = self.act({"action": "confirm", "qid": self.QID, "proposal": pid})
+        self.assertEqual(code, 409, out)
+        self.assertIn("no longer holds", out["error"])
+        _, q = self.view_q()
+        self.assertEqual(q["state"], "stale")
+        self.assertNotIn("confirmed", q.get("refactor", {}))
+
+    def test_only_the_latest_proposal_can_be_confirmed(self):
+        # Catches: confirming a proposal the owner was not shown because a newer one replaced it.
+        self.go_stale(extra="RULE-GAMMA: answers are locked by the owner alone.\n")
+        first = self.propose()[1]["record"]["id"]
+        second = self.propose(cites=("rules.md:7",))[1]["record"]["id"]
+        code, out = self.act({"action": "confirm", "qid": self.QID, "proposal": first})
+        self.assertEqual(code, 409, out)
+        self.assertIn("no longer the latest", out["error"])
+        self.assertEqual(self.act({"action": "confirm", "qid": self.QID, "proposal": second})[0], 200)
+
+    # -- Q32: replace ------------------------------------------------------------------------------
+
+    def replacement(self, n=3, **over):
+        q = {"qid": f"LANE.1/Q{n}", "item": "LANE.1", "text": "What is the review rule now?", "kind": "single",
+             "options": [{"id": "a", "label": "One review"}, {"id": "b", "label": "Two"}], "star": "a",
+             "valid_if": [], "source": "rules.md:3", "replaces": self.QID, "nonce": f"rxrepl{n:04d}"}
+        q.update(over)
+        return self.agent_post("/question", q)
+
+    def test_a_replacement_leaves_the_old_ruling_in_force_until_it_is_locked(self):
+        # Catches: the old ruling suspended while its replacement is open, never marked superseded once the
+        # replacement locks, and a replacement of a ruling that still holds.
+        code, out = self.replacement()
+        self.assertEqual(code, 409, out)
+        self.assertIn("is not stale", out["error"])
+        self.go_stale()
+        code, out = self.replacement()
+        self.assertEqual(code, 200, out)
+        self.assertEqual(out["record"]["replaces"], self.QID)
+        self.assertNotIn("replaces", self.cfg.store.read_text())   # the question record is an ordinary question
+        _, old = self.view_q()
+        self.assertEqual(old["state"], "stale")                     # in force, stale, linked
+        self.assertEqual(old["refactor"]["replaced_by"], "LANE.1/Q3")
+        self.assertEqual(self.view_q("LANE.1/Q3")[1]["refactor"]["replaces"], self.QID)
+        code, out = self.replacement(n=4)
+        self.assertEqual(code, 409, out)
+        self.assertIn("already being replaced by LANE.1/Q3", out["error"])
+        self.assertIsNone(self.console.store.question("LANE.1/Q4"))   # refused before the question was stored
+        code, a = self.req("POST", "/api/answer", self.answer(qid="LANE.1/Q3", nonce="rxanswer03"), tok=token())
+        code, lk = self.req("POST", "/api/lock", {"qid": "LANE.1/Q3", "answer": a["record"]["id"],
+                                                  "nonce": "rxlock0003"}, tok=token())
+        self.assertEqual(code, 200, lk)
+        view, old = self.view_q()
+        self.assertEqual(old["state"], "superseded")
+        o = old["refactor"]["outcome"]
+        self.assertEqual((o["kind"], o["replaced_by"], o["record"], o["by"]),
+                         ("superseded", "LANE.1/Q3", lk["record"]["id"], "owner"))
+        self.assertNotIn(self.QID, view["inbox"])
+
+    # -- property 1: every act is the owner's ------------------------------------------------------------
+
+    def test_no_agent_route_settles_confirms_or_changes_any_answer(self):
+        # Every agent-door route, driven with every action's body, plus the owner route's own names. The only
+        # refactor record an agent may write is a proposal (or a replacement link), and no answer's state,
+        # outcome or confirmed anchor moves. Catches: an agent route that withdraws, keeps or confirms.
+        self.go_stale()
+        code, out = self.propose()
+        self.assertEqual(code, 200, out)
+        self.proposal_id = out["record"]["id"]
+        _, before = self.view_q()
+        posts = sorted(MS.POST_ROUTES | {"/refactor", "/api/refactor", "/withdraw", "/untrack", "/confirm"})
+        for path in posts:
+            for name, make in REFACTOR_ACTIONS.items():
+                body = {**make(self), "nonce": f"rxagent{abs(hash((path, name))) % 10**8:08d}"}
+                SV.agent_request(self.cfg.socket, "POST", path, body)
+                _, q = self.view_q()
+                self.assertEqual(q["state"], before["state"], (path, name))
+                for key in ("outcome", "confirmed"):
+                    self.assertNotIn(key, q.get("refactor", {}), (path, name))
+        log = self.cfg.state / "refactor.jsonl"
+        kinds = {json.loads(ln)["type"] for ln in log.read_text().splitlines()}
+        self.assertEqual(kinds, {"proposal"})
+        for path in ("/refactor", "/api/refactor"):
+            self.assertEqual(SV.agent_request(self.cfg.socket, "POST", path,
+                                              REFACTOR_ACTIONS["withdraw"](self))[0], 404)
+
+    def test_the_refactor_route_is_behind_access_and_origin(self):
+        # Catches: the route without the Access check, or without the Origin check that answer and lock have.
+        self.go_stale()
+        for case, kw in (("no token", {"tok": None}), ("bad token", {"tok": "x"}),
+                         ("another site", {"headers": {"Origin": "https://evil.example.com"}}),
+                         ("no Origin", {"origin": False})):
+            with self.subTest(case=case):
+                self.assertEqual(self.act(REFACTOR_ACTIONS["untrack"](self), **kw)[0], 403)
+        self.assertFalse((self.cfg.state / "refactor.jsonl").exists())
+        self.assertEqual(self.act(REFACTOR_ACTIONS["untrack"](self))[0], 200)
+
+    def test_the_log_refuses_an_owner_kind_written_as_the_agent(self):
+        # The shape check under the routes: a withdraw, keep or confirm by "agent" is refused at append and on
+        # load, so a hand-written line cannot make an agent's act look like the owner's.
+        from console_kit import refactor as RXM
+        self.go_stale()
+        for kind, extra in (("withdraw", {"reason": "x"}), ("untrack", {}), ("confirm", {"proposal": "0" * 24})):
+            rec = {"type": kind, "by": "agent", "qid": self.QID, "lock": self.lock_id, "nonce": "rxforged01",
+                   **extra}
+            with self.assertRaises(RXM.RefactorError) as e:
+                self.console.store.refactor.append(rec, self.console.store)
+            self.assertIn("only the owner may write one", str(e.exception))
+
+    def test_the_log_itself_refuses_a_second_outcome_and_a_second_replacement(self):
+        # The rules under the routes, driven at the log, since the routes check first and would hide a log that
+        # forgot them. Catches: a settled lock settled again (two outcomes, which one is the record?), a second
+        # open replacement, and a replacement of a ruling that is no longer in force or no longer this lock.
+        from console_kit import refactor as RXM
+        log = self.console.store.refactor
+        self.go_stale()
+        self.assertEqual(self.replacement()[0], 200)                      # LANE.1/Q3 replaces Q2
+        code, out = self.agent_post("/question", {"qid": "LANE.1/Q4", "item": "LANE.1", "text": "Another?",
+                                                  "kind": "single", "options": [{"id": "a", "label": "A"},
+                                                                                {"id": "b", "label": "B"}],
+                                                  "star": None, "valid_if": [], "source": "notes.md",
+                                                  "nonce": "rxplainq4"})
+        self.assertEqual(code, 200, out)
+        link = {"type": "replaces", "qid": "LANE.1/Q4", "replaces": self.QID, "lock": self.lock_id, "by": "agent"}
+
+        def refused(rec, words):
+            with self.assertRaises(RXM.RefactorError) as e:
+                log.append({**rec, "nonce": "rxlog" + os.urandom(4).hex()}, self.console.store)
+            self.assertIn(words, str(e.exception))
+        refused(link, "is already being replaced by LANE.1/Q3")
+        refused({**link, "lock": "f" * 24}, "has no current lock")
+        refused({**link, "qid": "LANE.1/Q9"}, "no question LANE.1/Q9")
+        self.assertEqual(self.act(REFACTOR_ACTIONS["withdraw"](self))[0], 200)
+        refused({"type": "untrack", "qid": self.QID, "lock": self.lock_id, "by": "owner"}, "is already withdrawn")
+        refused({"type": "withdraw", "qid": self.QID, "lock": self.lock_id, "by": "owner", "reason": "again"},
+                "is already withdrawn")
+        refused(link, "is already withdrawn")
+        kinds = [json.loads(ln)["type"] for ln in (self.cfg.state / "refactor.jsonl").read_text().splitlines()]
+        self.assertEqual(kinds, ["replaces", "withdraw"])
+
+    # -- property 6 and the sidecar's own discipline -------------------------------------------------------
+
+    def test_an_older_kit_reads_the_store_whole_and_every_settled_answer_stale(self):
+        # Catches: any lane 7 record (or a `replaces` field) in store.jsonl, which an older kit refuses whole, and
+        # a confirmed anchor an older kit would read as fresh. "Older kit" = the store without its sidecar.
+        from console_kit.store import Store
+        self.go_stale(extra="RULE-GAMMA: answers are locked by the owner alone.\n")
+        pid = self.propose(cites=("rules.md:7",))[1]["record"]["id"]
+        self.assertEqual(self.act({"action": "confirm", "qid": self.QID, "proposal": pid})[0], 200)
+        self.assertEqual(self.replacement(n=5, replaces="LANE.1/Q1")[0], 409)   # Q1 is not locked: refused
+        old_kinds = ("question", "message", "answer", "lock", "anchor", "transcript", "visual")
+        for line in self.cfg.store.read_text().splitlines():
+            rec = json.loads(line)
+            self.assertIn(rec["type"], old_kinds)
+            self.assertEqual(SV.S.validate(rec), [], rec)
+        (self.cfg.state / "refactor.jsonl").rename(self.cfg.state / "aside.jsonl")
+        older = Store(self.cfg.store)
+        from console_kit import view as VW
+        holds = SV.A.evaluator(self.cfg.root, {k: v["status"] for k, v in ITEMS.items()})
+        self.assertEqual(VW.question_state(older, older.question(self.QID), holds), "stale")
+
+    def test_a_bad_sidecar_disables_refactor_acts_and_never_stops_the_console(self):
+        # agent-5's choice, made here: a hand-edited or torn line makes the WHOLE file unreadable, named; every
+        # refactor act is refused naming it; every answer reads as if it held nothing (stale stays stale, never
+        # fresh); and the console keeps serving.
+        self.go_stale()
+        self.assertEqual(self.act(REFACTOR_ACTIONS["untrack"](self))[0], 200)
+        log = self.cfg.state / "refactor.jsonl"
+        good = log.read_text()
+        for bad, why in ((good.replace('"untrack"', '"withdraw"'), "id"),    # an edit the id no longer matches
+                         (good + '{"type": "withdraw", "qid"', "line 2")):   # a torn last line
+            with self.subTest(why=why):
+                log.write_text(bad)
+                self.console.store.refactor = SV.RX.Log(self.cfg.state, self.console.store.clock)
+                problem = self.console.store.refactor.problem
+                self.assertIsNotNone(problem)
+                self.assertIn("refactor.jsonl", problem)
+                code, out = self.act(REFACTOR_ACTIONS["withdraw"](self))
+                self.assertEqual(code, 503, out)
+                self.assertIn("refactor.jsonl", out["error"])
+                code, out = self.propose()
+                self.assertEqual(code, 503, out)
+                _, q = self.view_q()
+                self.assertEqual(q["state"], "stale")          # the untrack it held is not read: stale, never fresh
+                self.assertIn("refactor.jsonl", q["refactor"]["problem"])
+                self.assertEqual(log.read_text(), bad)          # refused acts never rewrite the file
+        self.assertEqual(self.req("GET", "/api/view", tok=token())[0], 200)   # and the console keeps serving
+
+    def test_a_link_or_folder_at_the_sidecar_is_never_followed(self):
+        # The sidecar is read and written relative to a held STATE descriptor: a planted link is not followed
+        # (its target is neither read nor overwritten), and the file it names reads as unreadable, by name.
+        self.go_stale()
+        target = self.cfg.root / "planted.jsonl"
+        target.write_text("planted\n")
+        (self.cfg.state / "refactor.jsonl").symlink_to(target)
+        self.console.store.refactor = SV.RX.Log(self.cfg.state, self.console.store.clock)
+        self.assertIn("is not a plain file", self.console.store.refactor.problem)
+        code, out = self.act(REFACTOR_ACTIONS["untrack"](self))
+        self.assertEqual(code, 503, out)
+        self.assertIn("refactor.jsonl is not a plain file", out["error"])
+        self.assertEqual(target.read_text(), "planted\n")
+        _, q = self.view_q()
+        self.assertEqual(q["state"], "stale")
+        self.assertIn("refactor.jsonl", q["refactor"]["problem"])
+
+    def test_the_sidecar_is_written_whole_with_the_stores_file_mode(self):
+        self.go_stale()
+        self.assertEqual(self.act(REFACTOR_ACTIONS["untrack"](self))[0], 200)
+        self.assertEqual(os.stat(self.cfg.state / "refactor.jsonl").st_mode & 0o777, 0o600)
+
+    # -- property 5: the fold records the outcome -------------------------------------------------------------
+
+    def test_the_export_carries_each_outcome_and_fold_refuses_an_adapter_that_would_drop_it(self):
+        # Catches: an outcome missing from the export (the ruling silently vanishes from the record), a fold that
+        # passes it to an adapter that ignores it, and an outcome on a lock folded before never folded at all.
+        from console_kit import fold as F
+        from console_kit.store import Store
+        out_dir, ledger = self.cfg.root / "locked", self.cfg.root / "folded.txt"
+
+        class Adapter:
+            seen: list = []
+
+            def items(self):
+                return dict(ITEMS)
+
+            def record(self, entries, dry_run):
+                Adapter.seen += entries
+                return [e["qid"] for e in entries]
+
+            def seed_questions(self):
+                return []
+        F.write_export(F.export(Store(self.cfg.store)), out_dir)
+        F.fold(out_dir, ledger, Adapter(), dry_run=False)            # the lock, folded before any outcome
+        self.go_stale()
+        self.assertEqual(self.act(REFACTOR_ACTIONS["withdraw"](self))[0], 200)
+        entries = F.export(Store(self.cfg.store))
+        e = entries[F.locked_filename(self.QID)]
+        self.assertEqual({k: e["outcome"][k] for k in ("kind", "by", "reason")},
+                         {"kind": "withdrawn", "by": "owner", "reason": "obsolete"})
+        self.assertEqual(F.check_entry(F.locked_filename(self.QID), e, ITEMS), [])
+        F.write_export(entries, out_dir)
+        with self.assertRaises(F.FoldError) as err:
+            F.fold(out_dir, ledger, Adapter(), dry_run=False)
+        self.assertIn("does not say it records outcomes", str(err.exception))
+        self.assertIn("RECORDS_OUTCOMES = True", str(err.exception))
+        Adapter.RECORDS_OUTCOMES = True
+        Adapter.seen = []
+        F.fold(out_dir, ledger, Adapter(), dry_run=False)
+        self.assertEqual([x["qid"] for x in Adapter.seen], [self.QID])
+        self.assertIn(f"outcome:{e['outcome']['record']} {self.QID}", ledger.read_text())
+        Adapter.seen = []
+        F.fold(out_dir, ledger, Adapter(), dry_run=False)            # once only
+        self.assertEqual(Adapter.seen, [])
+        bad = {**e, "outcome": {**e["outcome"], "by": "agent"}}
+        self.assertTrue(any("only the owner" in m for m in F.check_entry(F.locked_filename(self.QID), bad, ITEMS)))
+
+    # -- ask refusals R1 and R2 ----------------------------------------------------------------------------------
+
+    def ask(self, n, valid_if, source="notes.md", **over):
+        q = {"qid": f"LANE.1/Q{n}", "item": "LANE.1", "text": "Still?", "kind": "single",
+             "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}], "star": None,
+             "valid_if": valid_if, "source": source, "nonce": f"rxasknew{n:03d}", **over}
+        return self.agent_post("/question", q)
+
+    def sha(self, name):
+        import hashlib
+        return {"kind": "file_sha256", "path": name,
+                "sha256": hashlib.sha256((self.cfg.root / name).read_bytes()).hexdigest()}
+
+    def test_r1_refuses_a_whole_file_hash_on_a_file_the_question_cites_lines_of(self):
+        # Catches: the shape six live answers went stale with (source names lines; valid_if hashes the whole
+        # file), through `source` and through an evidence cite, and an excerpt refused by mistake.
+        code, out = self.ask(10, [self.sha("rules.md")], source="rules.md:3-4")
+        self.assertEqual(code, 400, out)
+        self.assertIn("cites lines 3-4 of that same file", out["error"])
+        self.assertIn('"kind": "excerpt", "path": "rules.md"', out["error"])
+        code, out = self.ask(11, [self.sha("rules.md")], evidence=[{"cite": "rules.md:3"}])
+        self.assertEqual(code, 400, out)
+        self.assertIn("same file", out["error"])
+        code, out = self.ask(12, [{"kind": "excerpt", "path": "rules.md", "text": "RULE-BETA: the console never"}],
+                             source="rules.md:4")
+        self.assertEqual(code, 200, out)
+
+    def test_r2_takes_a_whole_file_hash_of_100_lines_and_refuses_101(self):
+        # Catches: R2's boundary moved either way (the mutant on the comparison).
+        for n, lines in ((20, 100), (21, 101)):
+            name = f"f{lines}.txt"
+            (self.cfg.root / name).write_text("".join(f"line {i}\n" for i in range(lines)))
+            code, out = self.ask(n, [self.sha(name)])
+            if lines == 100:
+                self.assertEqual(code, 200, out)
+            else:
+                self.assertEqual(code, 400, out)
+                self.assertIn(f"which is 101 lines", out["error"])
+        stored = self.console.store.question("LANE.1/Q20")
+        code, out = self.agent_post("/question", {k: v for k, v in stored.items()
+                                                  if k not in ("id", "seq", "ts", "by", "type", "schemaVersion")})
+        self.assertEqual(code, 200, out)   # a retry of an ask that landed is not a new ask
+
+    # -- the read caps ---------------------------------------------------------------------------------------
+
+    def test_six_stale_answers_with_proposals_stay_under_the_slim_read_cap(self):
+        # agent-5: `view` / `todo` / `answers` merge refactor state, so they must stay under 64 KiB with the live
+        # shape: six stale answers, each with a proposal of a few hundred characters.
+        from console_kit import view as VW
+        para = "RULE-{n}: " + "the console keeps every ruling the owner made readable in the record. " * 5
+        (self.cfg.root / "big.md").write_text("".join(para.format(n=n) + "\n" for n in range(6)))
+        for n in range(6):
+            q = {"qid": f"LANE.1/Q{30 + n}", "item": "LANE.1", "text": "Still the rule? " * 20, "kind": "single",
+                 "options": [{"id": "a", "label": "Yes"}, {"id": "b", "label": "No"}], "star": "a",
+                 "valid_if": [{"kind": "excerpt", "path": "big.md", "text": para.format(n=n)[:200]}],
+                 "source": f"big.md:{n + 1}", "nonce": f"rxbig{n:04d}"}
+            self.assertEqual(self.agent_post("/question", q)[0], 200)
+            code, a = self.req("POST", "/api/answer", self.answer(qid=q["qid"], nonce=f"rxbiga{n:04d}"), tok=token())
+            self.req("POST", "/api/lock", {"qid": q["qid"], "answer": a["record"]["id"], "nonce": f"rxbigl{n:04d}"},
+                     tok=token())
+        (self.cfg.root / "big.md").write_text("".join(para.format(n=n).replace("RULE-", "MOVED-") + "\nANCHOR-" + str(n) +
+                                                      ": " + para.format(n=n)[10:300] + "\n" for n in range(6)))
+        for n in range(6):
+            code, out = self.agent_post("/anchor-proposal", {"qid": f"LANE.1/Q{30 + n}", "cites": [f"big.md:{2 * n + 2}"],
+                                                             "basis": "the rule moved " * 10, "nonce": f"rxbigp{n:04d}"})
+            self.assertEqual(code, 200, out)
+        code, view = SV.agent_request(self.cfg.socket, "GET", "/view")
+        self.assertEqual(code, 200)
+        size = len(json.dumps(view).encode("utf-8"))
+        self.assertLess(size, 64 * 1024, size)
+        self.assertEqual(sum(1 for q in view["view"]["questions"].values() if q.get("refactor", {}).get("proposal")), 6)
+        todo = json.dumps(VW.todo(view["view"]))
+        self.assertLess(len(todo.encode("utf-8")), 64 * 1024)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

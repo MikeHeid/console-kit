@@ -10,7 +10,9 @@
     awaiting_you: '◐',    // ◐ half-filled
     unlocked: '◑',        // ◑ half-filled other
     locked: '○',          // ○ empty circle
-    stale: '◌'            // ◌ dotted circle
+    stale: '◌',           // ◌ dotted circle
+    withdrawn: '⊘',       // ⊘ the owner withdrew a stale ruling (CONSOLE-kit/Q30)
+    superseded: '⤳'       // ⤳ a replacement was locked (CONSOLE-kit/Q32)
   };
 
   let config = null;
@@ -85,7 +87,7 @@
   const OTHER_ROLE = /^[A-Za-z0-9][A-Za-z0-9 \-]{0,39}$/;
   const MAX_ROLES = 3;
   const STATE_WORDS = { awaiting_you: 'unanswered', unlocked: 'answered, not locked',
-    locked: 'locked', stale: 'stale' };
+    locked: 'locked', stale: 'stale', withdrawn: 'withdrawn', superseded: 'superseded' };
 
   // The item and every item under it (D14), safe against a parent cycle. Mirrors view.subtree.
   function subtree(root) {
@@ -909,7 +911,7 @@
       // Questions for this item
       const qs = Object.values(view.questions).filter(q => q.question.item === itemId);
       // Sort: awaiting_you, unlocked, stale, locked
-      const order = ['awaiting_you', 'unlocked', 'stale', 'locked'];
+      const order = ['awaiting_you', 'unlocked', 'stale', 'locked', 'superseded', 'withdrawn'];
       qs.sort((a, b) => order.indexOf(a.state) - order.indexOf(b.state));
 
       body.appendChild(renderItemTools(itemId));
@@ -1168,11 +1170,24 @@
       reBtn.setAttribute('aria-label', 'Re-lock this answer as it stands: ' + truncateText(qData.text, 40));
       tools.appendChild(whyBtn);
       tools.appendChild(reBtn);
+      // CONSOLE-kit/Q30: the owner judges each stale ruling; neither act is a default.
+      const [wdBtn, wdSlot] = disclosure('Withdraw…', 'withdraw-' + qData.qid, () => renderSettle(q, 'withdraw'));
+      wdBtn.setAttribute('aria-label', 'Withdraw this ruling: ' + truncateText(qData.text, 40));
+      const [kpBtn, kpSlot] = disclosure('Keep, stop checking…', 'untrack-' + qData.qid,
+        () => renderSettle(q, 'untrack'));
+      kpBtn.setAttribute('aria-label', 'Keep this ruling and stop checking it: ' + truncateText(qData.text, 40));
+      tools.appendChild(wdBtn);
+      tools.appendChild(kpBtn);
       banner.appendChild(tools);
       banner.appendChild(whySlot);
       banner.appendChild(reSlot);
+      banner.appendChild(wdSlot);
+      banner.appendChild(kpSlot);
+      if (q.refactor && q.refactor.proposal) banner.appendChild(renderProposal(q));
       bodyEl.appendChild(banner);
     }
+    const rxNote = refactorNote(q);
+    if (rxNote) bodyEl.appendChild(rxNote);
 
     // Show receipt for locked (or stale as locked)
     const headAnswer = q.answers && q.answers.length > 0 ? q.answers[q.answers.length - 1] : null;
@@ -1734,6 +1749,106 @@
     actions.appendChild(cancel);
     wrap.appendChild(actions);
     return wrap;
+  }
+
+  // CONSOLE-kit/Q30-Q32: what was done about a stale ruling, said on its card. Nothing when nothing was.
+  function refactorNote(q) {
+    const rx = q.refactor;
+    if (!rx) return null;
+    const lines = [];
+    const o = rx.outcome;
+    if (o) {
+      const why = o.reason ? ': ' + o.reason : '';
+      if (o.kind === 'withdrawn') lines.push('Withdrawn by you on ' + o.at + why);
+      else if (o.kind === 'untracked') lines.push('Kept by you on ' + o.at + ', no longer checked against the files' + why);
+      else if (o.kind === 'superseded') lines.push('Superseded on ' + o.at + ' by ' + o.replaced_by + ', which you locked');
+    }
+    if (rx.replaced_by && !(o && o.kind === 'superseded')) {
+      lines.push('A replacement is open: ' + rx.replaced_by + '. This ruling stays in force until you lock it.');
+    }
+    if (rx.replaces) lines.push('Asked to replace ' + rx.replaces + '.');
+    if (rx.confirmed) lines.push('Re-anchored on ' + rx.confirmed.at + ' from a proposal you confirmed.');
+    if (rx.problem) lines.push(rx.problem);
+    if (!lines.length) return null;
+    const box = el('div', { className: 'ck-refactor-note', role: 'note' });
+    for (const l of lines) box.appendChild(el('p', {}, [l]));
+    return box;
+  }
+
+  // Withdraw (reason required) or keep without checking (reason optional): the owner's acts alone.
+  function renderSettle(q, action) {
+    const qid = q.question.qid;
+    const withdraw = action === 'withdraw';
+    const wrap = el('div', { className: 'ck-confirm' }, [
+      el('div', { className: 'ck-confirm-heading' }, [withdraw ? 'Withdraw this ruling?' : 'Keep it, and stop checking?']),
+      el('p', {}, [withdraw
+        ? 'It no longer applies. It leaves your inbox and the record marks it withdrawn by you, with your reason.'
+        : 'It stands as it is. It leaves your inbox and the record marks it as no longer checked against the files.'])
+    ]);
+    const id = action + '-reason-' + qid.replace('/', '-');
+    wrap.appendChild(el('label', { for: id, style: 'font-size: 13px; display: block; margin: 8px 0 4px;' },
+      [withdraw ? 'Why it no longer applies:' : 'Why (optional):']));
+    const reason = el('textarea', { id: id, rows: '2', className: 'ck-textarea', maxlength: '2000' });
+    wrap.appendChild(reason);
+    const actions = el('div', { className: 'ck-actions', style: 'margin-top: 8px;' });
+    const go = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' },
+      [withdraw ? 'Withdraw' : 'Keep, stop checking']);
+    go.addEventListener('click', async () => {
+      const text = reason.value.trim();
+      if (withdraw && !text) { announce('Say why it no longer applies'); reason.focus(); return; }
+      go.disabled = true;
+      // The lock the page was shown: a lock changed since is refused by name, never acted on unseen.
+      const body = { action: action, qid: qid, lock: q.lock };
+      if (text) body.reason = text;
+      const result = await apiPost('/refactor', body, action + '-' + qid);
+      go.disabled = false;
+      if (result.error) announce('Error: ' + result.error);
+      else { openForms.delete(action + '-' + qid); renderPanel(); }
+    });
+    const cancel = el('button', { className: 'ck-btn', type: 'button' }, ['Cancel']);
+    cancel.addEventListener('click', () => { openForms.delete(action + '-' + qid); renderPanel(); });
+    actions.appendChild(go);
+    actions.appendChild(cancel);
+    wrap.appendChild(actions);
+    return wrap;
+  }
+
+  // Q31: the steward's proposed anchor beside the one that failed; nothing changes until the owner confirms.
+  function renderProposal(q) {
+    const qid = q.question.qid;
+    const p = q.refactor.proposal;
+    const box = el('div', { className: 'ck-proposal', role: 'region', 'aria-label': 'Proposed anchor for ' + qid });
+    box.appendChild(el('strong', {}, ['The steward proposes a new anchor']));
+    box.appendChild(el('p', {}, [p.basis]));
+    const cols = el('div', { className: 'ck-proposal-cols' });
+    const was = el('div', { className: 'ck-proposal-old' }, [el('div', { className: 'ck-confirm-heading' }, ['Checked now'])]);
+    for (const c of p.base) {
+      const failing = (q.failing || []).some(f => JSON.stringify(f) === JSON.stringify(c));
+      was.appendChild(el('p', {}, [(failing ? 'No longer holds: ' : 'Holds: ') + conditionWords(c)]));
+    }
+    const now = el('div', { className: 'ck-proposal-new' }, [el('div', { className: 'ck-confirm-heading' }, ['Proposed'])]);
+    for (const c of p.anchors) {
+      if (c.kind === 'excerpt') {
+        now.appendChild(el('p', {}, [c.path + ' still contains:']));
+        now.appendChild(el('pre', { className: 'ck-excerpt' }, [c.text]));
+      } else {
+        now.appendChild(el('p', {}, ['Holds: ' + conditionWords(c)]));
+      }
+    }
+    cols.appendChild(was);
+    cols.appendChild(now);
+    box.appendChild(cols);
+    const go = el('button', { className: 'ck-btn ck-btn-primary ck-confirm-proposal', type: 'button',
+      'aria-label': 'Confirm the proposed anchor for ' + qid }, ['Confirm this anchor']);
+    go.addEventListener('click', async () => {
+      go.disabled = true;
+      const result = await apiPost('/refactor', { action: 'confirm', qid: qid, proposal: p.id }, 'confirm-' + qid);
+      go.disabled = false;
+      if (result.error) announce('Error: ' + result.error);
+      else renderPanel();
+    });
+    box.appendChild(el('div', { className: 'ck-actions' }, [go]));
+    return box;
   }
 
   // Render lock confirmation step (fix #4: two-step with Cancel)

@@ -768,6 +768,15 @@ def main(argv=None) -> int:
     s.add_argument("--reply-to")
     s = sub.add_parser("ask")
     s.add_argument("files", type=Path, nargs="+", metavar="file")
+    s = sub.add_parser("propose-anchor", description=(
+        "PROPOSE a new anchor for a stale answer (CONSOLE-kit/Q31). Name the lines the ruling rests on; the "
+        "server reads them now, each must be in its file exactly once, and nothing changes until the owner "
+        "confirms the proposal on the console. To replace a stale ruling with a new question instead, `ask` it "
+        "with \"replaces\": \"<qid>\" in the question file."))
+    s.add_argument("qid")
+    s.add_argument("--cite", action="append", required=True, metavar="PATH:FIRST-LAST",
+                   help="lines the ruling rests on, read by the server; repeat for up to 4")
+    s.add_argument("--basis", required=True, help="why these lines carry the ruling now, shown to the owner")
     s = sub.add_parser("transcript")
     s.add_argument("fork")
     s.add_argument("file", type=Path)
@@ -1026,6 +1035,9 @@ def _run(a, bell: Path) -> int:
                                                   "nonce": secrets.token_urlsafe(12)}, agent=a.agent)
     if a.cmd == "visual-export":
         return _visual_export(a.state, a.project, a.visual)
+    if a.cmd == "propose-anchor":
+        return _call(a.state, "POST", "/anchor-proposal", {"qid": a.qid, "cites": a.cite, "basis": a.basis,
+                                                           "nonce": secrets.token_urlsafe(12)}, agent=a.agent)
     if a.cmd == "ask":
         for n, f in enumerate(a.files):
             try:

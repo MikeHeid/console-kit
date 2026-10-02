@@ -934,6 +934,13 @@ class Console:
         rec = {k: v for k, v in body.items() if k != "action"}
         rec.update(type=action, by="owner")
         with self._lock:
+            if action == "confirm":
+                # A confirm names the lock its proposal was made for, so a later re-lock stops it applying. It is
+                # taken from the proposal (checked against the current lock below), before the retry lookup,
+                # so a retry hashes to the record that landed.
+                p = self.store.refactor.get(body.get("proposal"))
+                if isinstance(p, dict) and isinstance(p.get("lock"), str):
+                    rec["lock"] = p["lock"]
             done = self.store.refactor.existing(rec)
             if done is not None:
                 return {"record": done}   # a retry of an act that landed
