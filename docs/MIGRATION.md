@@ -407,6 +407,39 @@ per dashboard update. A page staged but not yet published also survives
 restarts. Rolling back to a release from before Q29 serves the last published
 page; anything still only staged is ignored by that release.
 
+**Update the project's adapter before the first stale answer is settled.**
+Since CONSOLE-kit/Q30–Q32, the owner can withdraw a stale ruling, keep it
+unchecked, or have it superseded by a replacement question. fold then passes
+that ruling's entry to the adapter again, carrying an `outcome`:
+
+    {"kind": "withdrawn",  "by": "owner", "at": "<ts>", "record": "<id>", "reason": "<text>"}
+    {"kind": "untracked",  "by": "owner", "at": "<ts>", "record": "<id>"}            # "reason" optional
+    {"kind": "superseded", "by": "owner", "at": "<ts>", "record": "<id>", "replaced_by": "<qid>"}
+
+and a replacement question's entry carries `"replaces": "<old qid>"`. An
+adapter written before this change ignores both, so the ruling would silently
+vanish from the project's record. fold therefore refuses such an entry unless
+the adapter says it records outcomes. An adapter must add two things:
+
+1. a module-level line `RECORDS_OUTCOMES = True`;
+2. in `record()`, write `entry['outcome']` into the project's record when it is
+   present: its kind, who and when, and the reason or `replaced_by`. Write
+   `entry['replaces']` too, when present. An entry may come back with an
+   outcome after its lock was folded once already; record it as a new
+   section, not a rewrite of the old one.
+
+`plugin/kit/adapter_template.py` shows both (see `_render`). Until the adapter
+has them, fold prints, and folds nothing:
+
+    refused, nothing folded:
+      <qid>: each carries an outcome (withdrawn, kept unchecked or superseded), and this project's adapter does not say it records outcomes. Update its record() to write entry['outcome'] and add RECORDS_OUTCOMES = True to it (docs/MIGRATION.md)
+
+Rulings with no outcome are unaffected. A project where no stale answer has
+been settled folds as before, with or without the line.
+
+**The settled acts live in `refactor.jsonl`, beside `store.jsonl`.** Back up
+both together. Nothing is added to the store itself.
+
 Read the release's notes in `INSTALL.md` ("Upgrading to …") first. Some
 releases ask for a step of their own, such as `reanchor` or a
 `.console-kit.json` key. Keep the old worktree until the new one has run for
@@ -423,6 +456,12 @@ a while: it is your rollback.
 Check `INSTALL.md`'s "Going back to an older kit" first. An older kit refuses
 by name a store record it does not know, and a steward must be cleared before
 going back below 0.8.3.
+
+Going back below the release that adds settling stale answers (CONSOLE-kit/
+Q30–Q32): the older kit never opens `refactor.jsonl`, so every withdrawn,
+kept-unchecked or superseded answer reads **stale** again, never fresh, and a
+confirmed anchor reads as the old one. The store is untouched, so nothing is
+lost: upgrade again and the outcomes return. Leave `refactor.jsonl` in place.
 
 To retire an old pin: `git -C <kit-clone> worktree remove <pins>/<old-tag>`.
 
