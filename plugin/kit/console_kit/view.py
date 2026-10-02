@@ -339,8 +339,10 @@ def slim_refactor(view: dict) -> dict:
         it = q["question"]["item"]
 
         def where(what: str) -> str:
+            # Every read named here is run by test_server's pointer test: the markdown `answers --item` does
+            # not print the text (refactor_lines says only that a proposal waits), so it is named with --json.
             return (f"{what} left out of this read (digest is its sha256). `view --item {it}` or "
-                    f"`answers --item {it}` prints it; add --full if that read is over 64 KiB")
+                    f"`answers --item {it} --json` prints it; add --full if that read is over 64 KiB")
         rx = dict(rx)
         if "proposal" in rx:
             p = rx["proposal"]

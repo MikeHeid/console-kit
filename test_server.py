@@ -6962,6 +6962,33 @@ class RefactorTests(_Live, unittest.TestCase):
         self.assertEqual(owner["view"]["questions"]["LANE.1/Q41"]["refactor"]["proposal"]["anchors"][0]["text"],
                          (self.cfg.root / "max.md").read_text().splitlines()[4])
 
+    def test_every_read_the_slim_pointer_names_prints_what_it_left_out(self):
+        # kit-lows review MEDIUM. Catches: a pointer naming a read that does not print the text (the markdown
+        # `answers --item` says only that a proposal waits), for a proposal and for a confirmed basis alike.
+        import re
+        import subprocess
+
+        def cli(*args):
+            r = subprocess.run([sys.executable, AGENT_PY, "--state", str(self.cfg.state), *args],
+                               capture_output=True, text=True, timeout=60, env=GIT_ENV)
+            self.assertEqual(r.returncode, 0, (args, r.stderr))
+            return r.stdout
+
+        def pointed_reads(key):
+            text = json.loads(cli("view"))["view"]["questions"][self.QID]["refactor"][key]["text"]
+            reads = re.findall(r"`([^`]+)`", text)
+            self.assertGreaterEqual(len(reads), 1, text)
+            return reads
+        self.go_stale(extra="RULE-BETA: a release ships after one review.\n")
+        code, out = self.propose(basis="BASIS-MARKER-P: RULE-BETA carries the ruling now")
+        self.assertEqual(code, 200, out)
+        for read in pointed_reads("proposal"):
+            self.assertIn("BASIS-MARKER-P", cli(*read.split()), read)
+        code, out = self.act({"action": "confirm", "qid": self.QID, "proposal": out["record"]["id"]})
+        self.assertEqual(code, 200, out)
+        for read in pointed_reads("confirmed"):
+            self.assertIn("BASIS-MARKER-P", cli(*read.split()), read)
+
     def test_six_stale_answers_with_proposals_stay_under_the_slim_read_cap(self):
         # agent-5: `view` / `todo` / `answers` merge refactor state, so they must stay under 64 KiB with the live
         # shape: six stale answers, each with a proposal of a few hundred characters.
