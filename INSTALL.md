@@ -187,8 +187,10 @@ rules are unchanged (installed user or plugin skills only, never a skill
 inside the repository). Re-running onboarding adds the plugin's names only
 for a kind the config does not already name. Before going back to an older
 kit, switch `next_step` back to user-level skills: an older plugin ships no
-`refine` or `drill`, so `console-kit:refine` resolves to nothing and Refine
-and Drill refuse, by name.
+`refine` or `drill`, so once the newer plugin is no longer in Claude's plugin
+cache, `console-kit:refine` resolves to nothing and Refine and Drill refuse,
+naming the skill. While a newer copy is still cached they keep resolving to
+it.
 
 **Going back to an older kit.** A 0.8.0 kit reads a store 0.8.1 wrote, but
 it looks for each visual 0.8.1 stored in its own checkout: it refuses the
