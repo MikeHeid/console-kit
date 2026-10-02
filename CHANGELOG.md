@@ -606,3 +606,20 @@ skill inside the repository.
   still waits on. A scan's doorbell line carries `rx`, the refactor seq, and
   keeps waking `watch` until `synced --rx-through RX`. The console-process
   skill's step 4b says how to answer one.
+
+## Every stale answer reaches the inbox (0.8.18)
+
+- **A stale answer from a deliberation round now has its own inbox row.**
+  Before this, a locked answer that came out of a round and later went stale
+  was still filed under that round. A round lists only the questions still
+  waiting for an answer, so the stale one showed as "0 questions", and its
+  stale banner and **Confirm** button could only be reached from the item
+  page. A question now goes under its round only while it is open; otherwise
+  it is an ordinary row that opens its card.
+- **Rows say which question and what waits.** A stale row shows the question
+  number (the full id is in its title and its accessible name) and says when
+  "a new anchor is proposed" or "advice is waiting". Two stale answers on one
+  item no longer look the same. Clicking a row scrolls to that question's card.
+- **"Answer these together" groups open questions only**, so a stale answer
+  is never offered inside a group whose form would skip it.
+- Rounds, their forms, the server and the store are unchanged.
