@@ -573,3 +573,35 @@ skill inside the repository.
 - The unit template no longer passes `--page` or `--adapter`; the server read
   neither. Units installed earlier still start: both flags are accepted and
   ignored.
+
+## Scan for a resolve (0.8.17, owner rulings CONSOLE-kit/Q40 and Q41)
+
+- **Ask the steward to look again.** Every stale answer has a **Scan for a
+  resolve** button, and the inbox has **Scan all stale (N)**. A press asks the
+  steward to find out whether the ruling still applies: where its cited text
+  went, whether its premise still holds, and what replaced it. "Scan all" is
+  one request naming every stale ruling at the moment you press it; one that
+  went stale after the page loaded is refused by name rather than missed.
+- **One scan at a time.** While a scan is open the buttons give way to its
+  status ("Scan asked …: k of n rulings still wait"), and a second scan is
+  refused, naming the open one.
+- **The steward answers each ruling one way:** a proposed new anchor (old and
+  new side by side, as before), a replacement question, or new **advice**: a
+  ★ Withdraw or Keep recommendation with its evidence, shown beside your own
+  Withdraw and Keep buttons. Nothing changes until you press one of them; the
+  steward proposes, you decide.
+- **A scan is done when records say so, never the files.** Each ruling is done
+  once the steward answered it after the scan, or you settled it (withdraw,
+  keep, confirm, a replacement, a new answer or a re-lock). A done scan never
+  reopens. A ruling whose cited text came back while the scan was open still
+  gets an answer: the steward may advise Keep on it, and only then.
+- **Where it is kept.** Scans and advice are two new record kinds in
+  `refactor.jsonl`, beside the other stale-answer records; `store.jsonl` is
+  untouched, so an older kit still starts on the same state. An older kit
+  reads `refactor.jsonl` as unreadable, so it shows every settled answer as
+  stale again until it is upgraded. Nothing is lost on disk.
+- **For the steward:** `agent.py advise QID --star withdraw|keep --evidence
+  TEXT`; a scan rings the doorbell, and `todo` lists open scans with what each
+  still waits on. A scan's doorbell line carries `rx`, the refactor seq, and
+  keeps waking `watch` until `synced --rx-through RX`. The console-process
+  skill's step 4b says how to answer one.
