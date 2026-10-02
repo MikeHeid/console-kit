@@ -1025,12 +1025,17 @@ class Console:
         except Exception as e:  # a register caught mid-write, or a broken adapter
             sys.stderr.write(f"console health: register: {type(e).__name__}: {e}\n")
             ok = False
-        if getattr(self.adapter, "problem", None):   # the single server serves on, but the register is not ok
-            ok = False
+        # Degraded, not down: unreadable stored items (the single server serves on) stay a 200, since a restart
+        # cannot fix them and only a push can; a 503 would invite a supervisor's restart loop. The state is in
+        # the body instead: register "error" and a note that names what to do, never the file's path.
+        degraded = ok and bool(getattr(self.adapter, "problem", None))
         agent = D.listening(self.cfg.state)["state"]
-        return ok, {"ok": ok, "version": __version__, "store_seq": len(self.store.records()),
-                    "register": "ok" if ok else "error", "agent": agent,
-                    "agent_listening": agent == "listening"}
+        body = {"ok": ok, "version": __version__, "store_seq": len(self.store.records()),
+                "register": "ok" if ok and not degraded else "error", "agent": agent,
+                "agent_listening": agent == "listening"}
+        if degraded:
+            body["register_note"] = IT.UNREADABLE
+        return ok, body
 
     # "Agent active" (owner, 2026-09-29): an agent that picks up a request marks
     # the items it is working on, and its next cursor post (synced, or an error)

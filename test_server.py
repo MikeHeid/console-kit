@@ -5379,8 +5379,14 @@ class SingleServerStartTests(unittest.TestCase):
         state.mkdir(mode=0o700)
         (root / "page.html").write_text(PAGE)
         plant(state / IT.ITEMS, base)
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        self.health_port = s.getsockname()[1]
+        s.close()
         cfg = SV.Config(root=root, page=root / "page.html", state=state, adapter=root / "adapter.py",
-                        team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="single")
+                        team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="single",
+                        health_port=self.health_port)
         owners, real = [], SV.owner_server
 
         def capture(*a, **k):
@@ -5406,9 +5412,15 @@ class SingleServerStartTests(unittest.TestCase):
 
     def check_starts_unreadable_then_recovers(self, plant, problem):
         cfg = self.serve(plant)
-        code, health = SV.agent_request(cfg.socket, "GET", "/health")
-        self.assertEqual((code, health["ok"], health["register"]), (503, False, "error"))
-        self.assertNotIn(str(self.base), json.dumps(health))
+        # Degraded, not down: 200 on both health doors (a restart cannot fix the file; a 503 invites a restart
+        # loop), with the state in the body: register "error" and a note saying what to do, never the path.
+        for door, (code, health) in (("agent socket", SV.agent_request(cfg.socket, "GET", "/health")),
+                                     ("health port", HealthTests.health(self, self.health_port))):
+            with self.subTest(door=door):
+                self.assertEqual((code, health["ok"], health["register"]), (200, True, "error"))
+                self.assertEqual(health["register_note"], IT.UNREADABLE)
+                self.assertIn("items-push", health["register_note"])
+                self.assertNotIn(str(self.base), json.dumps(health))
         code, view = SV.agent_request(cfg.socket, "GET", "/view")
         self.assertEqual((code, view["items"], view["view"]["items_note"]), (200, {}, IT.UNREADABLE))
         self.assertNotIn(str(self.base), json.dumps(view))
@@ -5417,7 +5429,8 @@ class SingleServerStartTests(unittest.TestCase):
         self.assertIn(problem, logged[0])
         self.assertEqual(SV.agent_request(cfg.socket, "POST", "/items", LANE_ITEMS)[0], 200)
         code, health = SV.agent_request(cfg.socket, "GET", "/health")
-        self.assertEqual((code, health["ok"]), (200, True))
+        self.assertEqual((code, health["ok"], health["register"]), (200, True, "ok"))
+        self.assertNotIn("register_note", health)   # recovered: the healthy body's pinned field set again
         code, view = SV.agent_request(cfg.socket, "GET", "/view")
         self.assertEqual((code, view["items"], view["view"]["items_note"]), (200, LANE_ITEMS["items"], None))
         st = os.lstat(cfg.state / IT.ITEMS)
