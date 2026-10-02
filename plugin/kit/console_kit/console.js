@@ -2076,6 +2076,17 @@
 
   // Leaving the question, the panel or the page takes the countdown with it: a lock is never sent from a
   // place the owner can no longer see, so it can never land by accident.
+  function dropAllLocks() {
+    let dropped = 0;
+    for (const qid of [...pendingLocks.keys()]) if (undoLock(qid, null)) dropped += 1;
+    if (!dropped) return;
+    announce(dropped === 1 ? 'Not locked: you left the page before it locked.'
+      : dropped + ' answers not locked: you left the page before they locked.');
+    // What is on show still says "Locking in N s": put the Lock button back. A box being typed in is not
+    // redrawn (it cannot be typed in while the page is hidden; on return the next live redraw shows it).
+    if (panelEl && panelEl.getAttribute('data-open') === 'true' && !busyInPanel()) redrawKeepingPlace();
+  }
+
   function dropLocksNotOnShow() {
     let dropped = 0;
     for (const [qid, p] of [...pendingLocks]) {
@@ -2971,7 +2982,9 @@
   // without a pick (the review page, with its Lock button, is only ever reached by the owner's own press).
   const ADVANCE_MS = 400;
   let advanceTimer = null;
-  let arrowPickAt = -Infinity;  // when an ↑/↓ last moved a pick: the change it makes is a walk, not a choice
+  // An ↑/↓ is held on a round option: the change it makes is a walk through the options, not a choice. Set by
+  // the keydown, read and cleared by the change it causes, and cleared by the keyup, so no timing is guessed.
+  let arrowWalk = false;
 
   function cancelAdvance() {
     if (advanceTimer) { clearTimeout(advanceTimer); advanceTimer = null; }
@@ -3064,7 +3077,8 @@
           refreshRoundProgress(forkId, mem, steps);
           // Q34: a single-choice pick moves on by itself, unless an arrow key made it (↑/↓ walk the options,
           // and every step of that walk is a change) or the owner is commenting on this question.
-          const byArrow = performance.now() - arrowPickAt < 250;
+          const byArrow = arrowWalk;
+          arrowWalk = false;
           if (!multi && qData.kind === 'single' && input.checked && !byArrow && !(draft.text && draft.text.trim()) &&
               document.activeElement !== words) {
             scheduleAdvance(forkId, qData.qid);
@@ -3074,8 +3088,9 @@
         });
         input.addEventListener('keydown', e => {
           // ←/→ never reach a radio here (onRoundKey takes them to move between questions); ↑/↓ do.
-          if (e.key === 'ArrowUp' || e.key === 'ArrowDown') arrowPickAt = performance.now();
+          if (e.key === 'ArrowUp' || e.key === 'ArrowDown') arrowWalk = true;
         });
+        input.addEventListener('keyup', () => { arrowWalk = false; });
         inputs.push(input);
         const content = el('div', { className: 'ck-option-content' }, [
           el('span', { className: 'ck-option-label' }, [
@@ -4286,7 +4301,10 @@
     document.addEventListener('visibilitychange', onVisibility);
     // Q33: a page leaving drops every countdown. Timers would die with it anyway, but a page kept in the
     // back-forward cache resumes its timers when shown again, and its lock must not land then.
-    window.addEventListener('pagehide', () => { for (const qid of [...pendingLocks.keys()]) undoLock(qid, null); });
+    // Q33: a countdown never ends where the owner cannot see it. Leaving the page (pagehide, which also covers
+    // a back/forward-cache stop: its timers would otherwise resume on return) and hiding the tab both cancel.
+    window.addEventListener('pagehide', () => dropAllLocks());
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') dropAllLocks(); });
     injectItemButtons();
     // Initial fetch, then the live loop (0.7.0) keeps the page current
     bindPageProposal();   // before the board: a stale bar offers the dialog only once it is bound

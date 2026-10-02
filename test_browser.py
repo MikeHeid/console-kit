@@ -2403,13 +2403,54 @@ class InboxUXTests(unittest.TestCase):
                 page.wait_for_selector(".ck-lock-countdown")
                 page.evaluate("ConsoleKit.open('LANE')")
                 self.said(page, "you left the question")
-                # 3. Leaving the page mid-count.
+                # 3. Leaving the page mid-count and coming back from the back/forward cache. The page and its
+                # timers live on (navigating away for real would kill them and prove nothing): only the pagehide
+                # handler can stop this lock from landing on return.
                 self.open_item(page)
                 page.click(".ck-lock-one")
                 page.wait_for_selector(".ck-lock-countdown")
-                page.goto("about:blank")
+                page.evaluate("""() => {
+                    window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true}));
+                    window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}));
+                }""")
+                self.said(page, "you left the page before it locked")
+                page.wait_for_selector(".ck-lock-one")
                 page.wait_for_timeout(6500)   # past every countdown above
                 self.assertEqual(self.locks(), [], "a lock was sent without the countdown ending on show")
+                self.assertEqual(page.locator(".ck-lock-countdown").count(), 0)
+
+    def test_q33_hiding_the_tab_or_closing_the_panel_mid_count_sends_nothing(self):
+        # Review MEDIUMs. Catches: a countdown that keeps running in a background tab (the lock would land
+        # where the owner cannot see it), and one that survives the panel being closed over it.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                self.ask(1)
+                self.answer("LANE.1/Q1")
+                page = self.page(kind, 1280, url)
+                self.open_item(page)
+                # 1. The tab is hidden (switching tabs, minimising), then shown again.
+                page.click(".ck-lock-one")
+                page.wait_for_selector(".ck-lock-countdown")
+                page.evaluate("""() => {
+                    const set = v => Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => v});
+                    set('hidden'); document.dispatchEvent(new Event('visibilitychange'));
+                    set('visible'); document.dispatchEvent(new Event('visibilitychange'));
+                }""")
+                self.said(page, "you left the page before it locked")
+                page.wait_for_selector(".ck-lock-one")
+                page.wait_for_timeout(6500)
+                self.assertEqual(self.locks(), [], "a hidden tab kept counting and locked")
+                # 2. The panel is closed mid-count, then opened again.
+                page.click(".ck-lock-one")
+                page.wait_for_selector(".ck-lock-countdown")
+                page.click(".ck-close-btn")
+                self.said(page, "you left the question before it locked")
+                page.wait_for_timeout(6500)
+                self.assertEqual(self.locks(), [], "a closed panel kept counting and locked")
+                self.open_item(page)
+                self.assertEqual(page.locator(".ck-lock-countdown").count(), 0)
+                self.assertEqual(page.locator(".ck-lock-one").count(), 1)
 
     def test_q33_a_live_redraw_mid_count_keeps_the_countdown_and_the_undo_focus(self):
         # Catches: a countdown lost to a live redraw (it would lock with nothing on show, or not at all), focus
@@ -2570,6 +2611,12 @@ class InboxUXTests(unittest.TestCase):
                 count = "document.querySelector('.ck-round-count').textContent"
                 at = lambda n: page.evaluate(count + f".startsWith('Question {n} of 5')")
                 page.click(".ck-round-dot >> nth=1")   # pick Q2 first: it moves on to Q3, the next unanswered
+                page.wait_for_function(count + ".startsWith('Question 2 of 5')")
+                # An ↑/↓ that changed nothing (its default prevented) must not make the next click a "walk".
+                page.eval_on_selector(".ck-round-options input[value='fix']", """r => {
+                    for (const type of ['keydown', 'keyup'])
+                        r.dispatchEvent(new KeyboardEvent(type, {key: 'ArrowDown', bubbles: true}));
+                }""")
                 page.click(".ck-round-options input[value='leave']")
                 page.wait_for_function(count + ".startsWith('Question 3 of 5')", timeout=3000)
                 page.click(".ck-round-dot >> nth=0")
@@ -2585,12 +2632,17 @@ class InboxUXTests(unittest.TestCase):
                 self.assertTrue(at(3))
                 page.click(".ck-round-dot >> nth=3")
                 page.wait_for_function(count + ".startsWith('Question 4 of 5')")
+                # A step change puts focus on the question text in the next animation frame: wait for that, or
+                # it lands after the radio is focused below and the ↓ goes to the heading (a flake, 1 in 4).
+                page.wait_for_function("document.activeElement && document.activeElement.classList.contains("
+                                       "'ck-round-qtext')")
                 # ↑/↓ walk Q4's options without moving on, though Q5 is open.
                 page.locator(".ck-round-options input[value='fix']").focus()
+                page.wait_for_function("document.activeElement && document.activeElement.value === 'fix'")
                 page.keyboard.press("ArrowDown")
-                page.wait_for_timeout(900)
+                page.wait_for_function("document.querySelector(\".ck-round-options input[value='record']\").checked")
+                page.wait_for_timeout(900)   # ADVANCE_MS is 400: a move would have happened by now
                 self.assertTrue(at(4))
-                self.assertTrue(page.locator(".ck-round-options input[value='record']").is_checked())
                 # Commenting on Q4, then a pick: it stays.
                 page.fill("#ck-round-words", "thinking about it")
                 page.click(".ck-round-options input[value='leave']")
