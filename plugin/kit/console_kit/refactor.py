@@ -16,6 +16,19 @@ rulings on what else can happen to one:
                       `replaces`). The old ruling stays in force, marked stale and linked, until the new one is
                       locked; then it is SUPERSEDED. That state is derived, never written: the replacement's
                       lock is the record
+    scan       owner  "scan for a resolve" (CONSOLE-kit/Q40, Q41): asks the steward to work out what became of
+                      the stale rulings it names (`qids`, each with the `locks` the owner was shown). "Scan all
+                      stale" is ONE of these naming every stale ruling. It changes nothing and decides nothing
+    advice     agent  the steward's answer to a scan when neither a new anchor nor a replacement fits: a star
+                      recommendation to withdraw or keep the ruling, with its evidence. It changes nothing: the
+                      owner's own Withdraw or Keep does
+
+A scan's ruling is ANSWERED once a proposal, an advice or a `replaces` names
+it and that lock, written AFTER the scan; it is SETTLED once it is no longer
+stale (withdrawn, kept, superseded, re-anchored, re-locked or holding again).
+The scan is done when every ruling it names is one or the other. Whether an
+answer is stale is the view's to say (it reads the files), so `scan_status`
+takes that from the caller.
 
 Every record names the lock it acted on, so a later supersede and re-lock of
 the same question makes it stop applying (a new lock is a new ruling).
@@ -46,6 +59,7 @@ import os
 import sys
 import threading
 from pathlib import Path
+from typing import Callable
 
 from . import atfile as AF
 from . import schema as S
@@ -54,9 +68,11 @@ FILE = "refactor.jsonl"
 SCHEMA_VERSION = 1
 MAX_FILE = 8 << 20            # bytes; a larger file is unreadable, by name
 MAX_CITES = 4                 # excerpts one proposal may cite
-KINDS = ("withdraw", "untrack", "proposal", "confirm", "replaces")
-OWNER_KINDS = frozenset({"withdraw", "untrack", "confirm"})
-AGENT_KINDS = frozenset({"proposal", "replaces"})
+KINDS = ("withdraw", "untrack", "proposal", "confirm", "replaces", "scan", "advice")
+OWNER_KINDS = frozenset({"withdraw", "untrack", "confirm", "scan"})
+AGENT_KINDS = frozenset({"proposal", "replaces", "advice"})
+MAX_SCAN = 200                # rulings one scan may name: far past any real stale backlog
+ADVICE_STARS = ("withdraw", "keep")
 WRITERS = {k: "owner" for k in OWNER_KINDS} | {k: "agent" for k in AGENT_KINDS}
 REQUIRED = {
     "withdraw": ("qid", "lock", "reason", "by", "nonce"),
@@ -64,9 +80,11 @@ REQUIRED = {
     "proposal": ("qid", "lock", "base", "anchors", "cites", "basis", "by", "nonce"),
     "confirm": ("qid", "lock", "proposal", "by", "nonce"),
     "replaces": ("qid", "replaces", "lock", "by", "nonce"),
+    "scan": ("qids", "locks", "by", "nonce"),
+    "advice": ("qid", "lock", "star", "evidence", "by", "nonce"),
 }
 OPTIONAL = {"withdraw": frozenset(), "untrack": frozenset({"reason"}), "proposal": frozenset(),
-            "confirm": frozenset(), "replaces": frozenset()}
+            "confirm": frozenset(), "replaces": frozenset(), "scan": frozenset(), "advice": frozenset()}
 STORE_FIELDS = frozenset({"id", "seq", "ts", "schemaVersion", "type"})
 OUTCOMES = ("withdrawn", "untracked", "superseded")
 
@@ -95,6 +113,8 @@ def validate(rec: object) -> list[str]:
         errs.append(f"{kind}: written by {rec['by']!r}, but only the {WRITERS[kind]} may write one")
     if not isinstance(rec["nonce"], str) or not S.NONCE.match(rec["nonce"]):
         errs.append(f"{kind}: nonce must be 8-64 of [A-Za-z0-9_-]")
+    if kind == "scan":
+        return errs + _scan_shape(rec)
     for f in ("qid",) + (("replaces",) if kind == "replaces" else ()):
         if not isinstance(rec[f], str) or not S.QID.match(rec[f]):
             errs.append(f"{kind}: {f} {rec[f]!r} is not <itemId>/Q<n>")
@@ -110,6 +130,24 @@ def validate(rec: object) -> list[str]:
         errs += [f"proposal: {m}" for m in S._text(rec, "basis")]
     if kind == "replaces" and rec["qid"] == rec["replaces"]:
         errs.append("replaces: a question cannot replace itself")
+    if kind == "advice":
+        if rec["star"] not in ADVICE_STARS:
+            errs.append(f"advice: star {rec['star']!r} is not one of {', '.join(ADVICE_STARS)}")
+        errs += [f"advice: {m}" for m in S._text(rec, "evidence")]
+    return errs
+
+
+def _scan_shape(rec: dict) -> list[str]:
+    qids, locks = rec["qids"], rec["locks"]
+    if not isinstance(qids, list) or not 1 <= len(qids) <= MAX_SCAN:
+        return [f"scan: qids must be a list of 1 to {MAX_SCAN} rulings"]
+    if not isinstance(locks, list) or len(locks) != len(qids):
+        return ["scan: locks must be a list with one lock per qid, in the same order"]
+    errs = [f"scan: qid {q!r} is not <itemId>/Q<n>" for q in qids if not isinstance(q, str) or not S.QID.match(q)]
+    errs += [f"scan: lock {k!r} is not a store record id (24 lowercase hex)" for k in locks
+             if not isinstance(k, str) or not S.RECORD_ID.match(k)]
+    if not errs and len(set(qids)) != len(qids):
+        errs.append("scan: qids repeat")
     return errs
 
 
@@ -183,7 +221,7 @@ class Log:
             self._index(rec)
 
     def _refuse(self, why: str) -> None:
-        self.problem = (f"{FILE} {why}, so it is not read: withdraw, keep, confirm and replace are refused "
+        self.problem = (f"{FILE} {why}, so it is not read: withdraw, keep, confirm, replace and scan are refused "
                         f"until it is fixed or moved aside, and every answer reads as if it held nothing")
         sys.stderr.write(f"console refactor: {self.folder / FILE}: {why}\n")
 
@@ -235,15 +273,15 @@ class Log:
     # -- the rules that need the store ---------------------------------------------------
 
     def _check_rules(self, rec: dict, store) -> None:
-        kind, qid = rec["type"], rec["qid"]
+        kind = rec["type"]
+        if kind == "scan":
+            for qid, lock in zip(rec["qids"], rec["locks"]):
+                self._check_lock(store, qid, lock)
+            return None
+        qid = rec["qid"]
         if kind == "replaces":
             return self._check_replaces(rec, store)
-        lk = current_lock(store, qid)
-        if lk is None or lk["id"] != rec["lock"]:
-            raise RefactorError(f"lock {rec['lock']} is not the current lock of {qid}; reload, the answer changed")
-        out = outcome(store, qid)
-        if out is not None:
-            raise RefactorError(f"{qid} is already {out['kind']} ({out['at']}); nothing more is done to this lock")
+        self._check_lock(store, qid, rec["lock"])
         if kind == "confirm":
             p = self._by_id.get(rec["proposal"])
             if p is None or p["type"] != "proposal" or p["qid"] != qid or p["lock"] != rec["lock"]:
@@ -255,6 +293,15 @@ class Log:
             if latest is None or latest["id"] != p["id"]:
                 raise RefactorError(f"proposal {p['id'][:8]} is no longer the latest for {qid}; reload, check the "
                                     f"newer one, and confirm again")
+
+    @staticmethod
+    def _check_lock(store, qid: str, lock: str) -> None:
+        lk = current_lock(store, qid)
+        if lk is None or lk["id"] != lock:
+            raise RefactorError(f"lock {lock} is not the current lock of {qid}; reload, the answer changed")
+        out = outcome(store, qid)
+        if out is not None:
+            raise RefactorError(f"{qid} is already {out['kind']} ({out['at']}); nothing more is done to this lock")
 
     def _check_replaces(self, rec: dict, store) -> None:
         if store.question(rec["qid"]) is None:
@@ -318,6 +365,55 @@ def replaces_of(store, qid: str) -> dict | None:
     return _latest(store, "replaces", qid=qid)
 
 
+def advice_of(store, lock_id: str) -> dict | None:
+    """The steward's latest advice (withdraw or keep, with evidence) for this lock."""
+    return _latest(store, "advice", lock=lock_id)
+
+
+def scan_answer(store, scan: dict, qid: str, lock: str) -> dict | None:
+    """The first proposal, advice or `replaces` naming `qid` and `lock`, written after `scan`; else None."""
+    log = _log(store)
+    if log is None:
+        return None
+    for r in log._records:
+        if r["seq"] <= scan["seq"]:
+            continue
+        if (r["type"] in ("proposal", "advice") and r["qid"] == qid and r["lock"] == lock) or \
+                (r["type"] == "replaces" and r["replaces"] == qid and r["lock"] == lock):
+            return r
+    return None
+
+
+def scan_status(store, scan: dict, stale: Callable[[str], bool]) -> dict:
+    """Where each ruling `scan` names stands, and whether the scan is `done`.
+
+    `rulings` maps each qid to {"answered": record id, "by": its type},
+    {"settled": True}, or {} while it waits. `stale(qid)` says whether the
+    ruling is stale NOW (the view reads the files). A ruling no longer stale,
+    or locked again under a new lock, is settled: nothing is left to find.
+    """
+    rulings = {}
+    for qid, lock in zip(scan["qids"], scan["locks"]):
+        lk = current_lock(store, qid)
+        if lk is None or lk["id"] != lock or not stale(qid):
+            rulings[qid] = {"settled": True}
+            continue
+        a = scan_answer(store, scan, qid, lock)
+        rulings[qid] = {"answered": a["id"], "by": a["type"]} if a is not None else {}
+    return {"rulings": rulings, "done": all(rulings.values())}
+
+
+def scans(store) -> list[dict]:
+    """Every scan the owner asked for, oldest first."""
+    log = _log(store)
+    return [] if log is None else [r for r in log._records if r["type"] == "scan"]
+
+
+def open_scans(store, stale: Callable[[str], bool]) -> list[dict]:
+    """The scans not yet done, oldest first."""
+    return [s for s in scans(store) if not scan_status(store, s, stale)["done"]]
+
+
 def outcome(store, qid: str) -> dict | None:
     """What became of `qid`'s current lock, or None: {kind, by, at, record, reason? | replaced_by?}.
 
@@ -362,6 +458,9 @@ def summary(store, qid: str) -> dict:
         link = replacement_of(store, qid)
         if link is not None:
             out["replaced_by"] = link["qid"]
+        a = advice_of(store, lk["id"])
+        if a is not None:
+            out["advice"] = {k: a[k] for k in ("id", "ts", "star", "evidence")}
     back = replaces_of(store, qid)
     if back is not None:
         out["replaces"] = back["replaces"]

@@ -3494,7 +3494,7 @@ class OneServerTests(_OneServer, unittest.TestCase):
     AGENT_GETS = ("/view", "/check", "/health", "/history-wants", "/no-such-route")
     AGENT_POSTS = ("/items", "/prs", "/cursor", "/working", "/reanchor", "/visual", "/visual-export", "/question",
                    "/message", "/transcript", "/history-blob", "/history-specs", "/page-snapshot", "/anchor-proposal",
-                   "/no-such-route")
+                   "/refactor-advice", "/no-such-route")
 
     def test_the_seam_is_the_only_admission_point(self):
         # K4 replaces `authorize` alone, so this is behaviour, not source text: with `authorize` refusing, EVERY
@@ -7017,6 +7017,246 @@ class RefactorTests(_Live, unittest.TestCase):
         self.assertEqual(sum(1 for q in view["view"]["questions"].values() if q.get("refactor", {}).get("proposal")), 6)
         todo = json.dumps(VW.todo(view["view"]))
         self.assertLess(len(todo.encode("utf-8")), 64 * 1024)
+
+
+# -- CONSOLE-kit/Q40, Q41: scan for a resolve ---------------------------------------------------------------
+
+class ScanTests(_Live, unittest.TestCase):
+    """Q40 button_now, Q41 side file: the owner asks, the steward answers, the owner still decides."""
+
+    QID, QID3 = "LANE.1/Q2", "LANE.1/Q3"
+    setUp = RefactorTests.setUp
+    act = RefactorTests.act
+    view_q = RefactorTests.view_q
+
+    def second_ruling(self):
+        """LANE.1/Q3, locked against RULE-BETA, so both rulings go stale together in `stale_both`."""
+        q = {"qid": self.QID3, "item": "LANE.1", "text": "Is RULE-BETA still the rule?", "kind": "single",
+             "options": [{"id": "a", "label": "Yes"}, {"id": "b", "label": "No"}], "star": "a",
+             "valid_if": [{"kind": "excerpt", "path": "rules.md", "text": "RULE-BETA: the console never runs"}],
+             "source": "rules.md:4", "nonce": "rxask000003"}
+        self.assertEqual(self.agent_post("/question", q)[0], 200)
+        code, a = self.req("POST", "/api/answer", self.answer(qid=self.QID3, nonce="rxanswer03"), tok=token())
+        self.assertEqual(code, 200, a)
+        code, lk = self.req("POST", "/api/lock", {"qid": self.QID3, "answer": a["record"]["id"], "nonce": "rxlock0003"},
+                            tok=token())
+        self.assertEqual(code, 200, lk)
+        self.lock3 = lk["record"]["id"]
+
+    def stale_both(self):
+        (self.cfg.root / "rules.md").write_text(
+            RULES.replace("every release is reviewed by a second agent", "a release ships after one review")
+                 .replace("the console never runs", "the console may run") + "RULE-GAMMA: answers are owner-locked.\n")
+
+    def scan(self, qids, locks, **kw):
+        return self.act({"action": "scan", "qids": qids, "locks": locks, **kw})
+
+    def advise(self, qid, star="withdraw", evidence="RULE-ALPHA was dropped in the rules rewrite; nothing replaced it"):
+        return self.agent_post("/refactor-advice", {"qid": qid, "star": star, "evidence": evidence,
+                                                    "nonce": "rxadv" + os.urandom(4).hex()})
+
+    def rx_lines(self):
+        p = self.cfg.state / "refactor.jsonl"
+        return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+
+    def todo(self):
+        from console_kit import view as VW
+        code, view = SV.agent_request(self.cfg.socket, "GET", "/view")
+        self.assertEqual(code, 200, view)
+        return VW.todo(view["view"])
+
+    # -- property 2: one owner record, nothing changed --------------------------------------------------
+
+    def test_scan_all_is_one_record_naming_every_stale_ruling_and_changes_nothing(self):
+        # Catches: N records for "scan all" (one per ruling), a scan that writes into store.jsonl (an older kit
+        # would refuse to start), a scan that touches a ruling (withdraws, re-anchors, locks), and a "scan all"
+        # that misses a ruling gone stale after the page loaded.
+        self.second_ruling()
+        self.stale_both()
+        store_before = self.cfg.store.read_bytes()
+        code, out = self.scan([self.QID], [self.lock_id], all=True)
+        self.assertEqual(code, 409, out)
+        self.assertIn(self.QID3, out["error"])
+        self.assertEqual(self.rx_lines(), [])
+        code, out = self.scan([self.QID, self.QID3], [self.lock_id, self.lock3], all=True)
+        self.assertEqual(code, 200, out)
+        recs = self.rx_lines()
+        self.assertEqual([(r["type"], r["by"], r["qids"], r["locks"]) for r in recs],
+                         [("scan", "owner", [self.QID, self.QID3], [self.lock_id, self.lock3])])
+        self.assertEqual(self.cfg.store.read_bytes(), store_before)
+        view, q2 = self.view_q()
+        self.assertEqual((q2["state"], view["questions"][self.QID3]["state"]), ("stale", "stale"))
+        self.assertNotIn("outcome", q2.get("refactor", {}))
+
+    def test_a_scan_names_only_stale_rulings_with_the_locks_the_owner_saw(self):
+        # Catches: a scan of a ruling that holds (nothing to resolve), and one taken on a page from before a re-lock.
+        code, out = self.scan([self.QID], [self.lock_id])
+        self.assertEqual(code, 409, out)
+        self.assertIn("is not stale", out["error"])
+        RefactorTests.go_stale(self)
+        code, out = self.scan([self.QID], ["0" * 24])
+        self.assertEqual(code, 409, out)
+        self.assertIn("is not the current lock", out["error"])
+        self.assertEqual(self.rx_lines(), [])
+
+    # -- property 5: a second press while one is open is refused, by name --------------------------------
+
+    def test_a_second_scan_while_one_is_open_is_refused_naming_it_and_a_retry_is_the_first(self):
+        # Catches: a second scan queued behind the first, a refusal that does not say which scan is open or what
+        # it waits on, and a retried press (same nonce) refused or written twice.
+        self.second_ruling()
+        self.stale_both()
+        body = {"action": "scan", "qids": [self.QID, self.QID3], "locks": [self.lock_id, self.lock3],
+                "nonce": "rxscan00001"}
+        code, first = self.act(body)
+        self.assertEqual(code, 200, first)
+        self.assertEqual(self.act(body), (200, first))   # the retry is the record that landed
+        code, out = self.scan([self.QID], [self.lock_id])
+        self.assertEqual(code, 409, out)
+        self.assertIn(f"scan {first['record']['id'][:8]}", out["error"])
+        self.assertIn("still open", out["error"])
+        self.assertIn(f"{self.QID}, {self.QID3}", out["error"])
+        self.assertEqual(len(self.rx_lines()), 1)
+        self.assertEqual(len([b for b in self.doorbell() if b.get("intent") == "scan"]), 1)
+
+    # -- property 3: the done-rule -------------------------------------------------------------------------
+
+    def test_a_scan_is_done_once_every_ruling_is_answered_after_it_or_settled(self):
+        # Catches: a scan done at once (nothing to wait for), one never done (sits in todo forever), an answer
+        # written BEFORE the scan counted as its answer, and a ruling the owner settled still waiting.
+        self.second_ruling()
+        self.stale_both()
+        self.assertEqual(self.advise(self.QID)[0], 200)            # before the scan: does not answer it
+        code, sc = self.scan([self.QID, self.QID3], [self.lock_id, self.lock3])
+        self.assertEqual(code, 200, sc)
+        sid = sc["record"]["id"]
+        self.assertEqual(self.todo()["scans"], [{"id": sid, "ts": sc["record"]["ts"],
+                                                 "waiting": [self.QID, self.QID3]}])
+        code, adv = self.advise(self.QID, star="keep", evidence="RULE-ALPHA's premise holds under its new wording")
+        self.assertEqual(code, 200, adv)
+        self.assertEqual(self.todo()["scans"][0]["waiting"], [self.QID3])
+        view, _ = self.view_q()
+        self.assertEqual(view["scans"][sid]["rulings"][self.QID], {"answered": adv["record"]["id"], "by": "advice"})
+        self.assertEqual(self.act({"action": "withdraw", "qid": self.QID3, "lock": self.lock3,
+                                   "reason": "RULE-BETA is gone"})[0], 200)
+        self.assertEqual(self.todo()["scans"], [])
+        view, _ = self.view_q()
+        self.assertTrue(view["scans"][sid]["done"])
+        self.assertEqual(view["scans"][sid]["rulings"][self.QID3], {"settled": True})
+        self.assertEqual(self.scan([self.QID], [self.lock_id])[0], 200)   # the next scan may be asked now
+
+    def test_a_proposal_or_a_replacement_answers_a_ruling(self):
+        # Catches: a done-rule that knows only the new advice kind, not the existing proposal and replaces.
+        self.second_ruling()
+        self.stale_both()
+        code, sc = self.scan([self.QID, self.QID3], [self.lock_id, self.lock3])
+        self.assertEqual(code, 200, sc)
+        sid = sc["record"]["id"]
+        code, p = self.agent_post("/anchor-proposal", {"qid": self.QID3, "cites": ["rules.md:7"],
+                                                       "basis": "RULE-GAMMA carries it", "nonce": "rxprop00003"})
+        self.assertEqual(code, 200, p)
+        q = {"qid": "LANE.1/Q4", "item": "LANE.1", "text": "What is the review rule now?", "kind": "single",
+             "options": [{"id": "a", "label": "One review"}, {"id": "b", "label": "Two"}], "star": "a",
+             "valid_if": [], "source": "rules.md:3", "replaces": self.QID, "nonce": "rxrepl00004"}
+        self.assertEqual(self.agent_post("/question", q)[0], 200)
+        view, _ = self.view_q()
+        st = view["scans"][sid]
+        self.assertEqual((st["rulings"][self.QID3]["by"], st["rulings"][self.QID]["by"]), ("proposal", "replaces"))
+        self.assertTrue(st["done"])
+        self.assertEqual(view["questions"][self.QID]["state"], "stale")   # answered, still nothing decided
+
+    # -- the doorbell: watch wakes, the second cursor -------------------------------------------------------
+
+    def test_a_scan_rings_a_line_that_wakes_a_watch_until_the_agent_marks_its_rx(self):
+        # Catches: a scan that rings nothing (watch never wakes), a line keyed only by the store seq (the
+        # agent's cursor is already there, so it would never wake), and an rx line that wakes forever.
+        from console_kit import doorbell as D
+        RefactorTests.go_stale(self)
+        D.write_cursor(self.cfg.state, self.console.store.seq())   # the agent is up to date with the store
+        code, sc = self.scan([self.QID], [self.lock_id])
+        self.assertEqual(code, 200, sc)
+        line = [b for b in self.doorbell() if b.get("intent") == "scan"]
+        self.assertEqual([(b["type"], b["rx"], b["seq"]) for b in line],
+                         [("scan", sc["record"]["seq"], self.console.store.seq())])
+        since, rx = D.read_cursor(self.cfg.state), D.read_rx_cursor(self.cfg.state)
+        self.assertEqual([b["rx"] for b in D.watch(self.cfg.inbox, since, rx_since=rx, timeout=0)],
+                         [sc["record"]["seq"]])
+        r = subprocess.run([sys.executable, AGENT_PY, "--state", str(self.cfg.state), "synced", "--rx-through",
+                            str(sc["record"]["seq"])], capture_output=True, text=True, timeout=60, env=GIT_ENV)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(D.read_cursor(self.cfg.state), since)    # the store cursor did not move
+        self.assertEqual(D.watch(self.cfg.inbox, since, rx_since=D.read_rx_cursor(self.cfg.state), timeout=0), [])
+
+    # -- property 4 and the doors: nothing changes until the owner presses ------------------------------------
+
+    def test_advice_changes_nothing_and_neither_door_gains_the_others_act(self):
+        # Catches: advice that withdraws or keeps the ruling by itself, a scan the agent can ask (its own
+        # doorbell), advice the owner door takes (an owner "recommendation" is a ruling), and advice on a
+        # ruling that is not stale.
+        code, out = self.advise(self.QID)
+        self.assertEqual(code, 409, out)
+        self.assertIn("is not stale", out["error"])
+        RefactorTests.go_stale(self)
+        store_before = self.cfg.store.read_bytes()
+        code, adv = self.advise(self.QID, star="withdraw")
+        self.assertEqual(code, 200, adv)
+        self.assertEqual(self.cfg.store.read_bytes(), store_before)
+        _, q = self.view_q()
+        self.assertEqual(q["state"], "stale")
+        self.assertNotIn("outcome", q["refactor"])
+        self.assertEqual({k: q["refactor"]["advice"][k] for k in ("star", "evidence")},
+                         {"star": "withdraw",
+                          "evidence": "RULE-ALPHA was dropped in the rules rewrite; nothing replaced it"})
+        code, out = self.advise(self.QID, star="drop")
+        self.assertEqual(code, 409, out)   # the log refuses the shape: not one of withdraw, keep
+        self.assertIn("star 'drop'", out["error"])
+        code, out = SV.agent_request(self.cfg.socket, "POST", "/refactor", {"action": "scan", "qids": [self.QID],
+                                                                             "locks": [self.lock_id], "nonce": "x" * 9})
+        self.assertEqual(code, 404, out)
+        code, out = self.req("POST", "/api/refactor-advice", {"qid": self.QID, "star": "keep", "evidence": "e",
+                                                              "nonce": "rxownadv01"}, tok=token())
+        self.assertIn(code, (403, 404), out)
+        self.assertEqual([r["type"] for r in self.rx_lines()], ["advice"])
+
+    # -- Q41: an older kit -------------------------------------------------------------------------------
+
+    def test_an_older_kit_reads_the_side_file_as_unreadable_and_still_loads_the_store(self):
+        # Q41's accepted cost, measured with the kit as released at v0.8.15. Catches: scan or advice written
+        # into store.jsonl (that kit would refuse to start), and a side file the older kit reads PART of (a
+        # kept ruling reading "kept" while the scan beside it is silently dropped). Stale stays stale.
+        repo = Path(SV.__file__).resolve().parents[3]
+        if not (repo / ".git").exists():
+            self.skipTest("not a git checkout")
+        self.second_ruling()
+        self.stale_both()
+        self.assertEqual(self.act({"action": "untrack", "qid": self.QID3, "lock": self.lock3})[0], 200)
+        self.assertEqual(self.scan([self.QID], [self.lock_id])[0], 200)
+        self.assertEqual(self.advise(self.QID)[0], 200)
+        old = Path(tempfile.mkdtemp(prefix="ck-old-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(old, ignore_errors=True))
+        arc = subprocess.run(["git", "-C", str(repo), "archive", "v0.8.15", "plugin/kit/console_kit"],
+                             capture_output=True, timeout=60)
+        self.assertEqual(arc.returncode, 0, arc.stderr)
+        subprocess.run(["tar", "-x", "-C", str(old)], input=arc.stdout, check=True, timeout=60)
+        probe = old / "probe.py"
+        probe.write_text(
+            "import json, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "from pathlib import Path\n"
+            "from console_kit import store as ST, view as V\n"
+            "st = ST.Store(Path(sys.argv[2]))\n"
+            "holds = V.make_evaluator(Path(sys.argv[3]), {})\n"
+            "qs = {r['qid']: V.question_state(st, r, holds) for r in st.records() if r['type'] == 'question'}\n"
+            "print(json.dumps({'problem': st.refactor.problem, 'states': qs}))\n")
+        r = subprocess.run([sys.executable, str(probe), str(old / "plugin" / "kit"), str(self.cfg.store),
+                            str(self.cfg.root)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)   # the store loads: the older kit starts
+        got = json.loads(r.stdout)
+        self.assertIn("unknown refactor record type 'scan'", got["problem"])
+        self.assertEqual((got["states"][self.QID], got["states"][self.QID3]), ("stale", "stale"))
+        view, _ = self.view_q()   # this kit: the kept ruling reads kept (locked), the scanned one stale
+        self.assertEqual((view["questions"][self.QID]["state"], view["questions"][self.QID3]["state"]),
+                         ("stale", "locked"))
 
 
 # -- Pull requests: pushed by the steward's gh, as data; the server never talks to GitHub -------------------

@@ -135,7 +135,11 @@ WHOLE_FILE_MAX_LINES = 100
 # The owner's refactor acts on a stale answer (CONSOLE-kit/Q30, Q31): the body each one takes.
 REFACTOR_BODIES = {"withdraw": {"action", "qid", "lock", "reason", "nonce"},
                    "untrack": {"action", "qid", "lock", "reason", "nonce"},
-                   "confirm": {"action", "qid", "proposal", "nonce"}}
+                   "confirm": {"action", "qid", "proposal", "nonce"},
+                   # CONSOLE-kit/Q40, Q41: the rulings the owner was shown, each with its lock. `all` says the page
+                   # meant EVERY stale ruling, so one that went stale since the page loaded is refused, not missed.
+                   "scan": {"action", "qids", "locks", "all", "nonce"}}
+REFACTOR_OPTIONAL = frozenset({"reason", "all"})
 SECURITY_HEADERS = (
     ("Cache-Control", "no-store"),
     ("X-Content-Type-Options", "nosniff"),
@@ -948,10 +952,12 @@ class Console:
         """
         action = body.get("action") if isinstance(body, dict) else None
         keys = REFACTOR_BODIES.get(action) if isinstance(action, str) else None
-        if keys is None or not set(body) <= keys or not keys - {"reason"} <= set(body):
+        if keys is None or not set(body) <= keys or not keys - REFACTOR_OPTIONAL <= set(body):
             raise RequestError(400, 'refactor takes {"action": "withdraw"|"untrack", "qid", "lock", "reason", '
-                                    '"nonce"} or {"action": "confirm", "qid", "proposal", "nonce"}; withdraw needs '
-                                    'a reason')
+                                    '"nonce"}, {"action": "confirm", "qid", "proposal", "nonce"} or {"action": '
+                                    '"scan", "qids", "locks", "all"?, "nonce"}; withdraw needs a reason')
+        if action == "scan":
+            return self._scan(body)
         if action == "withdraw" and "reason" not in body:
             raise RequestError(400, "withdraw needs the owner's reason: why this ruling no longer applies")
         self._refactor_problem()
@@ -976,6 +982,86 @@ class Console:
                 self._confirm_check(body, q, lk, conds, tree)
             rec = self._rx_append(rec)
         # No doorbell line: the doorbell's seq is the store's, and nothing here asks the agent to act.
+        return {"record": rec}
+
+    def _stale_now(self, items: dict[str, dict]):
+        """A function saying whether a ruling is stale NOW: locked, not settled, and a condition failing."""
+        tree = A.Tree(self.cfg.root, self._status(items))
+
+        def stale(qid: str) -> bool:
+            q = self.store.question(qid)
+            if q is None or RX.current_lock(self.store, qid) is None or RX.outcome(self.store, qid) is not None:
+                return False
+            conds, _ = A.conditions_for(self.store, q)
+            return not all(tree.holds(c) for c in conds)
+        return stale
+
+    def _scan(self, body: dict) -> dict:
+        """The owner asks the steward to scan stale rulings for a resolve (CONSOLE-kit/Q40, Q41). Changes nothing.
+
+        One record names every ruling (a "Scan all stale" is one request, never
+        N), each with the lock the owner was shown. A second scan while one is
+        still open is refused by name: the open one answers first. It rings the
+        doorbell, so a watching steward wakes.
+        """
+        if body.get("all") not in (None, True):
+            raise RequestError(400, "all is true or left out")
+        self._refactor_problem()
+        rec = {"type": "scan", "by": "owner", "qids": body["qids"], "locks": body["locks"], "nonce": body["nonce"]}
+        errs = RX.validate({**rec, "schemaVersion": RX.SCHEMA_VERSION})
+        if errs:
+            raise RequestError(400, "; ".join(errs))
+        with self._lock:
+            done = self.store.refactor.existing(rec)
+            if done is not None:
+                return {"record": done}   # a retry of a scan that landed: rings nothing again
+            items = self.items()
+            stale = self._stale_now(items)
+            for qid in rec["qids"]:
+                self._stale_lock(qid, items, "scanned")
+            if body.get("all"):
+                every = sorted(r["qid"] for r in self.store.records() if r["type"] == "question" and stale(r["qid"]))
+                missed = sorted(set(every) - set(rec["qids"]))
+                if missed:
+                    raise RequestError(409, f"{', '.join(missed)} went stale after the page loaded; reload, so the "
+                                            f"scan names every stale ruling")
+            for o in RX.open_scans(self.store, stale):
+                st = RX.scan_status(self.store, o, stale)["rulings"]
+                left = [q for q, v in st.items() if not v]
+                raise RequestError(409, f"scan {o['id'][:8]} asked on {o['ts']} is still open: {len(left)} of "
+                                        f"{len(st)} rulings wait on the steward ({', '.join(left)}). It answers "
+                                        f"before another scan is asked")
+            rec = self._rx_append(rec)
+            self._ring_refactor(rec)
+        return {"record": rec}
+
+    def _ring_refactor(self, rec: dict) -> None:
+        """A doorbell line for a refactor record that asks the agent to act (a scan).
+
+        The doorbell's `seq` is the store's, and a scan writes nothing there, so
+        the line carries the store's seq as it stands and its own `rx` (the
+        refactor seq). `watch` wakes on an `rx` past the agent's `rx_through`.
+        """
+        line = {"seq": self.store.seq(), "type": rec["type"], "ts": rec["ts"], "intent": rec["type"],
+                "rx": rec["seq"], "qids": len(rec["qids"])}
+        with open(self.cfg.inbox, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(line, sort_keys=True) + "\n")
+
+    def advise(self, body: object, agent: str | None = None) -> dict:
+        """The steward's star recommendation for a stale ruling: withdraw or keep, with evidence (Q40, Q41).
+
+        Agent door only, and it changes nothing: the ruling stays stale and in
+        force until the owner presses Withdraw or Keep, which stay the owner's.
+        """
+        if not isinstance(body, dict) or set(body) != {"qid", "star", "evidence", "nonce"}:
+            raise RequestError(400, 'refactor-advice takes {"qid", "star": "withdraw"|"keep", "evidence", "nonce"}')
+        self._refactor_problem()
+        with self._lock:
+            items = self.items()
+            q, lk, _conds, _tree = self._stale_lock(body["qid"], items, "advised on")
+            rec = self._rx_append({"type": "advice", "by": "agent", "qid": q["qid"], "lock": lk["id"],
+                                   "star": body["star"], "evidence": body["evidence"], "nonce": body["nonce"]})
+            self._name(rec, agent)
         return {"record": rec}
 
     def _confirm_check(self, body: dict, q: dict, lk: dict, conds: list[dict], tree: A.Tree) -> None:
@@ -1798,6 +1884,8 @@ class AgentHandler(_Handler):
                 return self._send(200, self.console.push_history_specs(self._body()))
             if self.path == "/anchor-proposal":   # Q31: a proposal only; confirming it is the owner's
                 return self._send(200, self.console.propose_anchor(self._body(), agent))
+            if self.path == "/refactor-advice":   # Q40/Q41: a recommendation only; Withdraw and Keep are the owner's
+                return self._send(200, self.console.advise(self._body(), agent))
             if self.path == "/items":   # Q24: the ONLY way items reach a server; the adapter ran in the steward
                 return self._send(200, self.console.push_items(self._body()))
             if self.path == "/prs":   # the ONLY way pull requests reach a server; gh ran in the steward

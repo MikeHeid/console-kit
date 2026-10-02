@@ -50,7 +50,7 @@ import tempfile
 import time
 from pathlib import Path
 
-WAKE_INTENTS = ("process", "fork", "chat", "visual")     # console_kit/doorbell.py
+WAKE_INTENTS = ("process", "fork", "chat", "visual", "scan")     # console_kit/doorbell.py
 CURSOR_FILE = "agent-cursor.json"      # console_kit/doorbell.py
 MAX_DOORBELL = 64 << 20                # console_kit/doorbell.py
 MAX_CURSOR = 4096                      # console_kit/doorbell.py
@@ -376,17 +376,26 @@ def steward_line(e: dict, agent: str, me: str | None = None) -> tuple[str | None
             f"inbox, and the steward, who asks the owner live, mirrors each live answer to the console."), False
 
 
-def _cursor(state: Path) -> int:
+def _cursor(state: Path, key: str = "through") -> int:
     try:
         data = _read_regular(state / CURSOR_FILE, MAX_CURSOR)
-        v = json.loads(data.decode("utf-8")).get("through", 0) if data is not None else 0
+        v = json.loads(data.decode("utf-8")).get(key, 0) if data is not None else 0
     except (OSError, ValueError, AttributeError):
         return 0
     return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
 
 
-def _waiting(bell: Path, since: int) -> list[dict]:
-    """The owner's requests after `since`: complete lines only, damaged ones skipped, as the kit reads them."""
+def _rx_cursor(state: Path) -> int:
+    return _cursor(state, "rx_through")
+
+
+def _rx(r: dict) -> int | None:
+    v = r.get("rx")
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def _waiting(bell: Path, since: int, rx_since: int = 0) -> list[dict]:
+    """The owner's requests after `since` (a scan's: after `rx_since`), as the kit reads them (doorbell.pending)."""
     data = _read_regular(bell, MAX_DOORBELL)
     if data is None:
         return []
@@ -399,7 +408,8 @@ def _waiting(bell: Path, since: int) -> list[dict]:
         except ValueError:
             continue
         if (isinstance(rec, dict) and isinstance(rec.get("seq"), int) and not isinstance(rec["seq"], bool)
-                and rec["seq"] > since and rec.get("intent") in WAKE_INTENTS):
+                and (rec["seq"] > since if _rx(rec) is None else _rx(rec) > rx_since)
+                and rec.get("intent") in WAKE_INTENTS):
             out.append(rec)
     return out
 
@@ -416,7 +426,7 @@ def context(project: Path, sid: str | None = None) -> str | None:
             return None
         state, kit = Path(e["state"]), Path(e["kit"])
         cursor = _cursor(state)
-        wake = _waiting(state / "inbox.jsonl", cursor)
+        wake = _waiting(state / "inbox.jsonl", cursor, _rx_cursor(state))
     except (Unsafe, OSError) as err:
         return f"Owner console: not checked, because {err}. See `agent.py register` (spec §7.7)."
     agent = f"python3 {kit / 'agent.py'} --state {state}"
@@ -439,16 +449,22 @@ def context(project: Path, sid: str | None = None) -> str | None:
         if r["intent"] == "chat":  # the chat is not a register item (0.7.0)
             lines.append(f"- seq {r['seq']} ({_shown(r.get('ts'), TS)}): answer the owner's chat message")
             continue
+        if r["intent"] == "scan":  # CONSOLE-kit/Q40: stale rulings to answer; numbered by `rx`, not by the store
+            n = r.get("qids")
+            lines.append(f"- rx {_rx(r)} ({_shown(r.get('ts'), TS)}): answer the owner's scan for a resolve"
+                         + (f" ({n} stale ruling{'' if n == 1 else 's'})" if isinstance(n, int) and
+                            not isinstance(n, bool) else ""))
+            continue
         what = {"process": "process the answers", "visual": "draw the visual the owner asked for"}.get(
             r["intent"], "run a deliberation round")
         lines.append(f"- seq {r['seq']} ({_shown(r.get('ts'), TS)}): {what} on `{_shown(r.get('item'), ITEM_ID)}`")
     if len(wake) > MAX_LISTED:
         lines.append(f"- … and {len(wake) - MAX_LISTED} more (`{agent} inbox`)")
     lines += ["",
-              "Use the console-process skill for `process` and `chat`, the console-fork skill for `fork`, "
-              "and the console-visual skill for `visual`. "
+              "Use the console-process skill for `process`, `chat` and `scan`, the console-fork skill for "
+              "`fork`, and the console-visual skill for `visual`. "
               f"`{agent} inbox` lists them; after handling one, `{agent} synced --through SEQ` "
-              "records it so it is not offered again.", "", ask]
+              "(a scan: `--rx-through RX`) records it so it is not offered again.", "", ask]
     return "\n".join(lines)
 
 

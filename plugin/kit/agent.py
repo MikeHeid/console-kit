@@ -52,7 +52,7 @@
                                                 show the owner "agent active" on these items; this
                                                 session's next `synced` clears it (0.8.2: only its own
                                                 marks, by --as name), and it lapses after an hour
-    agent.py --state DIR synced [--through SEQ] [--error MSG]
+    agent.py --state DIR synced [--through SEQ] [--rx-through RX] [--error MSG]
                                                 record that the agent has processed the doorbell up to SEQ
     agent.py --state DIR costs collect | show --fork RECORD_ID
                                                 collect: sum this project's subagent transcripts (usage, id
@@ -836,6 +836,15 @@ def main(argv=None) -> int:
     s.add_argument("--cite", action="append", required=True, metavar="PATH:FIRST-LAST",
                    help="lines the ruling rests on, read by the server; repeat for up to 4")
     s.add_argument("--basis", required=True, help="why these lines carry the ruling now, shown to the owner")
+    s = sub.add_parser("advise", description=(
+        "Answer a scan for a resolve (CONSOLE-kit/Q40) with a star recommendation for one stale ruling: withdraw "
+        "it or keep it, with the evidence. It changes nothing; the owner's own Withdraw or Keep does. Prefer "
+        "`propose-anchor` when the ruling's premise moved to lines that still carry it, and `ask` with "
+        "\"replaces\" when the question itself must be asked again."))
+    s.add_argument("qid")
+    s.add_argument("--star", required=True, choices=("withdraw", "keep"))
+    s.add_argument("--evidence", required=True,
+                   help="where the cited text went, whether the premise holds, and what replaced it")
     s = sub.add_parser("transcript")
     s.add_argument("fork")
     s.add_argument("file", type=Path)
@@ -862,6 +871,7 @@ def main(argv=None) -> int:
     s.add_argument("items", nargs="+", help="the item ids this session is now working on")
     s = sub.add_parser("synced")
     s.add_argument("--through", type=int)
+    s.add_argument("--rx-through", type=int, help="the highest `rx` among the scan lines processed (Q40)")
     s.add_argument("--error")
     s = sub.add_parser("register")
     s.add_argument("--project", type=Path, required=True)
@@ -1033,7 +1043,8 @@ def _run(a, bell: Path) -> int:
             return 1
     if a.cmd == "inbox":
         since = 0 if a.all else (a.since if a.since is not None else D.read_cursor(a.state))
-        for line in D.pending(bell, since, intents=None):
+        rx_since = 0 if a.all else D.read_rx_cursor(a.state)
+        for line in D.pending(bell, since, intents=None, rx_since=rx_since):
             print(json.dumps(line, sort_keys=True))
         return 0
     if a.cmd == "watch":
@@ -1044,13 +1055,14 @@ def _run(a, bell: Path) -> int:
         # "listening" until the promise lapses. SIGKILL cannot be caught: that is the lapse's job.
         old = {sig: signal.signal(sig, lambda n, _f: sys.exit(128 + n)) for sig in (signal.SIGTERM, signal.SIGHUP)}
         try:
-            found = D.watch(bell, since, poll=a.poll, timeout=a.timeout, heartbeat=beat)
+            found = D.watch(bell, since, poll=a.poll, timeout=a.timeout, heartbeat=beat,
+                            rx_since=D.read_rx_cursor(a.state))
         finally:  # woken, timed out, or interrupted: the owner is told at once, not when the promise lapses
             beat.stop()
             for sig, h in old.items():
                 signal.signal(sig, h)
         if not found:
-            print(f"no 'process', 'fork', 'chat' or 'visual' signal after seq {since} within {a.timeout:g}s",
+            print(f"no 'process', 'fork', 'chat', 'visual' or 'scan' signal after seq {since} within {a.timeout:g}s",
                   file=sys.stderr)
             return 3
         for line in found:
@@ -1108,6 +1120,9 @@ def _run(a, bell: Path) -> int:
     if a.cmd == "propose-anchor":
         return _call(a.state, "POST", "/anchor-proposal", {"qid": a.qid, "cites": a.cite, "basis": a.basis,
                                                            "nonce": secrets.token_urlsafe(12)}, agent=a.agent)
+    if a.cmd == "advise":
+        return _call(a.state, "POST", "/refactor-advice", {"qid": a.qid, "star": a.star, "evidence": a.evidence,
+                                                           "nonce": secrets.token_urlsafe(12)}, agent=a.agent)
     if a.cmd == "ask":
         for n, f in enumerate(a.files):
             try:
@@ -1123,12 +1138,13 @@ def _run(a, bell: Path) -> int:
         if len(a.files) > 1:
             print(f"posted {len(a.files)} questions", file=sys.stderr)
         return 0
-    if a.through is not None:
-        if a.through < 0:
-            print("--through takes a doorbell seq, 0 or more", file=sys.stderr)
+    if a.through is not None or a.rx_through is not None:
+        if (a.through or 0) < 0 or (a.rx_through or 0) < 0:
+            print("--through and --rx-through take a doorbell seq, 0 or more", file=sys.stderr)
             return 1
-        held = D.write_cursor(a.state, a.through)
-        print(f"agent cursor: processed through seq {held}", file=sys.stderr)
+        held = D.write_cursor(a.state, a.through or 0, a.rx_through)
+        print(f"agent cursor: processed through seq {held}"
+              + (f", refactor seq {D.read_rx_cursor(a.state)}" if a.rx_through is not None else ""), file=sys.stderr)
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return _call(a.state, "POST", "/cursor", {"last_synced_at": now, "last_error": a.error}, agent=a.agent)
 
