@@ -3738,6 +3738,31 @@ class StewardGitWriteFaultTests(unittest.TestCase):
         self.assertEqual(calls, ["openat", "unlinkat"], text[-2000:])   # created, then removed, both dir-relative
         self.assertEqual(safe, 2)
 
+    def test_the_temporary_is_fsynced_before_it_is_renamed_over_the_file(self):
+        # Catches (lane 5 review, LOW): a rename with the bytes still in the page cache, so a crash just after it
+        # can leave the NAME pointing at an empty or partial file. Records the order of fsync and rename on the
+        # temporary's descriptor and name, for both callers' write (steward-git blobs and items.json).
+        from unittest import mock
+        from console_kit import atfile as AF
+        real_fsync, real_rename, order = os.fsync, os.rename, []
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        folder = os.open(tmp.name, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, folder)
+
+        def fsync(fd):
+            order.append(("fsync", os.readlink(f"/proc/self/fd/{fd}").rsplit("/", 1)[-1]))
+            return real_fsync(fd)
+
+        def rename(src, dst, **kw):
+            order.append(("rename", src))
+            return real_rename(src, dst, **kw)
+        with mock.patch("os.fsync", fsync), mock.patch("os.rename", rename):
+            AF.write_at(folder, "f.json", b"{}")
+        self.assertEqual([op for op, _ in order], ["fsync", "rename"], order)
+        self.assertEqual(order[0][1], order[1][1])   # the same temporary: synced, then named
+        self.assertEqual(Path(tmp.name, "f.json").read_bytes(), b"{}")
+
 
 AT_CALLS = {"openat": "open", "openat2": "open", "newfstatat": "stat", "statx": "stat", "fstatat64": "stat",
             "mkdirat": "", "unlinkat": "", "renameat": "", "renameat2": "", "readlinkat": ""}

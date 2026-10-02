@@ -53,6 +53,8 @@ def write_at(folder: int, name: str, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())   # the bytes reach the disk before the name does: a crash leaves old or new, never empty
         os.rename(tmp, name, src_dir_fd=folder, dst_dir_fd=folder)
     except BaseException:
         try:
