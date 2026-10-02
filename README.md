@@ -322,7 +322,25 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   every kit module except those named exceptions, and fails on any other way
   to start one.
 
-### The server runs no project code (owner ruling CONSOLE-kit/Q24)
+### Git history returns, from the steward (0.8.11)
+
+- **What returns.** The panels 0.8.10 marked "unavailable (no git in the
+  server)": `check` naming the version a whole-file hash was locked against,
+  `reanchor`, and refine chips showing a spec's last commit.
+- **How, with still no git in the server.** The steward runs git in its own
+  process and pushes what it found:
+
+      python3 <kit>/agent.py --state <state dir> history-push
+
+  run from inside the project's checkout. It sends file contents keyed by
+  their SHA-256. The server keeps a pushed file only when its hash is one a
+  current lock names, checks it again on every read, and works out the diff
+  and the cited lines itself. A commit id the steward reports is shown
+  "(from the steward)": the server cannot check it.
+- **When nothing has been pushed**, or a key no longer matches, each panel
+  falls back to the 0.8.10 label rather than going blank.
+
+### The server runs no project code (0.8.11, owner ruling CONSOLE-kit/Q24)
 
 - **Why.** The project's adapter is Python an agent can write. A server that
   imported it ran that code at its next restart, outside every agent's jail.
