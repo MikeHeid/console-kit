@@ -2735,14 +2735,14 @@ class ScanUITests(unittest.TestCase):
     RULES = "# Rules\nRULE-ALPHA: every release is reviewed twice.\nRULE-BETA: the console never runs code.\n" \
             "RULE-DELTA: the owner locks answers.\n"
 
-    def ruling(self, n, text):
+    def ruling(self, n, text, **over):
         """LANE.1/Q<n>, answered and locked against the excerpt `text` of rules.md."""
         qid = f"LANE.1/Q{n}"
         self.console.write("question", {
             "qid": qid, "item": "LANE.1", "text": f"Does {text.split(':')[0]} still hold?", "kind": "single",
             "options": [{"id": "a", "label": "Yes"}, {"id": "b", "label": "No"}], "star": "a",
             "valid_if": [{"kind": "excerpt", "path": "rules.md", "text": text}], "source": "rules.md:1",
-            "nonce": f"scanq{n:04d}"}, "agent")
+            "nonce": f"scanq{n:04d}", **over}, "agent")
         ans = self.console.write("answer", {"qid": qid, "picks": ["a"], "own_text": "", "nonce": f"scana{n:04d}"},
                                  "owner")
         lk = self.console.write("lock", {"qid": qid, "answer": ans["id"], "nonce": f"scanl{n:04d}"}, "owner")
@@ -2831,6 +2831,107 @@ class ScanUITests(unittest.TestCase):
                 code, view = self.SV.agent_request(self.cfg.socket, "GET", "/view")
                 self.assertEqual(view["view"]["questions"][self.q1]["state"], "stale")
                 self.assertNotIn("outcome", view["view"]["questions"][self.q1]["refactor"])
+
+    # -- a stale ruling in the Inbox, wherever it came from ----------------------------------
+
+    def setup_forked_round(self):
+        """A deliberation round on LANE.1: Q1 a locked ruling that has gone stale, Q4 still open.
+
+        Q3 is a stale ruling from no round, so the Inbox holds two stale rows on one item.
+        """
+        url = self.serve()
+        (self.cfg.root / "rules.md").write_text(self.RULES)
+        f = self.console.write("message", {"item": "LANE.1", "text": "go", "intent": "fork", "mode": "explore",
+                                           "nonce": "stalefork01"}, "owner")
+        self.fork = f["id"]
+        self.q1, self.l1 = self.ruling(1, "RULE-ALPHA: every release is reviewed twice.",
+                                       forked_from=self.fork, star_by="panel")
+        self.q3, self.l3 = self.ruling(3, "RULE-DELTA: the owner locks answers.")
+        self.q4 = "LANE.1/Q4"
+        self.console.write("question", {
+            "qid": self.q4, "item": "LANE.1", "text": "Which way now?", "kind": "single",
+            "options": [{"id": "a", "label": "This"}, {"id": "b", "label": "That"}], "star": "a",
+            "valid_if": [], "source": "rules.md:1", "forked_from": self.fork, "star_by": "panel",
+            "nonce": "staleopen04"}, "agent")
+        (self.cfg.root / "rules.md").write_text(self.RULES.replace("reviewed twice", "reviewed once")
+                                                .replace("the owner locks answers", "the owner signs answers"))
+        return url
+
+    def inbox_row(self, page, qid):
+        return page.locator(f".ck-inbox-item[data-qid='{qid}']")
+
+    def test_a_stale_ruling_from_a_round_is_reachable_from_the_inbox_and_offers_its_proposal(self):
+        # Catches: a stale ruling from a deliberation round filed under its round, whose form walks open
+        # questions only, so it shows nowhere in the Inbox; a row that does not say which question it is (two
+        # stale rows on one item read the same); a row silent about the steward's proposal or advice; and a
+        # row that opens somewhere without the stale card's Confirm.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.setup_forked_round()
+                self.console.propose_anchor({"qid": self.q1, "cites": ["rules.md:2"],
+                                             "basis": "RULE-ALPHA now says reviewed once", "nonce": "staleprop01"})
+                self.console.advise({"qid": self.q3, "star": "keep", "evidence": "RULE-DELTA still means the same.",
+                                     "nonce": "staleadv003"})
+                page = self.page(kind, 1280, url)
+                self.open_inbox(page, 1280)
+                r1, r3 = self.inbox_row(page, self.q1), self.inbox_row(page, self.q3)
+                self.assertEqual(r1.count(), 1, "the stale ruling from the round has no Inbox row")
+                self.assertEqual(r3.count(), 1)
+                self.assertIn("Q1", r1.locator(".ck-inbox-item-qnum").text_content())
+                self.assertIn("Q3", r3.locator(".ck-inbox-item-qnum").text_content())
+                self.assertNotEqual(r1.text_content(), r3.text_content())
+                self.assertIn("a new anchor is proposed", r1.text_content())
+                self.assertNotIn("advice", r1.text_content())
+                self.assertIn("advice is waiting", r3.text_content())
+                self.assertNotIn("proposed", r3.text_content())
+                self.assertIn(self.q1, r1.get_attribute("aria-label"))
+                r1.click()
+                card = self.card(page, self.q1)
+                card.wait_for()
+                self.assertGreater(card.locator(".ck-stale-banner").count(), 0)
+                self.assertEqual(card.locator("button[aria-label^='Confirm the proposed anchor']").count(), 1)
+
+    def test_a_round_with_one_open_and_one_stale_question_still_counts_one_step(self):
+        # Catches: the stale ruling counted into its round (the card says 2 questions, or the form walks a
+        # locked ruling), and the round dropped from the Inbox because one of its questions went stale.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.setup_forked_round()
+                page = self.page(kind, 1280, url)
+                self.open_inbox(page, 1280)
+                rc = page.locator(f".ck-round-card[data-fork='{self.fork}']")
+                self.assertEqual(rc.count(), 1, "the round left the Inbox")
+                self.assertIn("1 question ·", rc.text_content())
+                self.assertEqual(self.inbox_row(page, self.q4).count(), 0, "an open round question listed loose")
+                rc.locator("button").click()
+                page.wait_for_selector(".ck-round-title")
+                self.assertEqual(page.locator(f".ck-panel .ck-question[data-qid='{self.q1}']").count(), 0)
+
+    def test_a_stale_ruling_is_never_grouped_into_an_answer_together_round(self):
+        # Catches: a stale ruling and an open question from one named agent offered as "Answer these 2
+        # together", whose round would walk only the open one, so the button promises what the form never shows.
+        for kind in BROWSERS:
+            with self.subTest(browser=kind):
+                url = self.serve()
+                (self.cfg.root / "rules.md").write_text(self.RULES)
+                text = "RULE-ALPHA: every release is reviewed twice."
+                self.console.write("question", {
+                    "qid": "LANE.1/Q1", "item": "LANE.1", "text": "Does RULE-ALPHA still hold?", "kind": "single",
+                    "options": [{"id": "a", "label": "Yes"}, {"id": "b", "label": "No"}], "star": "a",
+                    "valid_if": [{"kind": "excerpt", "path": "rules.md", "text": text}], "source": "rules.md:1",
+                    "nonce": "grpq000001"}, "agent", agent="steward-a")
+                ans = self.console.write("answer", {"qid": "LANE.1/Q1", "picks": ["a"], "own_text": "",
+                                                    "nonce": "grpa000001"}, "owner")
+                self.console.write("lock", {"qid": "LANE.1/Q1", "answer": ans["id"], "nonce": "grpl000001"}, "owner")
+                self.console.write("question", {
+                    "qid": "LANE.1/Q2", "item": "LANE.1", "text": "Which way now?", "kind": "single",
+                    "options": [{"id": "a", "label": "This"}, {"id": "b", "label": "That"}], "star": "a",
+                    "valid_if": [], "source": "rules.md:1", "nonce": "grpq000002"}, "agent", agent="steward-a")
+                (self.cfg.root / "rules.md").write_text(self.RULES.replace("reviewed twice", "reviewed once"))
+                page = self.page(kind, 1280, url)
+                self.open_inbox(page, 1280)
+                self.assertEqual(self.inbox_row(page, "LANE.1/Q1").count(), 1)
+                self.assertEqual(page.locator(".ck-cluster").count(), 0, "a stale ruling was grouped")
 
 
 if __name__ == "__main__":

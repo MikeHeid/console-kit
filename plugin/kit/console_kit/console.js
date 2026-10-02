@@ -786,7 +786,9 @@
       const q = view.questions[qid];
       if (!q) continue;
       const f = q.question.forked_from;
-      if (f && view.forks[f]) {
+      // A round's form walks only open questions (roundSteps), so a ruling from a round that has gone stale
+      // would vanish inside its card. It is listed as a loose row instead, which opens its stale card.
+      if (f && view.forks[f] && OPEN_STATES.includes(q.state)) {
         if (!rounds.has(f)) rounds.set(f, []);
         rounds.get(f).push(q);
       } else {
@@ -848,17 +850,33 @@
     }
   }
 
+  // What waits on the owner about a stale ruling, said on its row: a steward's proposal or advice.
+  function staleWaiting(q) {
+    const rx = q.state === 'stale' ? q.refactor : null;
+    if (!rx) return '';
+    const w = [];
+    if (rx.proposal) w.push('a new anchor is proposed');
+    if (rx.advice) w.push('advice is waiting');
+    return w.join(', ');
+  }
+
   function looseRow(q) {
     const itemData = items[q.question.item];
-    const item = el('div', { className: 'ck-inbox-item' + (arrived.has(q.question.qid) ? ' ck-arrived' : ''),
-      tabindex: '0', dataQid: q.question.qid }, [
+    const qid = q.question.qid;
+    const waiting = staleWaiting(q);
+    const item = el('div', { className: 'ck-inbox-item' + (arrived.has(qid) ? ' ck-arrived' : ''),
+      tabindex: '0', dataQid: qid,
+      'aria-label': q.state.replace('_', ' ') + ': ' + qid + (itemData ? ', ' + itemData.title : '')
+        + (waiting ? '. ' + waiting : '') }, [
       el('span', { className: 'ck-q-state', dataState: q.state }, [
         GLYPH[q.state] || '', ' ', q.state.replace('_', ' ')
       ]),
       el('span', { className: 'ck-inbox-item-id' }, [q.question.item]),
-      el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : ''])
+      el('span', { className: 'ck-inbox-item-qnum', title: qid }, ['Q' + qNum(qid)]),
+      el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : '']),
+      waiting ? el('span', { className: 'ck-inbox-item-waiting' }, [waiting]) : ''
     ]);
-    const go = () => openFromInbox(q.question.item);
+    const go = () => openFromInbox(q.question.item, qid);
     item.addEventListener('click', go);
     item.addEventListener('keydown', e => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
@@ -879,7 +897,7 @@
     const byKey = new Map();
     for (const q of loose) {
       const who = q.question.agent;
-      if (!who) continue;
+      if (!who || !OPEN_STATES.includes(q.state)) continue;   // a group opens as a round, which walks open ones only
       const k = q.question.item + '\u0000' + who;
       if (!byKey.has(k)) byKey.set(k, []);
       byKey.get(k).push(q);
@@ -938,13 +956,15 @@
   }
 
   // 0.8.5: the inbox opens an item in its own panel, so the item must offer the way back.
-  function openFromInbox(itemId) {
+  function openFromInbox(itemId, qid) {
     currentItem = itemId;
     currentMode = 'item';
     fromInbox = true;
     renderPanel();
     const back = panelEl.querySelector('.ck-back-btn');
     if (back) back.focus();
+    const card = qid && panelEl.querySelector('.ck-question[data-qid="' + CSS.escape(qid) + '"]');
+    if (card && card.scrollIntoView) card.scrollIntoView({ block: 'nearest' });
   }
 
   function backToInbox() {
