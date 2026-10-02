@@ -777,7 +777,7 @@ class Console:
         return {"shape": got["shape"], "values": values}
 
     def page(self) -> str:
-        """The steward's snapshot from STATE with the console injected (CONSOLE-kit/Q28); never a project file.
+        """The page the owner published from STATE, any proposal, and the console (Q28, Q29); never a project file.
 
         `cfg.page` is not read, by this server or the one server: a page an agent
         can edit would put its script in the owner's browser.

@@ -372,21 +372,43 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   It refuses a commit that is not in `origin/main`, unless you pass
   `--unreviewed`. On the one server, `--path` defaults to the project's `page`
   in `server.json`. The server checks what arrives (at most 4 MiB, exactly one
-  `</body>`, no console block already in it) and stores it as data. It never
+  `</body>`, no console block already in it) and keeps it as data. It never
   runs git.
+- **You publish it (owner ruling CONSOLE-kit/Q29).** What `page-snapshot`
+  sends is only *proposed*: nothing you are served changes. The console shows
+  a strip, "Proposed dashboard: <ref> @ <commit> · <size> · reviewed" (or
+  "unreviewed"), with a preview and a **Use this page** button. The page is
+  served only after you press it, through a route behind your Access login.
+  No agent can publish, because the agent socket has no route that does.
+  **The cost is one click per dashboard update.** The button sends the commit
+  you were shown. If a newer page was staged after your page loaded, it is
+  refused, naming both commits. Reload, look, and press again. Publishing
+  checks the page again (size, schema, the console injection). It cannot
+  check that the commit is in `origin/main`, because the server runs no git;
+  the steward checked that before sending.
+- **The preview never runs the proposed page's scripts.** It is shown in an
+  `<iframe sandbox="">` with no allowances. The route it loads from also
+  answers under its own `sandbox; default-src 'none'` policy, the one stored
+  visuals use. Each layer alone stops the page's scripts, so the preview shows
+  the page's markup and styles, never its behaviour. Its scripts first run
+  when you publish it.
 - **What you see.** A line at the end of the page names where it came from:
-  "Dashboard page from origin/main @ <commit> (from the steward)", or
-  "(unreviewed ref)" for a page sent with `--unreviewed`. Until the first
-  snapshot, the server serves the console alone, with a note saying to run
-  `agent.py page-snapshot`. The console works either way. Your page's own
-  scripts still run. Take a new snapshot whenever the page's merged version
-  changes. `--page` is still accepted, so an existing unit keeps starting, but
-  it is never read, and the server logs one line saying so.
+  "Dashboard page from origin/main @ <commit> (staged by the steward,
+  published by you)", or "(staged from an unreviewed ref, published by you)"
+  for a page sent with `--unreviewed`. Until you publish one, the server
+  serves the console alone, with a note saying to run `agent.py page-snapshot`
+  and then press **Use this page**. The console works either way. Your
+  page's own scripts still run once published. Stage and publish again
+  whenever the page's merged version changes. `--page` is still accepted, so
+  an existing unit keeps starting, but it is never read, and the server logs
+  one line saying so.
 - **How it is held.** A test runs the real server under strace with `--page`
   naming a page in the project, and with it naming a symlink to a page
   outside. No system call names either path. Another test edits the page in
   the working tree, stages it and runs `page-snapshot` again, and the edit
-  never reaches the page served.
+  never reaches the page served. A test drives every agent route, and none
+  changes the served page. A browser test shows that the proposed page's
+  script does not run in the preview and does run once published.
 
 ## How it fits together
 

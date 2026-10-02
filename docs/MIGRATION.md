@@ -189,10 +189,20 @@ Run it from inside the project's checkout. It reads the page from
 `origin/main` with git, never from the working tree, and refuses a commit
 that is not in `origin/main` unless you pass `--unreviewed`. Use
 `--from-ref <ref>` to name another ref. On the one server, `--path` defaults
-to the project's `page` in `server.json`. Until the first snapshot, the
-server serves the console alone, with a note saying to run
-`agent.py page-snapshot`. If the stored snapshot cannot be read, the note says
-so instead, and the next `page-snapshot` replaces it without a restart.
+to the project's `page` in `server.json`.
+
+What `page-snapshot` sends is only proposed (owner ruling CONSOLE-kit/Q29):
+the console shows it as a strip with its ref, commit, size and whether it is
+reviewed, a sandboxed preview, and a **Use this page** button. It is served
+only after the owner presses that button, through the owner's Access login,
+and no agent route can publish it. That costs one click per dashboard update.
+Until a page is published, the server serves the console alone, with a note
+saying to run `agent.py page-snapshot` and then press **Use this page**. If
+the published page cannot be read, the note says so instead, and the next
+stage and publish replace it without a restart. The footer now reads
+"(staged by the steward, published by you)", or "(staged from an unreviewed
+ref, published by you)", where it read "(from the steward)" or "(unreviewed
+ref)".
 
 The server never runs the project's adapter (owner ruling CONSOLE-kit/Q24).
 An `--adapter` flag still in the unit is accepted and ignored, so the unit
@@ -387,6 +397,15 @@ reads the page from the checkout (CONSOLE-kit/Q28). So after the first upgrade
 past that change, the console shows no dashboard until the `page-snapshot`
 line above runs, and says so. The snapshot is kept in the state dir, so later
 restarts keep it.
+
+**Then the owner presses Use this page.** Since CONSOLE-kit/Q29,
+`page-snapshot` only stages the page. On the first upgrade past that change, a
+page published before it is still served unchanged (the published file is
+the same file as before). A page staged after it shows as a proposal until
+the owner opens the console and presses **Use this page**. That is one click
+per dashboard update. A page staged but not yet published also survives
+restarts. Rolling back to a release from before Q29 serves the last published
+page; anything still only staged is ignored by that release.
 
 Read the release's notes in `INSTALL.md` ("Upgrading to …") first. Some
 releases ask for a step of their own, such as `reanchor` or a
