@@ -731,6 +731,16 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.ck-inbox-item-qnum {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--c-fg-muted);
+}
+.ck-inbox-item-waiting {
+  font-size: 12px;
+  color: var(--c-accent);
+  white-space: nowrap;
+}
 
 /* --- Offline state --- */
 .ck-offline {
