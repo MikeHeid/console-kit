@@ -384,7 +384,7 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   changes the served page. A browser test shows that the proposed page's
   script does not run in the preview and does run once published.
 
-## Settling a stale answer (unreleased, owner rulings CONSOLE-kit/Q30, Q31 and Q32)
+## Settling a stale answer (0.8.13, owner rulings CONSOLE-kit/Q30, Q31 and Q32)
 
 - **Why.** A stale answer used to have one way out: re-lock it as it stands.
   A ruling that no longer applies, one whose anchor was the wrong check, or
@@ -447,7 +447,7 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   file changed is refused. A test moves the sidecar aside and the answer reads
   stale. A test shows fold refuses an adapter without `RECORDS_OUTCOMES`.
 
-## Skills the plugin ships (unreleased)
+## Skills the plugin ships (0.8.13)
 
 The plugin carries the skills the console's rounds lean on, so a fresh
 install needs nothing else: **`roar`** (a three-seat panel on the plugin's
@@ -460,7 +460,7 @@ none of them writes into the project before the owner locks. The lookup's
 trust rules are unchanged: installed user or plugin skills only, never a
 skill inside the repository.
 
-## Pull requests on the console (unreleased)
+## Pull requests on the console (0.8.13)
 
 - **What you can do.** The inbox has a **PRs** tab: the project's open pull
   requests first, then those merged or closed in the last 30 days. Each shows

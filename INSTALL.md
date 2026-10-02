@@ -173,7 +173,17 @@ back to 0.8.2, clear the steward** (`agent.py steward --clear`): a 0.8.2
 SessionStart hook reads an entry with a `steward` key as malformed and says
 "not checked" instead of listing the owner's requests.
 
-**Plugin-shipped skills (the release after 0.8.12).** Nothing to migrate.
+**Upgrading to 0.8.13.** The store is unchanged. Three additions:
+
+- **Settling stale answers.** The owner's acts are kept in `refactor.jsonl`
+  beside `store.jsonl`; back them up together. Fold refuses an answer that
+  carries an outcome until the project's adapter sets
+  `RECORDS_OUTCOMES = True` and writes the outcome
+  (`docs/MIGRATION.md`).
+- **Pull requests.** The PRs tab stays empty until the steward runs
+  `agent.py prs-push` from the project's checkout, with `gh` logged in.
+- **Plugin-shipped skills.** Nothing to migrate.
+
 The plugin now ships `roar`, `refine`, `drill` and `deliberate`, so
 Refine and Drill no longer need a skill installed by hand. An existing
 project may switch its `.console-kit.json` to the plugin's names, by pull
