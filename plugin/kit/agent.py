@@ -312,6 +312,8 @@ def _view(state: Path, item: str | None, since: int | None, full: bool) -> int:
         except KeyError as e:
             print(e.args[0], file=sys.stderr)
             return 1
+    else:   # a proposal's text can be 40 KB: a whole read names it by digest, `--item` prints it
+        out = {**out, "view": V.slim_refactor(out["view"])}
     if since is not None:
         out = {**out, "view": V.since(out["view"], since)}
     what = "view" + (f" --item {item}" if item is not None else "") + (f" --since {since}" if since is not None else "")
@@ -339,7 +341,7 @@ def _answers(state: Path, item: str | None, fork: str | None, as_json: bool, sin
     if fork is not None and fork not in out["view"]["forks"]:
         print(f"no fork {fork!r}", file=sys.stderr)
         return 1
-    view = out["view"]
+    view = out["view"] if item is not None else V.slim_refactor(out["view"])   # as `view`: --item keeps the text
     if since is not None:  # only the questions changed after SEQ (E5); the forks stay for --fork
         view = {**view, "questions": V.since(view, since)["questions"]}
     sheet = V.answers_sheet(view, out["items"], item=item, fork=fork)

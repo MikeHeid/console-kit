@@ -1200,6 +1200,16 @@ class Console:
                 again = self.store.existing({**body, "type": kind, "by": by})
                 if again is not None:   # a retry of an ask that landed: refused nothing then, refuses nothing now
                     link = RX.replaces_of(self.store, again["qid"])
+                    if replaces is not None and link is None:
+                        # The ask landed and its link did not (the named 500 below): the retry writes it, while
+                        # nobody has answered the question yet. Once answered, the owner answered it unlinked.
+                        if self.store.head(again["qid"]) is not None:
+                            raise RequestError(409, f"{again['qid']} has an answer already, given without its link "
+                                                    f"to {replaces}; ask a new question to replace {replaces}")
+                        old_lock = self._replacement_link(replaces, items)
+                        link = self._rx_append({"type": "replaces", "by": "agent", "qid": again["qid"],
+                                                "replaces": replaces, "lock": old_lock["id"],
+                                                "nonce": again["nonce"]})
                     return {**again, "replaces": link["replaces"]} if link and replaces else again
                 errs = self._whole_file_refusals(body, items)   # new asks only
                 if errs:
@@ -1219,7 +1229,8 @@ class Console:
                                             "replaces": replaces, "lock": old_lock["id"], "nonce": rec["nonce"]})
                 except RequestError as e:
                     raise RequestError(500, f"{rec['qid']} was asked, but its link to {replaces} was not written "
-                                            f"({e}); ask the steward to report it") from None
+                                            f"({e}). Send the same ask again with \"nonce\": \"{rec['nonce']}\" "
+                                            f"in its file to write the link") from None
                 return {**rec, "replaces": link["replaces"]}
             return rec
 

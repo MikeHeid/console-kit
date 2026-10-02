@@ -30,6 +30,8 @@ store's own record, exactly as before.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -306,6 +308,46 @@ def todo(view: dict) -> dict:
         "inbox": list(view["inbox"]),
         "seq": view["seq"],
     }
+
+
+SLIM_PROPOSAL = ("id", "ts", "cites")     # what a slim read keeps of a proposal; the text has a digest instead
+
+
+def _digest(rec: dict, keys: tuple[str, ...]) -> str:
+    return hashlib.sha256(json.dumps({k: rec.get(k) for k in keys}, sort_keys=True, separators=(",", ":"),
+                                     ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def slim_refactor(view: dict) -> dict:
+    """`view` with the text of each proposed and confirmed anchor left out, for the slim reads (lane 7 review).
+
+    A proposal carries its base, anchors and basis: measured, six stale answers
+    at the largest a proposal may be (4 cites of 4000 characters, a 20 000
+    character basis) took `view` from 55 556 to 297 953 bytes and `answers
+    --json` from 27 494 to 269 891, so every whole read would be refused. A
+    slim read keeps the proposal's id, time and cites and a sha256 of what it
+    left out, and says where the text is: `view --item`, and the owner's page,
+    keep it whole. Nothing here is cut short without saying so. Slimmed, the
+    same shape reads 57 227 and 29 165 bytes.
+    """
+    qs = {}
+    for qid, q in view["questions"].items():
+        rx = q.get("refactor")
+        if not rx or not ("proposal" in rx or "confirmed" in rx):
+            qs[qid] = q
+            continue
+        where = f"left out of this read; `view --item {q['question']['item']}` has it (--full past 64 KiB)"
+        rx = dict(rx)
+        if "proposal" in rx:
+            p = rx["proposal"]
+            rx["proposal"] = {**{k: p[k] for k in SLIM_PROPOSAL if k in p},
+                              "digest": _digest(p, ("base", "anchors", "basis")), "text": where}
+        if "confirmed" in rx:
+            c = rx["confirmed"]
+            rx["confirmed"] = {**{k: v for k, v in c.items() if k != "basis"},
+                               "digest": _digest(c, ("basis",)), "text": where}
+        qs[qid] = {**q, "refactor": rx}
+    return {**view, "questions": qs}
 
 
 def _filter_tags(view: dict, qids, fids) -> dict:

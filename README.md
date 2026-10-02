@@ -451,11 +451,15 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
     proposed. Nothing changes until you press **Confirm**. The server reads the
     file again at that moment, and a proposal that no longer holds is refused,
     naming why. The steward never re-anchors a ruling to a passage it chose.
-    (`agent.py reanchor` is unchanged.)
+    (`agent.py reanchor` is unchanged.) A proposal may hold about 40 KB of
+    text, so whole `view` and `answers` reads name it by its cites and a
+    digest. `view --item` and your page show the text.
   - **Replace.** The steward asks a new question with `"replaces": "<old
     qid>"` in its file. The old ruling stays in force, still stale and linked
     to the new question, until you lock the new one. Then it reads
-    *superseded*. One open replacement per ruling.
+    *superseded*. One open replacement per ruling. If the question is stored
+    but its link is not, the ask fails naming its `nonce`. Sending the same
+    ask again with that nonce writes the link, while nobody has answered it.
 
   Neither withdraw nor keep is a default; the page offers both side by side.
 - **Nothing is deleted.** These acts are written to `refactor.jsonl`, beside

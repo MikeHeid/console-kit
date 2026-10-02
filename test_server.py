@@ -6545,6 +6545,48 @@ class RefactorTests(_Live, unittest.TestCase):
                          ("superseded", "LANE.1/Q3", lk["record"]["id"], "owner"))
         self.assertNotIn(self.QID, view["inbox"])
 
+    def test_an_ask_whose_link_was_not_written_is_linked_by_its_retry(self):
+        # Lane 7 review LOW. The question lands first (the link must name a question that exists), so a failed
+        # link write leaves it unlinked behind a named 500. Catches: a 500 that does not say how to recover, a
+        # retry that returns the question still unlinked, and a link written after the owner answered it unlinked.
+        self.go_stale()
+        real = self.console._rx_append
+
+        def broken(rec):
+            raise SV.RequestError(409, "the disk is full")
+        self.console._rx_append = broken
+        try:
+            code, out = self.replacement()
+        finally:
+            self.console._rx_append = real
+        self.assertEqual(code, 500, out)
+        self.assertIn('"nonce": "rxrepl0003"', out["error"])
+        self.assertIn("the disk is full", out["error"])
+        _, old = self.view_q()
+        self.assertNotIn("replaced_by", old.get("refactor", {}))
+        code, out = self.replacement()                                   # the same ask, the same nonce
+        self.assertEqual(code, 200, out)
+        self.assertEqual(out["record"]["replaces"], self.QID)
+        self.assertEqual(self.view_q()[1]["refactor"]["replaced_by"], "LANE.1/Q3")
+        self.assertEqual(self.replacement()[1]["record"]["replaces"], self.QID)   # and again: one link, not two
+        log = (self.cfg.state / "refactor.jsonl").read_text().splitlines()
+        self.assertEqual([json.loads(ln)["type"] for ln in log], ["replaces"])
+
+    def test_a_retry_does_not_link_a_question_the_owner_already_answered(self):
+        self.go_stale()
+        real = self.console._rx_append
+        self.console._rx_append = lambda rec: (_ for _ in ()).throw(SV.RequestError(409, "the disk is full"))
+        try:
+            self.assertEqual(self.replacement()[0], 500)
+        finally:
+            self.console._rx_append = real
+        self.assertEqual(self.req("POST", "/api/answer", self.answer(qid="LANE.1/Q3", nonce="rxanswer03"),
+                                  tok=token())[0], 200)
+        code, out = self.replacement()
+        self.assertEqual(code, 409, out)
+        self.assertIn("has an answer already, given without its link", out["error"])
+        self.assertFalse((self.cfg.state / "refactor.jsonl").exists())
+
     # -- property 1: every act is the owner's ------------------------------------------------------------
 
     def test_no_agent_route_settles_confirms_or_changes_any_answer(self):
@@ -6786,6 +6828,66 @@ class RefactorTests(_Live, unittest.TestCase):
         self.assertEqual(code, 200, out)   # a retry of an ask that landed is not a new ask
 
     # -- the read caps ---------------------------------------------------------------------------------------
+
+    def max_shape(self, proposals=True):
+        """Six stale answers at the largest a proposal may be: 4 cites of 4000 characters and a 20 000 basis."""
+        def line(tag, n):
+            head = f"{tag}-{n:03d}: "
+            return head + ("the ruling rests on this line, which is as long as an excerpt may be. " * 60)[
+                :SV.S.MAX_EXCERPT - len(head)]
+        (self.cfg.root / "max.md").write_text("".join(line("OLD", n) + "\n" for n in range(6)))
+        for n in range(6):
+            q = {"qid": f"LANE.1/Q{40 + n}", "item": "LANE.1", "text": f"Does rule {n} still hold?", "kind": "single",
+                 "options": [{"id": "a", "label": "Yes"}, {"id": "b", "label": "No"}], "star": "a",
+                 "valid_if": [{"kind": "excerpt", "path": "max.md", "text": line("OLD", n)}],
+                 "source": f"max.md:{n + 1}", "nonce": f"rxmax{n:04d}"}
+            self.assertEqual(self.agent_post("/question", q)[0], 200)
+            code, a = self.req("POST", "/api/answer", self.answer(qid=q["qid"], nonce=f"rxmaxa{n:04d}"), tok=token())
+            self.assertEqual(self.req("POST", "/api/lock", {"qid": q["qid"], "answer": a["record"]["id"],
+                                                            "nonce": f"rxmaxl{n:04d}"}, tok=token())[0], 200)
+        (self.cfg.root / "max.md").write_text("".join(line("NEW", n) + "\n" for n in range(24)))
+        if proposals:
+            for n in range(6):
+                cites = [f"max.md:{4 * n + k + 1}" for k in range(4)]
+                code, out = self.agent_post("/anchor-proposal", {"qid": f"LANE.1/Q{40 + n}", "cites": cites,
+                                                                 "basis": "b" * SV.S.MAX_TEXT,
+                                                                 "nonce": f"rxmaxp{n:04d}"})
+                self.assertEqual(code, 200, out)
+
+    def test_six_proposals_at_the_largest_stay_under_every_slim_read_cap(self):
+        # Lane 7 review MEDIUM. Measured: unslimmed, this shape is view 297 953 and answers --json 269 891 bytes
+        # (55 556 and 27 494 without the proposals), so every whole read was refused. Catches: a whole read that
+        # carries a proposal's text again, a slim read that drops the proposal (the agent must still see one
+        # waits, and which lines it cites), and `--item` losing the text it is the way to read.
+        import subprocess
+        self.max_shape()
+
+        def cli(*args):
+            r = subprocess.run([sys.executable, AGENT_PY, "--state", str(self.cfg.state), *args],
+                               capture_output=True, text=True, timeout=60, env=GIT_ENV)
+            return r.returncode, r.stdout, r.stderr
+        for args in (("view",), ("todo",), ("answers",), ("answers", "--json")):
+            rc, out, err = cli(*args)
+            self.assertEqual(rc, 0, (args, err))
+            self.assertLess(len(out.encode("utf-8")), 64 * 1024, args)
+        view = json.loads(cli("view")[1])["view"]
+        for n in range(6):
+            p = view["questions"][f"LANE.1/Q{40 + n}"]["refactor"]["proposal"]
+            self.assertEqual(p["cites"], [f"max.md:{4 * n + k + 1}" for k in range(4)])
+            self.assertEqual(len(p["digest"]), 64)
+            self.assertIn("view --item LANE.1", p["text"])
+            self.assertFalse({"base", "anchors", "basis"} & set(p))
+        rows = json.loads(cli("answers", "--json")[1])["rows"]
+        self.assertTrue(all("anchors" not in r["refactor"]["proposal"] for r in rows if r["qid"] >= "LANE.1/Q40"))
+        rc, out, _ = cli("view", "--item", "LANE.1", "--full")
+        self.assertEqual(rc, 0)
+        whole = json.loads(out)["view"]["questions"]["LANE.1/Q40"]["refactor"]["proposal"]
+        self.assertEqual(len(whole["anchors"]), 4)
+        self.assertEqual(len(whole["basis"]), SV.S.MAX_TEXT)
+        self.assertEqual(whole["id"], view["questions"]["LANE.1/Q40"]["refactor"]["proposal"]["id"])
+        code, owner = self.req("GET", "/api/view", tok=token())                # the owner's page keeps it whole
+        self.assertEqual(owner["view"]["questions"]["LANE.1/Q41"]["refactor"]["proposal"]["anchors"][0]["text"],
+                         (self.cfg.root / "max.md").read_text().splitlines()[4])
 
     def test_six_stale_answers_with_proposals_stay_under_the_slim_read_cap(self):
         # agent-5: `view` / `todo` / `answers` merge refactor state, so they must stay under 64 KiB with the live
