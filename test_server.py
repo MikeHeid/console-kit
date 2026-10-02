@@ -5488,6 +5488,31 @@ class SingleServerItemsTests(_SingleServer, unittest.TestCase):
         self.assertEqual((before["items"], before["view"]["items_note"]), ({}, IT.NOT_PUSHED))
         self.assertEqual((sorted(after["items"]), after["view"]["items_note"]), (["LANE", "LANE.1"], None))
 
+    def test_the_served_server_makes_no_syscall_naming_the_adapter(self):
+        # AC 1, the syscall half (lane 5 review, LOW: `os.stat(cfg.adapter)` in serve SURVIVED the audit test,
+        # because a stat raises no audit event). The same child under strace: no file syscall at all, a stat, an
+        # access or a readlink included, names the configured adapter's path.
+        need_strace(self)
+        root = Path(tempfile.mkdtemp(prefix="ck-strace-items-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        v1 = git_project(root)
+        (root / "page.html").write_text(PAGE)
+        adapter = root / "adapter.py"
+        adapter.write_text(MARKER_ADAPTER.format(marker=str(root.parent / f"{root.name}-ADAPTER-RAN")))
+        params = {"kit": str(HERE / "plugin" / "kit"), "root": str(root), "host": HOSTNAME,
+                  "question": spec_question(v1)}   # no "watch": the adapter's path is not in the child's argv
+        trace = root.parent / f"{root.name}.strace"
+        self.addCleanup(lambda: trace.unlink(missing_ok=True))
+        r = subprocess.run(["strace", "-f", "-qq", "-e", "trace=%file", "-o", str(trace), sys.executable, "-c",
+                            AUDIT_CHILD, json.dumps(params), json.dumps(SPAWN_EVENTS)],
+                           capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        got = json.loads(r.stdout.strip().splitlines()[-1])
+        self.assertEqual(got["codes"]["agent POST /items"], 200)   # the routes really ran under the trace
+        text = trace.read_text()
+        self.assertIn(str(root / "page.html"), text)   # the trace sees the server's own file calls
+        self.assertEqual([ln for ln in text.splitlines() if str(adapter) in ln], [])
+
     def test_before_the_first_push_the_board_says_why_it_is_empty(self):
         # AC 3. Catches: a silent blank (no note), fake items, and a note that outlives the first push. A push
         # of NO items is a real answer: the board is empty and the note is gone, never shown as "not pushed".
