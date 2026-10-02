@@ -112,6 +112,9 @@ AGENT_ROUTES = {"/question": "question", "/message": "message", "/transcript": "
 # and a visual up to 256 KiB, and JSON escaping can grow either several times.
 # The door is a user-only Unix socket; the owner's door keeps MAX_BODY.
 AGENT_MAX_BODY = 2 << 20
+# /view's answer when a stored file fails its check: what to do, never where the file is.
+VIEW_UNREADABLE = ("the console's stored state could not be read just now; if the stored items are the cause, "
+                   "the steward should push them again (agent.py items-push)")
 # An HTML mock is shown ONLY in <iframe sandbox="">. This policy holds even if the
 # URL is opened in its own tab: `sandbox` (no tokens) gives it an opaque origin
 # and no script, `default-src 'none'` lets it load nothing from anywhere, and
@@ -1204,6 +1207,16 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _view(self, build: Callable[[], dict]) -> None:
+        """/view and /api/view: a stored file that fails its check is a 503 naming the problem, never a dropped
+        connection. The path stays in the server's stderr: the answer goes to a browser or an agent."""
+        try:
+            view = build()
+        except StoreError as e:
+            sys.stderr.write(f"console view: {e}\n")
+            return self._send(503, {"error": VIEW_UNREADABLE})
+        self._send(200, view)
+
     def _body(self) -> object:
         if not (self.headers.get("Content-Type") or "").split(";")[0].strip() == "application/json":
             raise RequestError(415, "send application/json")
@@ -1255,7 +1268,7 @@ class OwnerHandler(_Handler):
         if self.path in ("/", "/index.html"):
             return self._send(200, self.console.page(), "text/html; charset=utf-8")
         if self.path == "/api/view":
-            return self._send(200, self.console.page_payload())   # with `ver`: the live loop's baseline
+            return self._view(self.console.page_payload)   # with `ver`: the live loop's baseline
         if self.path == "/api/board":
             return self._board()
         if self.path == "/api/check":
@@ -1408,7 +1421,7 @@ class AgentHandler(_Handler):
 
     def do_GET(self) -> None:
         if self.path == "/view":
-            return self._send(200, self.console.payload())
+            return self._view(self.console.payload)
         if self.path == "/check":
             return OwnerHandler._check(self)
         if self.path == "/health":

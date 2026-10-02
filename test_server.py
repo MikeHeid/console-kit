@@ -412,6 +412,32 @@ class ServerTests(unittest.TestCase):
         self.assertEqual((code, body), (200, {"shape": "s", "values": {"pct": "5%"}}))
         self.assertEqual(len(calls), 1)
 
+    def test_a_stored_items_file_that_fails_its_check_is_503_on_both_views_and_names_no_path(self):
+        # Catches (lane 5 review, MEDIUM): payload() raising StoreError straight out of /view and /api/view, so
+        # the caller sees a dropped connection; and a 503 whose body carries the server's file path. A real
+        # SnapshotAdapter (the one server's, which refuses rather than tolerates) over an items.json that is not
+        # JSON; after a push the same views answer 200 again.
+        import io
+        from unittest import mock
+        state = Path(self.cfg.state, "items-state")
+        state.mkdir()
+        (state / IT.ITEMS).write_bytes(b"{not json")
+        self.console.adapter = IT.SnapshotAdapter(state)
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            code_owner, owner = self.req("GET", "/api/view", tok=token())
+            code_agent, agent = SV.agent_request(self.cfg.socket, "GET", "/view")
+        for route, code, body in (("/api/view", code_owner, owner), ("/view", code_agent, agent)):
+            with self.subTest(route=route):
+                self.assertEqual(code, 503, body)
+                self.assertEqual(set(body), {"error"})
+                self.assertIn("items-push", body["error"])
+                self.assertNotIn(str(state), json.dumps(body))
+                self.assertNotIn(IT.ITEMS, json.dumps(body))
+        self.assertEqual(err.getvalue().count("console view: "), 2, err.getvalue())   # the path goes here instead
+        IT.store_snapshot(state, {"items": {}, "seed_questions": []})
+        self.assertEqual(self.req("GET", "/api/view", tok=token())[0], 200)
+        self.assertEqual(SV.agent_request(self.cfg.socket, "GET", "/view")[0], 200)
+
     def test_board_is_404_when_the_adapter_offers_none(self):
         # The kit is project-neutral: a project without board() keeps its static page.
         code, body = self.req("GET", "/api/board", tok=token())
