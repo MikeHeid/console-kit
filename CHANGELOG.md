@@ -745,3 +745,20 @@ longer needs any of the workarounds they describe.
 - **`docs/ADAPTER.md`** gains an "A live board" section covering `board()`,
   the `data-live-*` contract, and the three fresh-keeping patterns:
   manual push, `items-watch`, or a git `post-commit` hook.
+
+## Marketplace manifest schema + install/upgrade notice (0.9.4)
+
+- **`.claude-plugin/marketplace.json`** moves the marketplace description
+  from `metadata.description` to top-level `description`, matching the
+  shape `build_zip.py` has emitted for the zip-marketplace since 0.8.12.
+  Users on the GitHub-source install (`/plugin marketplace add
+  MikeHeid/console-kit`) can now actually upgrade: Claude Code reads the
+  top-level `description` as the spec expects, so `/plugin marketplace
+  update console-kit` picks up the new version and Desktop ungrays Update.
+- **A one-time install / upgrade notice**, printed by the SessionStart
+  hook the first time a session runs in a registered project after a
+  version change. A short banner followed by the commands most useful at
+  that moment: `items-push`, `items-watch`, `scaffold-dashboard`,
+  `page-snapshot`, `prs-push`, `inbox`. The last-seen version is kept in
+  `STATE/last_seen_kit_version`, so the note prints once per project per
+  bump.

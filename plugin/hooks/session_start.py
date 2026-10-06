@@ -72,6 +72,12 @@ MAX_SESSIONS = 64 << 10                                              # console_k
 KEEP_SESSIONS = 256                                                  # console_kit/sessions.py KEEP
 SESSIONS_LOCK = ".sessions.lock"
 MAX_INPUT = 1 << 20
+# 0.9.4: a per-project record of which kit version this STATE last saw, so an upgrade note prints once.
+VERSION_FILE = "last_seen_kit_version"
+MAX_VERSION_FILE = 64
+VERSION_RE = re.compile(r"""^__version__\s*=\s*['"]([0-9]+\.[0-9]+\.[0-9]+(?:[-+][\w.]+)?)['"]""", re.M)
+KIT_INIT = "console_kit/__init__.py"
+MAX_INIT = 1 << 16
 
 
 class Unsafe(ValueError):
@@ -418,6 +424,86 @@ def _shown(value: object, shape: re.Pattern) -> str:
     return value if isinstance(value, str) and shape.match(value) else "?"
 
 
+def _kit_version(kit: Path) -> str | None:
+    """0.9.4: parse __version__ from <kit>/console_kit/__init__.py; None when unreadable or missing."""
+    try:
+        data = _read_regular(kit / KIT_INIT, MAX_INIT)
+    except (OSError, Unsafe):
+        return None
+    if data is None:
+        return None
+    try:
+        text = data.decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return None
+    m = VERSION_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _last_seen(state: Path) -> str | None:
+    """0.9.4: the kit version STATE last recorded; None when the file is absent or malformed."""
+    try:
+        data = _read_regular(state / VERSION_FILE, MAX_VERSION_FILE)
+    except (OSError, Unsafe):
+        return None
+    if data is None:
+        return None
+    v = data.decode("utf-8", errors="replace").strip()
+    return v if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][\w.]+)?", v) else None
+
+
+def _record_version(state: Path, version: str) -> None:
+    """0.9.4: write STATE/last_seen_kit_version so the upgrade note prints at most once per project per bump.
+
+    Atomic rename; a failure is silent so the note at worst prints twice.
+    """
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=state, delete=False,
+                                         prefix=f".{VERSION_FILE}.", suffix=".tmp") as tmp:
+            tmp.write(version + "\n")
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            tmp_path = tmp.name
+        os.replace(tmp_path, state / VERSION_FILE)
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except (OSError, NameError, UnboundLocalError):
+            pass
+
+
+BANNER = (
+    "   ___ ___  _  _ ___  ___  _    ___     _  _____ _____ \n"
+    "  / __/ _ \\| \\| / __|/ _ \\| |  | __|___| |/ /_ _|_   _|\n"
+    " | (_| (_) | .` \\__ \\ (_) | |__| _|___| ' < | |   | |  \n"
+    "  \\___\\___/|_|\\_|___/\\___/|____|___|  |_|\\_\\___|  |_|  "
+)
+
+
+def _upgrade_note(agent: str, state: Path, kit: Path, running: str, last: str | None) -> str | None:
+    """0.9.4: a one-time list of useful commands when the kit's version changed since this STATE last ran.
+
+    Prints on first install (last is None) and on every upgrade. Short on purpose: the full CHANGELOG is in
+    the kit's docs. Caller records the new version in STATE/last_seen_kit_version AFTER emitting the note.
+    """
+    if last == running:
+        return None
+    kind = "installed" if last is None else "upgraded"
+    headline = (f"console-kit {kind} to {running}" if last is None
+                else f"console-kit upgraded {last} → {running} on this project")
+    return (
+        f"{BANNER}\n\n"
+        f"{headline}. The commands most useful right now:\n"
+        f"  {agent} items-push --adapter .console-kit/adapter.py          # push the project's items + board\n"
+        f"  {agent} items-watch --adapter .console-kit/adapter.py         # re-push on change (0.9.3+)\n"
+        f"  {agent} scaffold-dashboard --project .                        # one-command dashboard (0.9.3+)\n"
+        f"  {agent} page-snapshot --path <page>                           # send the dashboard page from a commit\n"
+        f"  {agent} prs-push                                              # push open + recent PRs\n"
+        f"  {agent} inbox                                                 # what the owner is asking right now\n"
+        f"Full notes: see CHANGELOG.md in {kit}."
+    )
+
+
 def context(project: Path, sid: str | None = None) -> str | None:
     """The note for this session, or None when there is nothing to say."""
     try:
@@ -430,6 +516,14 @@ def context(project: Path, sid: str | None = None) -> str | None:
     except (Unsafe, OSError) as err:
         return f"Owner console: not checked, because {err}. See `agent.py register` (spec §7.7)."
     agent = f"python3 {kit / 'agent.py'} --state {state}"
+    # 0.9.4: on install (no last_seen yet) and on every upgrade, prepend a short list of useful commands,
+    # then record the version so the note stops repeating until the next bump.
+    running_version = _kit_version(kit)
+    upgrade = None
+    if running_version is not None:
+        upgrade = _upgrade_note(agent, state, kit, running_version, _last_seen(state))
+        if upgrade is not None:
+            _record_version(state, running_version)
     # Standing, in every session of a registered project: a question the owner
     # must decide is posted to the console, not left in a document (owner, 2026-09-29).
     ask = ("Owner console: this project is registered. Post every question the owner must decide "
@@ -438,13 +532,15 @@ def context(project: Path, sid: str | None = None) -> str | None:
     steward, mine = steward_line(e, agent, whoami(state, sid))
     if steward:
         ask += "\n\n" + steward
+    prefix = (upgrade + "\n\n") if upgrade else ""
     if not wake:
-        return ask
+        return prefix + ask
     if not mine:  # the doorbell is the steward's: another session is told it waits, never how to take it
-        return (f"Owner console: {len(wake)} request{'' if len(wake) == 1 else 's'} from the owner waiting "
-                f"after doorbell seq {cursor}; the steward, {e[STEWARD]}, handles them.\n\n" + ask)
-    lines = [f"Owner console: {len(wake)} request{'' if len(wake) == 1 else 's'} from the owner "
-             f"waiting after doorbell seq {cursor}:"]
+        return (prefix + f"Owner console: {len(wake)} request{'' if len(wake) == 1 else 's'} from the owner "
+                f"waiting after doorbell seq {cursor}; the steward, {e[STEWARD]}, handles them.\n\n" + ask)
+    lines = ([upgrade, ""] if upgrade else []) + [
+        f"Owner console: {len(wake)} request{'' if len(wake) == 1 else 's'} from the owner "
+        f"waiting after doorbell seq {cursor}:"]
     for r in wake[:MAX_LISTED]:
         if r["intent"] == "chat":  # the chat is not a register item (0.7.0)
             lines.append(f"- seq {r['seq']} ({_shown(r.get('ts'), TS)}): answer the owner's chat message")

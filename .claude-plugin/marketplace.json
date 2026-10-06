@@ -3,15 +3,13 @@
   "owner": {
     "name": "MikeHeid"
   },
-  "metadata": {
-    "description": "The owner console as a Claude Code plugin: skills, committee agents, the SessionStart hook and the server kit."
-  },
+  "description": "The owner console as a Claude Code plugin: skills, committee agents, the SessionStart hook and the server kit.",
   "plugins": [
     {
       "name": "console-kit",
       "source": "./plugin",
       "description": "Answer your agents' questions from a web page behind Cloudflare Access; onboarding, server kit and skills included.",
-      "version": "0.9.3"
+      "version": "0.9.4"
     }
   ]
 }
