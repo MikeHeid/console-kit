@@ -600,6 +600,94 @@ REVIEWED_FALLBACK = "origin/main"   # Q28: used when origin/HEAD does not resolv
 GIT_SECONDS = 60
 
 
+def _scaffold_dashboard(a) -> int:
+    """0.9.3: write a dashboard page and inject board() into the project's adapter.
+
+    Idempotent. The page is wrapped in `scaffold:<name> start/end` markers so re-running adds missing
+    sections without clobbering hand edits; `board()` is only added when it is absent.
+    """
+    from console_kit import scaffold as SC
+    try:
+        plan = SC.prepare(a.project, a.page, a.adapter, a.name or Path(a.project).resolve().name)
+        touched = SC.apply(plan)
+    except SC.ScaffoldError as e:
+        print(f"refused, nothing written: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 1
+    if not touched:
+        print("scaffold: already in place; nothing to write.")
+        return 0
+    for line in touched:
+        print(line)
+    print()
+    print("Next:")
+    print("  1. Review the page and the adapter; both are yours to edit.")
+    print(f"  2. Commit so page-snapshot can read it: `git add -A && git commit -m 'scaffold dashboard'`.")
+    print(f"  3. python3 agent.py --state <STATE> page-snapshot --path {Path(a.page).as_posix()}")
+    print("     then press 'Use this page' in the console.")
+    print(f"  4. python3 agent.py --state <STATE> items-push --adapter {Path(a.adapter).as_posix()}")
+    print("  5. (Optional) keep the values fresh:")
+    print(f"     python3 agent.py --state <STATE> items-watch --adapter {Path(a.adapter).as_posix()}")
+    return 0
+
+
+def _items_watch(a) -> int:
+    """0.9.3: poll the project's items + adapter and re-run items-push whenever anything changes.
+
+    Watches `--adapter`, `.console-kit/items.json`, `.console-kit.json`, and any extra paths named by
+    `--watch` (comma-separated, project-relative). An initial push runs at startup; subsequent pushes
+    fire when any file's (mtime, size) fingerprint changes. Ctrl+C exits cleanly. No file-watcher
+    dependency: a plain stat loop at `--interval` seconds (default 5).
+    """
+    import time
+    import argparse as _ap
+    root = Path(a.project).resolve()
+    adapter_rel = Path(a.adapter).as_posix()
+    adapter_abs = (root / a.adapter).resolve() if not Path(a.adapter).is_absolute() else Path(a.adapter)
+
+    paths: list[Path] = [adapter_abs]
+    for rel in (".console-kit/items.json", ".console-kit.json"):
+        paths.append((root / rel).resolve())
+    for extra in (a.watch or "").split(","):
+        extra = extra.strip()
+        if extra:
+            paths.append((root / extra).resolve() if not Path(extra).is_absolute() else Path(extra))
+
+    def fingerprint() -> dict[str, tuple[float, int] | None]:
+        out: dict[str, tuple[float, int] | None] = {}
+        for p in paths:
+            try:
+                st = p.stat()
+                out[str(p)] = (st.st_mtime, st.st_size)
+            except FileNotFoundError:
+                out[str(p)] = None
+        return out
+
+    print(f"items-watch: {len(paths)} path(s) under {root}, every {a.interval:g}s")
+    for p in paths:
+        print(f"  {p}")
+    print()
+    seen: dict[str, tuple[float, int] | None] = {}
+    interval = max(1.0, min(300.0, float(a.interval)))
+    try:
+        while True:
+            fp = fingerprint()
+            if fp != seen:
+                # Build a Namespace with the same fields _items_push reads; keep agent name through.
+                ns = _ap.Namespace(state=a.state, project=root, adapter=adapter_rel, agent=a.agent)
+                rc = _items_push(ns)
+                if rc != 0:
+                    print(f"items-watch: push failed (rc={rc}); will retry on the next change",
+                          file=sys.stderr)
+                seen = fp
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nitems-watch: stopped")
+        return 0
+
+
 def _resolve_reviewed(root: Path) -> str:
     """0.9.1: the remote's default branch, e.g. `origin/main` or `origin/dev`.
 
@@ -914,6 +1002,23 @@ def main(argv=None) -> int:
                        "code. Run it after an upgrade, and whenever the register changes.")
     s.add_argument("--adapter", required=True, help="the adapter, a path inside the project")
     s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
+    s = sub.add_parser("items-watch", description="0.9.3: watch the project's adapter and items files and re-run "
+                       "items-push whenever any of them changes. A plain stat loop (no file-watcher dependency); "
+                       "Ctrl+C exits cleanly. Pair with the scaffolded board() to keep the dashboard fresh.")
+    s.add_argument("--adapter", required=True, help="the adapter, a path inside the project")
+    s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
+    s.add_argument("--interval", type=float, default=5.0, help="poll seconds (default: 5; clamped to 1..300)")
+    s.add_argument("--watch", default="", help="comma-separated project-relative paths to watch in addition to the "
+                   "adapter, .console-kit/items.json and .console-kit.json")
+    s = sub.add_parser("scaffold-dashboard", description="0.9.3: write a dashboard page with Items / Rollout / "
+                       "Engine / Spec / Footer sections and inject a matching board() into the project's adapter. "
+                       "Idempotent: re-run adds missing sections without clobbering hand edits.")
+    s.add_argument("--adapter", default=".console-kit/adapter.py",
+                   help="the adapter, a path inside the project (default: .console-kit/adapter.py)")
+    s.add_argument("--page", default="docs/console/page.html",
+                   help="where to write the dashboard page (default: docs/console/page.html)")
+    s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
+    s.add_argument("--name", default=None, help="the project name shown in the header (default: the directory name)")
     s = sub.add_parser("page-snapshot", description="Read the console's page from a COMMIT here (git cat-file, "
                        "never the working tree) and send it to the console server, which serves only that "
                        "snapshot (CONSOLE-kit/Q28). Refuses a commit that is not in origin's default branch "
@@ -1031,6 +1136,10 @@ def _run(a, bell: Path) -> int:
         return _costs(a)
     if a.cmd == "items-push":
         return _items_push(a)
+    if a.cmd == "items-watch":
+        return _items_watch(a)
+    if a.cmd == "scaffold-dashboard":
+        return _scaffold_dashboard(a)
     if a.cmd == "history-push":
         return _history_push(a)
     if a.cmd == "prs-push":
