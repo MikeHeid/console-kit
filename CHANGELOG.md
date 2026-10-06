@@ -624,7 +624,7 @@ skill inside the repository.
   is never offered inside a group whose form would skip it.
 - Rounds, their forms, the server and the store are unchanged.
 
-## Rendered visuals, favorites, and direction in the inbox (0.8.19)
+## Rendered visuals, favorites, direction in the inbox, and charting (0.9.0)
 
 - **Mermaid visuals are rendered as diagrams**, inside an iframe the console
   grants `allow-scripts` but NOT `allow-same-origin`: the vendored lib runs in
