@@ -165,3 +165,42 @@ The server serves one HTML page (`CONSOLE_PAGE`) and injects the console into
 it. Give each item a `<details id="item-ID"><summary>…</summary></details>` and
 the console adds a button to open that item's questions. The Inbox works on
 any page.
+
+## A live board (0.9.3)
+
+`board()` is optional. When it returns `{"shape": str, "values": {str: str}}`,
+the console serves those values on every request as `view.board`. A page whose
+elements carry `data-live="<key>"` picks them up without a new snapshot, so
+"live" means **as fresh as the last `items-push`**: the server does not run
+the adapter itself (K3, Q24).
+
+The agent socket's `scaffold-dashboard` (0.9.3) writes a template that already
+uses these attributes: Items, Rollout, Engine, Spec and a Footer, with Mermaid
+rendering, favorites and the status flowchart from the panel. See the
+`scaffold-dashboard` skill for the full flow. The sections live between
+`<!-- scaffold:<name> start -->` / `<!-- scaffold:<name> end -->` markers so
+re-running the scaffold adds missing sections without clobbering hand edits.
+
+### Keeping it fresh
+
+The adapter's live values re-reach the page only when `items-push` runs. Three
+patterns cover almost every project:
+
+1. **Manual push**: `agent.py --state STATE items-push --adapter ADAPTER` after
+   each change the owner cares about. Fine for a slow-moving register.
+2. **`items-watch`**: a long-running loop in a terminal (or a user-level
+   systemd service) that re-pushes whenever the adapter,
+   `.console-kit/items.json` or `.console-kit.json` changes:
+       agent.py --state STATE items-watch --adapter ADAPTER
+   `--interval SEC` controls the poll (default 5, clamped 1..300);
+   `--watch extra/path,another` adds project-relative paths.
+3. **A git post-commit hook** that runs an `items-push`. One shell line in
+   `.git/hooks/post-commit`.
+
+The scaffold's starter `board()` only populates `headline`, `status` and the
+timestamp honestly; the other slots are `"—"` placeholders the owner wires to
+counters the project already has (open issues from a tracker, open PRs from
+the steward's `prs-push`, the latest line in the fold log). The shape key
+(`console-kit/dashboard/1`) pins the adapter to the scaffold's layout, so a
+page updated past that version can refuse an older adapter instead of
+rendering half-filled.

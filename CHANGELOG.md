@@ -722,3 +722,26 @@ longer needs any of the workarounds they describe.
   so the next release cannot drift. `test_build.py::LayoutTests` already
   asserts the four stay equal; the script just makes passing that test the
   default.
+
+## Scaffold a dashboard, keep it live (0.9.3)
+
+- **`agent.py scaffold-dashboard`** writes a working dashboard page and
+  injects a matching `board()` into the project's adapter. The page carries
+  Header / Items / Rollout / Engine / Spec / Footer sections, each wrapped
+  in `<!-- scaffold:<name> start/end -->` markers so re-running adds
+  missing sections without clobbering hand edits. Items / Rollout / Footer
+  use `data-live="..."` attributes so values refresh from the adapter's
+  `board()` without a new snapshot. The sections mirror the shape a
+  mature console (dashboard, rollout, engine, spec) uses, so a fresh
+  install does not look bare.
+- **`agent.py items-watch`** polls the project's adapter,
+  `.console-kit/items.json`, `.console-kit.json` and any extra `--watch`
+  paths and re-runs `items-push` whenever any changes. A plain stat loop
+  (no file-watcher dependency); `--interval` clamps to 1..300 s. Pair
+  with the scaffolded `board()` to keep the dashboard fresh "as the
+  project evolves".
+- **New plugin skill** `scaffold-dashboard` so an agent can offer the
+  scaffold on an onboarded project.
+- **`docs/ADAPTER.md`** gains an "A live board" section covering `board()`,
+  the `data-live-*` contract, and the three fresh-keeping patterns:
+  manual push, `items-watch`, or a git `post-commit` hook.
