@@ -1428,3 +1428,8 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 .ck-item-chart-hint { font-weight: 400; }
 .ck-item-chart-slot { padding: 8px 10px 12px; }
 .ck-item-chart-frame { height: 440px; min-height: 240px; }
+
+/* 0.8.19: Project map in the Inbox tab — reuses the item-chart look, taller frame. */
+.ck-project-map { margin: 10px 16px 14px; border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm); background: var(--c-surface); }
+.ck-project-map-frame { height: 520px; min-height: 280px; }

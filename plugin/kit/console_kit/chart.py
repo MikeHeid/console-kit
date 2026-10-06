@@ -80,10 +80,12 @@ def _node_id(prefix: str, raw: str) -> str:
     return prefix + re.sub(r"[^A-Za-z0-9]", "_", raw)[:48]
 
 
-def build(view: Mapping, items: Mapping[str, Mapping], item: str) -> str:
+def build(view: Mapping, items: Mapping[str, Mapping], item: str, clickable: bool = False) -> str:
     """A Mermaid flowchart (LR) for `item`, as source text.
 
-    Raises KeyError when `item` is not in `items`.
+    Raises KeyError when `item` is not in `items`. When `clickable` is True, every question, round and the
+    item itself get a `click` directive that calls `window.ckClick(kind, target)` in the iframe; the parent
+    turns that message into a scroll to the question card or an item open.
     """
     if item not in items:
         raise KeyError(f"no item {item!r} in the item register")
@@ -101,6 +103,8 @@ def build(view: Mapping, items: Mapping[str, Mapping], item: str) -> str:
     item_node = _node_id("I_", item)
     item_label = _safe(item, 48) + ("<br/>" + title if title else "")
     lines.append(f'  {item_node}(["{item_label}"]):::item')
+    if clickable:
+        lines.append(f'  click {item_node} call ckClick("item", "{_js(item)}")')
 
     # Fork (round) nodes.
     fork_nodes: dict[str, str] = {}
@@ -115,6 +119,8 @@ def build(view: Mapping, items: Mapping[str, Mapping], item: str) -> str:
         fork_nodes[fid] = node_id
         lines.append(f'  {node_id}{{{{"{label}"}}}}:::round')
         lines.append(f"  {item_node} --> {node_id}")
+        if clickable:
+            lines.append(f'  click {node_id} call ckClick("fork", "{_js(fid)}")')
 
     # Question nodes, capped. "In cluster" means it already hangs off a round.
     kept = list(questions.values())[:MAX_NODES]
@@ -135,6 +141,8 @@ def build(view: Mapping, items: Mapping[str, Mapping], item: str) -> str:
         fid = qd.get("forked_from")
         parent = fork_nodes.get(fid) if fid else None
         lines.append(f"  {parent or item_node} --> {node_id}")
+        if clickable:
+            lines.append(f'  click {node_id} call ckClick("question", "{_js(qid)}")')
 
     if skipped > 0:
         more_id = _node_id("MORE_", item)
@@ -156,6 +164,96 @@ def build(view: Mapping, items: Mapping[str, Mapping], item: str) -> str:
             lines.append(f"  {fork_nodes[prev]} -. follow-up .-> {fork_nodes[fid]}")
 
     return "\n".join(lines) + "\n"
+
+
+# -- whole-project chart ----------------------------------------------------------------
+
+PROJECT_MAX_NODES = 120   # items on one project chart; past this a group is shown as "+N more under X"
+
+
+def build_project(view: Mapping, items: Mapping[str, Mapping], clickable: bool = False) -> str:
+    """A Mermaid flowchart (TD) of every item in the project, parent -> child, coloured by status roll-up.
+
+    The roll-up on an item uses its own questions only (not its descendants'): awaiting_you dominates,
+    then stale, then unlocked, then locked, then nothing. Clicking an item node opens it in the console.
+    """
+    if not items:
+        return "flowchart TD\n" + "\n".join(_classdefs()) + '\n  EMPTY(["No items yet"]):::muted\n'
+
+    # Group each item's questions by state.
+    by_item: dict[str, dict[str, int]] = {k: {} for k in items}
+    for q in (view.get("questions") or {}).values():
+        qd = q.get("question") or {}
+        it = qd.get("item")
+        st = q.get("state") or "unlocked"
+        if it in by_item:
+            by_item[it][st] = by_item[it].get(st, 0) + 1
+
+    lines: list[str] = ["flowchart TD"]
+    lines.extend(_classdefs())
+
+    kept = list(items.items())
+    skipped = max(0, len(kept) - PROJECT_MAX_NODES)
+    kept = kept[:PROJECT_MAX_NODES]
+    kept_ids = {k for k, _ in kept}
+
+    for key, data in kept:
+        data = data or {}
+        title = _safe(data.get("title") or "", 44)
+        counts = by_item.get(key) or {}
+        state = _rollup(counts)
+        total = sum(counts.values())
+        suffix = _state_badge(counts)
+        label = _safe(key, 44) + ("<br/>" + title if title else "") + (("<br/>" + suffix) if suffix else "")
+        node_id = _node_id("I_", key)
+        shape_open, shape_close = ('(["', '"])')  # item uses the stadium shape
+        lines.append(f"  {node_id}{shape_open}{label}{shape_close}:::{STATE_CLASS.get(state, 'muted')}")
+        if clickable:
+            lines.append(f'  click {node_id} call ckClick("item", "{_js(key)}")')
+        del total  # kept for future use (badge rendering); silence linters
+
+    for key, data in kept:
+        data = data or {}
+        parent = data.get("parent")
+        if isinstance(parent, str) and parent in kept_ids and parent != key:
+            lines.append(f"  {_node_id('I_', parent)} --> {_node_id('I_', key)}")
+
+    if skipped > 0:
+        more_id = "MORE_project"
+        lines.append(f'  {more_id}(["… and {skipped} more items"]):::muted')
+
+    return "\n".join(lines) + "\n"
+
+
+def _rollup(counts: Mapping[str, int]) -> str:
+    """The dominant state for an item's own questions, in the order the owner cares about."""
+    for s in ("awaiting_you", "stale", "unlocked", "locked", "superseded", "withdrawn"):
+        if counts.get(s):
+            return s
+    return "muted"
+
+
+def _state_badge(counts: Mapping[str, int]) -> str:
+    """A short per-state tally for an item's node label, like '? 2 ~ 1 o 3'. Empty when there are no questions."""
+    parts = []
+    for s, glyph in (("awaiting_you", "?"), ("unlocked", "~"), ("stale", "!"), ("locked", "o")):
+        n = counts.get(s) or 0
+        if n:
+            parts.append(f"{glyph} {n}")
+    return " · ".join(parts)
+
+
+def _js(s: str) -> str:
+    """A JavaScript-safe string literal body for a Mermaid `click` call argument (double-quoted)."""
+    out = []
+    for ch in s:
+        if ch == '\\' or ch == '"':
+            out.append('\\' + ch)
+        elif ord(ch) < 0x20:
+            out.append(f'\\u{ord(ch):04x}')
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _questions_on(view: Mapping, item: str) -> dict:

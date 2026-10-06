@@ -387,6 +387,48 @@
     }
   }
 
+  // 0.8.19: iframe-to-parent clicks from a chart node. Only our own chart iframes talk this shape,
+  // and we re-check the fields; anything else is ignored. The parent decides what to do (scroll vs. open).
+  window.addEventListener('message', e => {
+    const d = e && e.data;
+    if (!d || d.type !== 'ck-chart-click' || typeof d.target !== 'string' || typeof d.kind !== 'string') return;
+    if (!panelEl || panelEl.getAttribute('data-open') !== 'true') return;
+    if (d.kind === 'item') {
+      openFromInbox(d.target);
+      return;
+    }
+    if (d.kind === 'question') {
+      // Already on the item view? scroll to the card. Not? open the item first, then scroll.
+      const inItem = currentMode === 'item' && currentItem === qidItem(d.target);
+      const scroll = () => {
+        const sel = '[data-qid="' + cssEscape(d.target) + '"]';
+        const node = panelEl.querySelector('.ck-question' + sel) || panelEl.querySelector(sel);
+        if (node) {
+          node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          pulse(node);
+        }
+      };
+      if (inItem) { scroll(); return; }
+      const owner = qidItem(d.target);
+      if (owner) { openFromInbox(owner, d.target); setTimeout(scroll, 120); }
+      return;
+    }
+    if (d.kind === 'fork') {
+      // Scroll to the fork's own section inside the item.
+      const sel = '[data-fork="' + cssEscape(d.target) + '"], [data-request="' + cssEscape(d.target) + '"]';
+      const node = panelEl.querySelector(sel);
+      if (node) { node.scrollIntoView({ behavior: 'smooth', block: 'center' }); pulse(node); }
+    }
+  });
+
+  function qidItem(qid) {
+    return (typeof qid === 'string' && qid.indexOf('/') > 0) ? qid.split('/')[0] : null;
+  }
+
+  function cssEscape(s) {
+    return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/[^\w-]/g, c => '\\' + c);
+  }
+
   // 0.8.19: a short tone when a visual arrives. Suspended AudioContexts are resumed on first click.
   let audioCtx = null;
   function beep() {
@@ -832,6 +874,8 @@
       body.appendChild(el('p', { className: 'ck-items-note', role: 'status',
         style: 'color: var(--c-fg-muted); padding: 12px 20px;' }, [view.items_note]));
     }
+    // 0.8.19: a map of every item (collapsible, lazy). Clicking a node opens that item.
+    if (items && Object.keys(items).length > 1) body.appendChild(renderProjectMap());
     // 0.8.19: items whose visuals arrived since the last look, so a drawn flowchart is impossible to miss.
     const newVisuals = unseenVisualsByItem();
     const newVisualIds = Object.keys(newVisuals);
@@ -1804,6 +1848,36 @@
       else { openCharts.delete(itemId); }
     });
     if (openCharts.has(itemId)) load();
+    return wrap;
+  }
+
+  // 0.8.19: whole-project map, parent -> child, coloured by status roll-up per item. Lazy and collapsible.
+  let projectMapOpen = false;
+  function renderProjectMap() {
+    const wrap = el('details', { className: 'ck-project-map' });
+    if (projectMapOpen) wrap.setAttribute('open', '');
+    const sum = el('summary', { className: 'ck-item-chart-summary' }, [
+      el('span', { className: 'ck-item-chart-title' }, ['Project map']),
+      el('span', { className: 'ck-muted ck-item-chart-hint' }, [' — every item, parent → child, by status'])
+    ]);
+    wrap.appendChild(sum);
+    const slot = el('div', { className: 'ck-item-chart-slot' });
+    wrap.appendChild(slot);
+    const load = () => {
+      if (slot.querySelector('iframe')) return;
+      const frame = document.createElement('iframe');
+      frame.setAttribute('sandbox', 'allow-scripts');
+      frame.setAttribute('referrerpolicy', 'no-referrer');
+      frame.setAttribute('title', 'Project map');
+      frame.className = 'ck-visual-frame ck-visual-frame-mermaid ck-project-map-frame';
+      frame.src = config.api + '/project-chart';
+      slot.appendChild(frame);
+    };
+    wrap.addEventListener('toggle', () => {
+      projectMapOpen = wrap.open;
+      if (wrap.open) load();
+    });
+    if (projectMapOpen) load();
     return wrap;
   }
 

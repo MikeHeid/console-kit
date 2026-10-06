@@ -84,7 +84,12 @@ to run next. `INSTALL.md` (also in the zip) has the whole guide.
   own shape, dotted edges where a newer question supersedes an older one or
   a round follows up on an earlier one. It is lazy (nothing loads until you
   expand it) and renders inside the same sandboxed Mermaid frame as a
-  requested visual.
+  requested visual. **Click a node** to jump straight to that question's card
+  (or open an item if it is an item node).
+- **Project map** at the top of the Inbox: a tree of every item, parent to
+  child, each node coloured by its own questions' roll-up (open > stale >
+  answered-but-unlocked > locked) with a short tally. Click an item to open
+  it. Lazy, like the per-item chart.
 - **Request a visual** on an item. The agent answers with a Mermaid diagram
   (rendered right there inside a sandboxed frame — the vendored lib runs in an
   opaque origin and cannot touch the console's cookies, storage or network;

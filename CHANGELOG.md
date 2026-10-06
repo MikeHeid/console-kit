@@ -657,6 +657,15 @@ skill inside the repository.
   40 questions shown, past that an ellipsis names how many more exist.
   Served through `GET /api/item-chart?item=X`, same sandboxed Mermaid frame
   as `/api/visual-render`.
+- **Nodes click back.** A chart node emits `postMessage` from inside its
+  sandboxed iframe; the parent scrolls to that question's card (opening the
+  item first when the owner is not already in it), or opens an item when it
+  is an item node. Mermaid runs at `securityLevel: 'antiscript'` for charts,
+  so the text in nodes is still sanitised but `click` directives fire.
+- **Project map** on the Inbox tab (collapsible, above every other section).
+  `GET /api/project-chart` builds a tree of every item, parent → child, with
+  each node coloured by its own questions' roll-up (awaiting_you > stale >
+  unlocked > locked > nothing) and a short tally like `? 2 · o 3`.
 - **Documentation.** The README now has a **Windows + WSL2** section covering
   the CRLF trap (`core.autocrlf`), the `origin/main` default in
   `page-snapshot`, the leading-dot page path, the first `items-push`, reaching

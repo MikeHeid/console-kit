@@ -140,26 +140,39 @@ VISUAL_RENDER_CSP_TMPL = (
 MERMAID_JS = "vendor/mermaid.min.js"
 
 
-def _mermaid_wrapper(source: str, title: str, nonce: str) -> tuple[bytes, str, str]:
+def _mermaid_wrapper(source: str, title: str, nonce: str, clickable: bool = False) -> tuple[bytes, str, str]:
     """A strict-CSP HTML page that renders `source` as a Mermaid diagram inside the console's sandboxed iframe.
 
     `source` is embedded with every HTML-special character escaped, so no DOM can be injected through it. The
     vendored `/api/mermaid.js` loads under `script-src 'self'`; the init call carries this request's nonce.
+    `clickable=True` turns `securityLevel` to `antiscript` (text is still sanitised) so Mermaid honours
+    `click` directives, and defines `ckClick(kind, target)` which posts a message to the parent window; the
+    parent then scrolls to a question card or opens an item (0.8.19). This is safe because the mmd source is
+    server-built from values that pass `S.ITEM_ID`/`S.QID` and never includes agent text verbatim as a
+    directive.
     """
     def esc(s: str) -> str:
         return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 .replace('"', "&quot;").replace("'", "&#39;"))
+    level = "antiscript" if clickable else "strict"
+    click_glue = (
+        "window.ckClick=function(kind,target){"
+        "try{window.parent.postMessage({type:'ck-chart-click',kind:kind,target:target},'*');}"
+        "catch(e){}};" if clickable else ""
+    )
     html = (
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         f"<title>{esc(title)}</title>"
         "<style>html,body{margin:0;padding:12px;background:#fff;color:#111;font:14px system-ui,sans-serif}"
         ".mermaid{display:flex;justify-content:center}"
+        ".mermaid .clickable{cursor:pointer}"
         ".err{color:#a00;font:12px/1.4 ui-monospace,monospace;white-space:pre-wrap}</style>"
         "</head><body>"
         f"<pre class=\"mermaid\">{esc(source)}</pre>"
         "<script src=\"/api/mermaid.js\"></script>"
         f"<script nonce=\"{esc(nonce)}\">"
-        "try{mermaid.initialize({startOnLoad:true,theme:'neutral',securityLevel:'strict'});}"
+        f"{click_glue}"
+        f"try{{mermaid.initialize({{startOnLoad:true,theme:'neutral',securityLevel:'{level}'}});}}"
         "catch(e){document.body.innerHTML='<p class=\\'err\\'>Mermaid failed to load: '+(e&&e.message||e)+'</p>';}"
         "</script></body></html>"
     )
@@ -732,17 +745,28 @@ class Console:
         """0.8.19: an auto-generated Mermaid status flowchart for `item`, rendered the same way as a visual.
 
         The source is built here from the view (no agent round-trip); the HTML wrapper and CSP are the same
-        as `visual_render`. Raises RequestError(404) when the item is not in the register.
+        as `visual_render`. Nodes click back to the parent (which scrolls to the question card). Raises
+        RequestError(404) when the item is not in the register.
         """
         items = self.items()
         if item not in items:
             raise RequestError(404, f"no item {item!r} in the project's item list")
         view = self.payload()["view"]
         try:
-            source = CH.build(view, items, item)
+            source = CH.build(view, items, item, clickable=True)
         except KeyError as e:  # race: items changed between items() and payload()
             raise RequestError(404, str(e)) from None
-        return _mermaid_wrapper(source, f"Status flowchart: {item}", nonce)
+        return _mermaid_wrapper(source, f"Status flowchart: {item}", nonce, clickable=True)
+
+    def project_chart(self, nonce: str) -> tuple[bytes, str, str]:
+        """0.8.19: a Mermaid tree of every item in the project, parent -> child, coloured by status roll-up.
+
+        Clicking an item opens it in the console. Same sandboxed wrapper and CSP as `visual_render`.
+        """
+        items = self.items()
+        view = self.payload()["view"]
+        source = CH.build_project(view, items, clickable=True)
+        return _mermaid_wrapper(source, "Project map", nonce, clickable=True)
 
     def mermaid_js(self) -> bytes:
         """0.8.19: the vendored Mermaid library bytes; raises FileNotFoundError when it is not installed."""
@@ -1814,6 +1838,10 @@ class OwnerHandler(_Handler):
                                                  "re-install the plugin so plugin/kit/console_kit/vendor/ is present"})
             return self._send_raw(200, data, "application/javascript; charset=utf-8",
                                   "default-src 'none'; frame-ancestors 'self'")
+        if self.path == "/api/project-chart":   # 0.8.19: a tree of every item, status roll-up per node
+            nonce = secrets.token_hex(16)
+            data, ctype, csp = self.console.project_chart(nonce)
+            return self._send_raw(200, data, ctype, csp)
         route, query = self._query()
         live = {"/api/wait": self._wait, "/api/feed": self._feed, "/api/evidence": self._evidence,
                 "/api/visual": self._visual, "/api/visual-render": self._visual_render,
