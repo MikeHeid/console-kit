@@ -140,7 +140,8 @@ VISUAL_RENDER_CSP_TMPL = (
 MERMAID_JS = "vendor/mermaid.min.js"
 
 
-def _mermaid_wrapper(source: str, title: str, nonce: str, clickable: bool = False) -> tuple[bytes, str, str]:
+def _mermaid_wrapper(source: str, title: str, nonce: str, clickable: bool = False,
+                     filename: str = "chart") -> tuple[bytes, str, str]:
     """A strict-CSP HTML page that renders `source` as a Mermaid diagram inside the console's sandboxed iframe.
 
     `source` is embedded with every HTML-special character escaped, so no DOM can be injected through it. The
@@ -149,7 +150,8 @@ def _mermaid_wrapper(source: str, title: str, nonce: str, clickable: bool = Fals
     `click` directives, and defines `ckClick(kind, target)` which posts a message to the parent window; the
     parent then scrolls to a question card or opens an item (0.8.19). This is safe because the mmd source is
     server-built from values that pass `S.ITEM_ID`/`S.QID` and never includes agent text verbatim as a
-    directive.
+    directive. A Save control serializes the rendered SVG and posts it back to the parent (0.8.19); the
+    parent downloads it as `<filename>.svg`.
     """
     def esc(s: str) -> str:
         return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -160,20 +162,34 @@ def _mermaid_wrapper(source: str, title: str, nonce: str, clickable: bool = Fals
         "try{window.parent.postMessage({type:'ck-chart-click',kind:kind,target:target},'*');}"
         "catch(e){}};" if clickable else ""
     )
+    safe_filename = re.sub(r"[^A-Za-z0-9._-]+", "-", filename).strip("-") or "chart"
     html = (
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         f"<title>{esc(title)}</title>"
         "<style>html,body{margin:0;padding:12px;background:#fff;color:#111;font:14px system-ui,sans-serif}"
         ".mermaid{display:flex;justify-content:center}"
         ".mermaid .clickable{cursor:pointer}"
+        ".ck-wrapper-bar{display:flex;justify-content:flex-end;gap:6px;margin-bottom:6px}"
+        ".ck-wrapper-save{font:12px system-ui,sans-serif;padding:4px 10px;cursor:pointer;"
+        "border:1px solid #bbb;border-radius:4px;background:#fafafa;color:#111}"
+        ".ck-wrapper-save:hover{border-color:#555;background:#fff}"
         ".err{color:#a00;font:12px/1.4 ui-monospace,monospace;white-space:pre-wrap}</style>"
         "</head><body>"
+        "<div class=\"ck-wrapper-bar\"><button type=\"button\" class=\"ck-wrapper-save\" "
+        "id=\"ck-save\" title=\"Download as SVG\">Save SVG</button></div>"
         f"<pre class=\"mermaid\">{esc(source)}</pre>"
         "<script src=\"/api/mermaid.js\"></script>"
         f"<script nonce=\"{esc(nonce)}\">"
         f"{click_glue}"
         f"try{{mermaid.initialize({{startOnLoad:true,theme:'neutral',securityLevel:'{level}'}});}}"
         "catch(e){document.body.innerHTML='<p class=\\'err\\'>Mermaid failed to load: '+(e&&e.message||e)+'</p>';}"
+        "document.getElementById('ck-save').addEventListener('click',function(){"
+        "var svg=document.querySelector('.mermaid svg');"
+        "if(!svg){return;}"
+        "var xml=new XMLSerializer().serializeToString(svg);"
+        f"try{{window.parent.postMessage({{type:'ck-chart-export',filename:{json.dumps(safe_filename)},svg:xml}},'*');}}"
+        "catch(e){}"
+        "});"
         "</script></body></html>"
     )
     csp = VISUAL_RENDER_CSP_TMPL.format(nonce=nonce)
@@ -739,7 +755,7 @@ class Console:
         except VIS.VisualError as e:
             raise RequestError(409, str(e)) from None
         title = rec.get("title") or rid
-        return _mermaid_wrapper(source, f"Visual: {title}", nonce)
+        return _mermaid_wrapper(source, f"Visual: {title}", nonce, filename=f"visual-{rid[:12]}")
 
     def item_chart(self, item: str, nonce: str) -> tuple[bytes, str, str]:
         """0.8.19: an auto-generated Mermaid status flowchart for `item`, rendered the same way as a visual.
@@ -756,17 +772,22 @@ class Console:
             source = CH.build(view, items, item, clickable=True)
         except KeyError as e:  # race: items changed between items() and payload()
             raise RequestError(404, str(e)) from None
-        return _mermaid_wrapper(source, f"Status flowchart: {item}", nonce, clickable=True)
+        return _mermaid_wrapper(source, f"Status flowchart: {item}", nonce, clickable=True,
+                                filename=f"item-{item}-chart")
 
-    def project_chart(self, nonce: str) -> tuple[bytes, str, str]:
+    def project_chart(self, nonce: str, state: str | None = None) -> tuple[bytes, str, str]:
         """0.8.19: a Mermaid tree of every item in the project, parent -> child, coloured by status roll-up.
 
         Clicking an item opens it in the console. Same sandboxed wrapper and CSP as `visual_render`.
+        `state` narrows the tree to items whose own-questions roll-up equals it (plus their ancestors so the
+        tree is connected). Unknown or missing values show every item.
         """
         items = self.items()
         view = self.payload()["view"]
-        source = CH.build_project(view, items, clickable=True)
-        return _mermaid_wrapper(source, "Project map", nonce, clickable=True)
+        source = CH.build_project(view, items, clickable=True, state_filter=state)
+        title = "Project map" + (f" — {state}" if state else "")
+        suffix = f"-{state}" if state else ""
+        return _mermaid_wrapper(source, title, nonce, clickable=True, filename=f"project-map{suffix}")
 
     def mermaid_js(self) -> bytes:
         """0.8.19: the vendored Mermaid library bytes; raises FileNotFoundError when it is not installed."""
@@ -1838,11 +1859,9 @@ class OwnerHandler(_Handler):
                                                  "re-install the plugin so plugin/kit/console_kit/vendor/ is present"})
             return self._send_raw(200, data, "application/javascript; charset=utf-8",
                                   "default-src 'none'; frame-ancestors 'self'")
-        if self.path == "/api/project-chart":   # 0.8.19: a tree of every item, status roll-up per node
-            nonce = secrets.token_hex(16)
-            data, ctype, csp = self.console.project_chart(nonce)
-            return self._send_raw(200, data, ctype, csp)
         route, query = self._query()
+        if route == "/api/project-chart" and query is not None:
+            return self._project_chart(query)
         live = {"/api/wait": self._wait, "/api/feed": self._feed, "/api/evidence": self._evidence,
                 "/api/visual": self._visual, "/api/visual-render": self._visual_render,
                 "/api/item-chart": self._item_chart}.get(route)
@@ -1953,6 +1972,16 @@ class OwnerHandler(_Handler):
             raise RequestError(400, "item must be an item id")
         nonce = secrets.token_hex(16)
         data, ctype, csp = self.console.item_chart(item, nonce)
+        self._send_raw(200, data, ctype, csp)
+
+    def _project_chart(self, query: dict[str, str]) -> None:
+        """0.8.19: a Mermaid tree of every item, optionally narrowed to one state (plus ancestors)."""
+        self._only(query, {"state"}, "/api/project-chart")
+        state = query.get("state") or None
+        if state is not None and state not in CH.STATE_CLASS:
+            raise RequestError(400, f"state must be one of {', '.join(sorted(CH.STATE_CLASS))}")
+        nonce = secrets.token_hex(16)
+        data, ctype, csp = self.console.project_chart(nonce, state)
         self._send_raw(200, data, ctype, csp)
 
     def _check(self) -> None:

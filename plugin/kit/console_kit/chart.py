@@ -171,11 +171,16 @@ def build(view: Mapping, items: Mapping[str, Mapping], item: str, clickable: boo
 PROJECT_MAX_NODES = 120   # items on one project chart; past this a group is shown as "+N more under X"
 
 
-def build_project(view: Mapping, items: Mapping[str, Mapping], clickable: bool = False) -> str:
+def build_project(view: Mapping, items: Mapping[str, Mapping], *, clickable: bool = False,
+                  state_filter: str | None = None) -> str:
     """A Mermaid flowchart (TD) of every item in the project, parent -> child, coloured by status roll-up.
 
     The roll-up on an item uses its own questions only (not its descendants'): awaiting_you dominates,
     then stale, then unlocked, then locked, then nothing. Clicking an item node opens it in the console.
+
+    `state_filter` keeps items whose own roll-up equals the filter, plus every ancestor on the way to the
+    root (so the tree stays connected); ancestors that do not themselves match are drawn muted. `None` or
+    an unknown value disables the filter and shows every item.
     """
     if not items:
         return "flowchart TD\n" + "\n".join(_classdefs()) + '\n  EMPTY(["No items yet"]):::muted\n'
@@ -189,28 +194,48 @@ def build_project(view: Mapping, items: Mapping[str, Mapping], clickable: bool =
         if it in by_item:
             by_item[it][st] = by_item[it].get(st, 0) + 1
 
+    rollups = {k: _rollup(by_item.get(k) or {}) for k in items}
+    valid_filter = state_filter if state_filter in STATE_CLASS else None
+
+    if valid_filter is None:
+        visible_ids = set(items.keys())
+        ancestor_only: set[str] = set()
+    else:
+        matched = {k for k, s in rollups.items() if s == valid_filter}
+        # Add every ancestor on the way to the root so the tree stays connected.
+        ancestors: set[str] = set()
+        for k in matched:
+            cur = (items.get(k) or {}).get("parent")
+            while isinstance(cur, str) and cur in items and cur not in matched and cur not in ancestors:
+                ancestors.add(cur)
+                cur = (items.get(cur) or {}).get("parent")
+        visible_ids = matched | ancestors
+        ancestor_only = ancestors - matched
+
     lines: list[str] = ["flowchart TD"]
     lines.extend(_classdefs())
 
-    kept = list(items.items())
-    skipped = max(0, len(kept) - PROJECT_MAX_NODES)
-    kept = kept[:PROJECT_MAX_NODES]
+    if not visible_ids:
+        lines.append(f'  EMPTY(["No items match {_js(valid_filter or "")}"]):::muted')
+        return "\n".join(lines) + "\n"
+
+    ordered = [(k, items[k]) for k in items if k in visible_ids]
+    skipped = max(0, len(ordered) - PROJECT_MAX_NODES)
+    kept = ordered[:PROJECT_MAX_NODES]
     kept_ids = {k for k, _ in kept}
 
     for key, data in kept:
         data = data or {}
         title = _safe(data.get("title") or "", 44)
         counts = by_item.get(key) or {}
-        state = _rollup(counts)
-        total = sum(counts.values())
+        state = rollups.get(key, "muted")
+        cls = STATE_CLASS.get(state, "muted") if key not in ancestor_only else "muted"
         suffix = _state_badge(counts)
         label = _safe(key, 44) + ("<br/>" + title if title else "") + (("<br/>" + suffix) if suffix else "")
         node_id = _node_id("I_", key)
-        shape_open, shape_close = ('(["', '"])')  # item uses the stadium shape
-        lines.append(f"  {node_id}{shape_open}{label}{shape_close}:::{STATE_CLASS.get(state, 'muted')}")
+        lines.append(f'  {node_id}(["{label}"]):::{cls}')
         if clickable:
             lines.append(f'  click {node_id} call ckClick("item", "{_js(key)}")')
-        del total  # kept for future use (badge rendering); silence linters
 
     for key, data in kept:
         data = data or {}

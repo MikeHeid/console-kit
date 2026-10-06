@@ -89,7 +89,11 @@ to run next. `INSTALL.md` (also in the zip) has the whole guide.
 - **Project map** at the top of the Inbox: a tree of every item, parent to
   child, each node coloured by its own questions' roll-up (open > stale >
   answered-but-unlocked > locked) with a short tally. Click an item to open
-  it. Lazy, like the per-item chart.
+  it. A chip row narrows the map to one state; ancestors stay drawn muted so
+  the tree is still a tree. Lazy, like the per-item chart.
+- **Save SVG** on every chart and Mermaid visual. The rendered SVG is sent
+  back to the parent and downloaded as a plain file; nothing goes back to
+  the server.
 - **Request a visual** on an item. The agent answers with a Mermaid diagram
   (rendered right there inside a sandboxed frame — the vendored lib runs in an
   opaque origin and cannot touch the console's cookies, storage or network;

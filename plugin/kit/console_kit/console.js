@@ -391,35 +391,54 @@
   // and we re-check the fields; anything else is ignored. The parent decides what to do (scroll vs. open).
   window.addEventListener('message', e => {
     const d = e && e.data;
-    if (!d || d.type !== 'ck-chart-click' || typeof d.target !== 'string' || typeof d.kind !== 'string') return;
+    if (!d || typeof d !== 'object' || !d.type) return;
+    if (d.type === 'ck-chart-export') {
+      // The iframe serialised its rendered SVG; the parent builds a blob and triggers the download.
+      if (typeof d.svg !== 'string' || !d.svg.length) return;
+      const name = (typeof d.filename === 'string' && /^[\w.-]{1,80}$/.test(d.filename)) ? d.filename : 'chart';
+      const blob = new Blob([d.svg], { type: 'image/svg+xml' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = name + '.svg';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      announce('SVG saved as ' + name + '.svg');
+      return;
+    }
+    if (d.type !== 'ck-chart-click' || typeof d.target !== 'string' || typeof d.kind !== 'string') return;
     if (!panelEl || panelEl.getAttribute('data-open') !== 'true') return;
     if (d.kind === 'item') {
       openFromInbox(d.target);
       return;
     }
     if (d.kind === 'question') {
-      // Already on the item view? scroll to the card. Not? open the item first, then scroll.
+      // Already on the item view? scroll + focus. Not? open the item first, then scroll + focus.
       const inItem = currentMode === 'item' && currentItem === qidItem(d.target);
-      const scroll = () => {
+      const land = () => {
         const sel = '[data-qid="' + cssEscape(d.target) + '"]';
         const node = panelEl.querySelector('.ck-question' + sel) || panelEl.querySelector(sel);
-        if (node) {
-          node.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          pulse(node);
-        }
+        if (node) focusCard(node);
       };
-      if (inItem) { scroll(); return; }
+      if (inItem) { land(); return; }
       const owner = qidItem(d.target);
-      if (owner) { openFromInbox(owner, d.target); setTimeout(scroll, 120); }
+      if (owner) { openFromInbox(owner, d.target); setTimeout(land, 120); }
       return;
     }
     if (d.kind === 'fork') {
-      // Scroll to the fork's own section inside the item.
+      // Scroll + focus the fork's own section inside the item.
       const sel = '[data-fork="' + cssEscape(d.target) + '"], [data-request="' + cssEscape(d.target) + '"]';
       const node = panelEl.querySelector(sel);
-      if (node) { node.scrollIntoView({ behavior: 'smooth', block: 'center' }); pulse(node); }
+      if (node) focusCard(node);
     }
   });
+
+  // scrollIntoView + focus for keyboard follow-through; adds tabindex=-1 so a plain <div> can receive focus.
+  function focusCard(node) {
+    node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    pulse(node);
+    if (!node.hasAttribute('tabindex')) node.setAttribute('tabindex', '-1');
+    try { node.focus({ preventScroll: true }); } catch (e) { node.focus(); }
+  }
 
   function qidItem(qid) {
     return (typeof qid === 'string' && qid.indexOf('/') > 0) ? qid.split('/')[0] : null;
@@ -1853,6 +1872,14 @@
 
   // 0.8.19: whole-project map, parent -> child, coloured by status roll-up per item. Lazy and collapsible.
   let projectMapOpen = false;
+  let projectMapFilter = '';   // '' = all; else one of the state keys
+  const MAP_CHIPS = [
+    ['', 'All'],
+    ['awaiting_you', '? Awaiting you'],
+    ['stale', '! Stale'],
+    ['unlocked', '~ Unlocked'],
+    ['locked', 'o Locked']
+  ];
   function renderProjectMap() {
     const wrap = el('details', { className: 'ck-project-map' });
     if (projectMapOpen) wrap.setAttribute('open', '');
@@ -1862,22 +1889,43 @@
     ]);
     wrap.appendChild(sum);
     const slot = el('div', { className: 'ck-item-chart-slot' });
-    wrap.appendChild(slot);
-    const load = () => {
-      if (slot.querySelector('iframe')) return;
-      const frame = document.createElement('iframe');
-      frame.setAttribute('sandbox', 'allow-scripts');
-      frame.setAttribute('referrerpolicy', 'no-referrer');
-      frame.setAttribute('title', 'Project map');
-      frame.className = 'ck-visual-frame ck-visual-frame-mermaid ck-project-map-frame';
-      frame.src = config.api + '/project-chart';
-      slot.appendChild(frame);
+    const chips = el('div', { className: 'ck-chip-row', role: 'tablist', 'aria-label': 'Filter the project map' });
+    const frame = document.createElement('iframe');
+    frame.setAttribute('sandbox', 'allow-scripts');
+    frame.setAttribute('referrerpolicy', 'no-referrer');
+    frame.setAttribute('title', 'Project map');
+    frame.className = 'ck-visual-frame ck-visual-frame-mermaid ck-project-map-frame';
+    const buildSrc = () => config.api + '/project-chart' +
+      (projectMapFilter ? ('?state=' + encodeURIComponent(projectMapFilter)) : '');
+    const loadFrame = () => {
+      if (!frame.src) frame.src = buildSrc();
+      else frame.src = buildSrc();
     };
+    for (const [key, label] of MAP_CHIPS) {
+      const on = key === projectMapFilter;
+      const b = el('button', {
+        className: 'ck-chip' + (on ? ' ck-chip-on' : ''),
+        type: 'button', role: 'tab',
+        'aria-pressed': on ? 'true' : 'false'
+      }, [label]);
+      b.addEventListener('click', () => {
+        projectMapFilter = key;
+        for (const other of chips.querySelectorAll('.ck-chip')) {
+          other.classList.toggle('ck-chip-on', other === b);
+          other.setAttribute('aria-pressed', other === b ? 'true' : 'false');
+        }
+        if (wrap.open) loadFrame();
+      });
+      chips.appendChild(b);
+    }
+    slot.appendChild(chips);
+    slot.appendChild(frame);
+    wrap.appendChild(slot);
     wrap.addEventListener('toggle', () => {
       projectMapOpen = wrap.open;
-      if (wrap.open) load();
+      if (wrap.open && !frame.src) loadFrame();
     });
-    if (projectMapOpen) load();
+    if (projectMapOpen && !frame.src) loadFrame();
     return wrap;
   }
 

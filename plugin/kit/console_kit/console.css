@@ -1433,3 +1433,20 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 .ck-project-map { margin: 10px 16px 14px; border: 1px solid var(--c-border);
   border-radius: var(--radius-sm); background: var(--c-surface); }
 .ck-project-map-frame { height: 520px; min-height: 280px; }
+
+/* 0.8.19: filter chips above the project map. */
+.ck-chip-row {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 2px 2px 10px;
+}
+.ck-chip {
+  font-size: 12px; padding: 4px 10px;
+  border: 1px solid var(--c-border); border-radius: 999px;
+  background: var(--c-surface); color: var(--c-fg); cursor: pointer;
+}
+.ck-chip:hover, .ck-chip:focus-visible {
+  border-color: var(--c-accent); outline: none;
+}
+.ck-chip-on {
+  background: var(--c-accent); color: #fff; border-color: var(--c-accent);
+}

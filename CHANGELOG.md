@@ -665,7 +665,17 @@ skill inside the repository.
 - **Project map** on the Inbox tab (collapsible, above every other section).
   `GET /api/project-chart` builds a tree of every item, parent → child, with
   each node coloured by its own questions' roll-up (awaiting_you > stale >
-  unlocked > locked > nothing) and a short tally like `? 2 · o 3`.
+  unlocked > locked > nothing) and a short tally like `? 2 · o 3`. A chip row
+  above it narrows the map to one state (`?state=awaiting_you|stale|unlocked|locked`
+  on the endpoint); ancestors of matching items are kept, drawn muted, so the
+  tree stays connected.
+- **Clicking a chart node focuses the card**, not just scrolls: tabindex is
+  added when missing so keyboard follow-through lands where the pointer did.
+- **Save SVG** on every chart and every Mermaid visual. The iframe serialises
+  its rendered SVG and posts it back to the parent, which triggers a plain
+  browser download (`item-foo-chart.svg`, `project-map.svg`,
+  `project-map-stale.svg`, `visual-<rid>.svg`). No same-origin needed; nothing
+  reaches the server.
 - **Documentation.** The README now has a **Windows + WSL2** section covering
   the CRLF trap (`core.autocrlf`), the `origin/main` default in
   `page-snapshot`, the leading-dot page path, the first `items-push`, reaching
