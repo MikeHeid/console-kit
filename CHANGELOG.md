@@ -707,3 +707,18 @@ longer needs any of the workarounds they describe.
   server's refusal when a write names an unknown item names the push to
   run. The brief defect "item X is not in the project's item list" without
   a next-step is gone.
+
+## Fix /health version drift and automate the bump (0.9.2)
+
+- **`console_kit.__version__` is in step with VERSION again.** Across 0.9.0
+  and 0.9.1 the package's `__version__` stayed at `0.8.18`, so `/health`,
+  the dashboard footer, and the `console-kit` block the server embeds all
+  reported the wrong version. The code itself was 0.9.1; only the label
+  lied. 0.9.2 brings every version-holding file into sync and reports
+  `0.9.2`.
+- **`release.py <version>` bumps all four files in one shot.** `VERSION`,
+  `plugin/.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`
+  and `plugin/kit/console_kit/__init__.py` are updated from one invocation,
+  so the next release cannot drift. `test_build.py::LayoutTests` already
+  asserts the four stay equal; the script just makes passing that test the
+  default.
