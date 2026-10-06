@@ -55,7 +55,7 @@
   flex-shrink: 0;
 }
 .ck-back-btn {
-  display: none;
+  display: inline-flex;
   font-size: 14px;
   padding: 6px 10px;
   border: 1px solid var(--c-border);
@@ -64,10 +64,9 @@
   color: var(--c-fg);
   cursor: pointer;
 }
-@media (max-width: 399px) {
-  .ck-back-btn { display: inline-flex; }
-}
-/* 0.8.5: an item opened from the inbox leads back to it at every width. */
+/* 0.8.5: an item opened from the inbox leads back to it at every width.
+   0.8.19: every item view carries a Back control, so 'discuss' from the board
+   has a way home at desktop width too. */
 .ck-back-btn.ck-back-always { display: inline-flex; }
 /* 0.8.5: one lock for every answered question on an item. */
 .ck-lock-answered { margin: 8px 0 12px; }
@@ -1327,3 +1326,127 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 .ck-advice { margin-top: 10px; padding: 8px 10px; border-left: 3px solid var(--c-accent, currentColor); }
 .ck-advice p { margin: 4px 0 0; font-size: 13px; }
 .ck-advice-note { color: var(--c-fg-muted); }
+
+/* 0.8.19: Favorites — a star to keep a visual or an item easy to find, and the Favorite tab's list. */
+.ck-star {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 32px; height: 32px; padding: 0 6px; margin-left: 6px;
+  border: 1px solid var(--c-border); border-radius: var(--radius-sm);
+  background: var(--c-surface); color: var(--c-fg-muted);
+  font-size: 18px; line-height: 1; cursor: pointer; flex-shrink: 0;
+}
+.ck-star:hover, .ck-star:focus-visible {
+  border-color: var(--c-accent); background: var(--c-surface-alt); color: var(--c-fg);
+  outline: none;
+}
+.ck-star.ck-star-on { color: #e0a800; border-color: color-mix(in srgb, #e0a800 50%, var(--c-border)); }
+.ck-visual-title-row { display: flex; align-items: flex-start; gap: 6px; }
+.ck-visual-title-row .ck-visual-title { flex: 1; min-width: 0; }
+.ck-favorites { padding: 8px 0; }
+.ck-favorite-item {
+  display: flex; align-items: center; gap: 10px; padding: 10px 20px;
+  border-top: 1px solid var(--c-border-light); cursor: pointer;
+}
+.ck-favorite-item:first-child { border-top: none; }
+.ck-favorite-item:hover, .ck-favorite-item:focus-visible { background: var(--c-surface-alt); outline: none; }
+.ck-favorite-visual {
+  display: flex; align-items: center; gap: 8px; padding: 6px 20px 6px 48px;
+  font-size: 13px; cursor: pointer;
+}
+.ck-favorite-visual:hover { background: var(--c-surface-alt); }
+.ck-favorite-visual .ck-star { min-width: 24px; height: 24px; margin: 0; font-size: 14px; }
+.ck-favorite-visual .ck-visual-title { font-weight: 500; }
+
+/* 0.8.19: Answered-questions footer under an item in the Inbox — direction visible without leaving. */
+.ck-answered-footer {
+  margin: 0 20px 10px;
+  padding: 0;
+  border: 1px dashed var(--c-border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--c-accent) 4%, var(--c-surface));
+}
+.ck-answered-summary {
+  padding: 6px 10px;
+  font-size: 12px; font-weight: 600; color: var(--c-fg-muted);
+  cursor: pointer; list-style: none;
+}
+.ck-answered-summary::-webkit-details-marker { display: none; }
+.ck-answered-summary::before { content: '▸ '; display: inline-block; width: 1em; }
+.ck-answered-footer[open] .ck-answered-summary::before { content: '▾ '; }
+.ck-answered-summary:hover, .ck-answered-summary:focus-visible {
+  color: var(--c-fg); outline: none;
+}
+.ck-answered-list { padding: 4px 0 6px; }
+.ck-answered-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px 6px 24px;
+  font-size: 12px; cursor: pointer;
+}
+.ck-answered-row:hover, .ck-answered-row:focus-visible {
+  background: var(--c-surface-alt); outline: none;
+}
+.ck-answered-pick {
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ck-answered-more { padding: 4px 12px 4px 24px; font-size: 12px; }
+.ck-inbox-item-answered { opacity: 0.85; }
+
+/* 0.8.19: Mermaid diagrams render in a sandboxed iframe; the raw source stays available behind a toggle. */
+.ck-visual-frame-mermaid { height: 400px; min-height: 240px; }
+.ck-visual-source-toggle {
+  margin: 8px 0 4px; font-size: 12px; padding: 4px 10px;
+  background: var(--c-surface-alt); border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm); color: var(--c-fg); cursor: pointer;
+}
+.ck-visual-source-toggle:hover, .ck-visual-source-toggle:focus-visible {
+  border-color: var(--c-accent); outline: none;
+}
+.ck-visual-code-collapsed[hidden] { display: none; }
+
+/* 0.8.19: a row in the Inbox for items whose visuals arrived since the last look. */
+.ck-q-state[data-state="visual"] { color: var(--c-accent); font-weight: 600; }
+.ck-inbox-item-visual { border-left: 3px solid var(--c-accent); }
+
+/* 0.8.19: Status flowchart section on an item — collapsible, lazy, re-renders on live wake. */
+.ck-item-chart {
+  margin: 10px 16px 14px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+}
+.ck-item-chart-summary {
+  padding: 8px 12px;
+  cursor: pointer; list-style: none;
+  font-size: 13px; font-weight: 600;
+}
+.ck-item-chart-summary::-webkit-details-marker { display: none; }
+.ck-item-chart-summary::before { content: '▸ '; display: inline-block; width: 1em; }
+.ck-item-chart[open] .ck-item-chart-summary::before { content: '▾ '; }
+.ck-item-chart-summary:hover, .ck-item-chart-summary:focus-visible {
+  background: var(--c-surface-alt); outline: none;
+}
+.ck-item-chart-hint { font-weight: 400; }
+.ck-item-chart-slot { padding: 8px 10px 12px; }
+.ck-item-chart-frame { height: 440px; min-height: 240px; }
+
+/* 0.8.19: Project map in the Inbox tab — reuses the item-chart look, taller frame. */
+.ck-project-map { margin: 10px 16px 14px; border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm); background: var(--c-surface); }
+.ck-project-map-frame { height: 520px; min-height: 280px; }
+
+/* 0.8.19: filter chips above the project map. */
+.ck-chip-row {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 2px 2px 10px;
+}
+.ck-chip {
+  font-size: 12px; padding: 4px 10px;
+  border: 1px solid var(--c-border); border-radius: 999px;
+  background: var(--c-surface); color: var(--c-fg); cursor: pointer;
+}
+.ck-chip:hover, .ck-chip:focus-visible {
+  border-color: var(--c-accent); outline: none;
+}
+.ck-chip-on {
+  background: var(--c-accent); color: #fff; border-color: var(--c-accent);
+}

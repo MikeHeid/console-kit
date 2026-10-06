@@ -76,7 +76,9 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from . import anchors as A
+from . import chart as CH
 from . import doorbell as D
+from . import favorites as FV
 from . import gitseam as G
 from . import items as IT
 from . import pagesnap as PS
@@ -97,6 +99,8 @@ DRAIN_SECONDS = 2.0         # at most this long, in all, reading a body an early
 BODY_SECONDS = 30.0         # at most this long, in all, receiving one request body (the per-read timeout restarts)
 MAX_BODY = 64 * 1024        # far above any real answer (MAX_TEXT is 20 000 characters)
 OWNER_ROUTES = {"/api/message": "message", "/api/answer": "answer", "/api/lock": "lock"}
+# 0.8.19: starred visuals and items. A side-route (not a store kind): toggles are owner-only, idempotent, cheap.
+OWNER_FAVORITE = "/api/favorite"
 # The live console (0.7.0). A long poll: the page asks "has anything changed
 # since seq S?" and the server answers the moment something does, or after at
 # most WAIT_MAX seconds with "no". Well inside Cloudflare's 100 s response
@@ -125,6 +129,71 @@ VIEW_UNREADABLE = ("the console's stored state could not be read just now; if th
 VISUAL_HTML_CSP = ("sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; "
                    "base-uri 'none'; form-action 'none'; frame-ancestors 'self'")
 VISUAL_TEXT_CSP = "sandbox; default-src 'none'; frame-ancestors 'none'"
+# 0.8.19: a Mermaid visual rendered as a diagram, inside an iframe the parent sandboxes with "allow-scripts"
+# but NOT "allow-same-origin". The CSP here lets the vendored lib (same-origin) run and the init script with
+# a per-request nonce; it blocks every other source, inline style aside (mermaid writes SVG style attributes).
+VISUAL_RENDER_CSP_TMPL = (
+    "default-src 'none'; script-src 'self' 'nonce-{nonce}'; style-src 'unsafe-inline'; "
+    "img-src data: blob:; font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+)
+# The vendored mermaid.min.js is served from this path, same origin as /api/visual-render.
+MERMAID_JS = "vendor/mermaid.min.js"
+
+
+def _mermaid_wrapper(source: str, title: str, nonce: str, clickable: bool = False,
+                     filename: str = "chart") -> tuple[bytes, str, str]:
+    """A strict-CSP HTML page that renders `source` as a Mermaid diagram inside the console's sandboxed iframe.
+
+    `source` is embedded with every HTML-special character escaped, so no DOM can be injected through it. The
+    vendored `/api/mermaid.js` loads under `script-src 'self'`; the init call carries this request's nonce.
+    `clickable=True` turns `securityLevel` to `antiscript` (text is still sanitised) so Mermaid honours
+    `click` directives, and defines `ckClick(kind, target)` which posts a message to the parent window; the
+    parent then scrolls to a question card or opens an item (0.8.19). This is safe because the mmd source is
+    server-built from values that pass `S.ITEM_ID`/`S.QID` and never includes agent text verbatim as a
+    directive. A Save control serializes the rendered SVG and posts it back to the parent (0.8.19); the
+    parent downloads it as `<filename>.svg`.
+    """
+    def esc(s: str) -> str:
+        return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                .replace('"', "&quot;").replace("'", "&#39;"))
+    level = "antiscript" if clickable else "strict"
+    click_glue = (
+        "window.ckClick=function(kind,target){"
+        "try{window.parent.postMessage({type:'ck-chart-click',kind:kind,target:target},'*');}"
+        "catch(e){}};" if clickable else ""
+    )
+    safe_filename = re.sub(r"[^A-Za-z0-9._-]+", "-", filename).strip("-") or "chart"
+    html = (
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        f"<title>{esc(title)}</title>"
+        "<style>html,body{margin:0;padding:12px;background:#fff;color:#111;font:14px system-ui,sans-serif}"
+        ".mermaid{display:flex;justify-content:center}"
+        ".mermaid .clickable{cursor:pointer}"
+        ".ck-wrapper-bar{display:flex;justify-content:flex-end;gap:6px;margin-bottom:6px}"
+        ".ck-wrapper-save{font:12px system-ui,sans-serif;padding:4px 10px;cursor:pointer;"
+        "border:1px solid #bbb;border-radius:4px;background:#fafafa;color:#111}"
+        ".ck-wrapper-save:hover{border-color:#555;background:#fff}"
+        ".err{color:#a00;font:12px/1.4 ui-monospace,monospace;white-space:pre-wrap}</style>"
+        "</head><body>"
+        "<div class=\"ck-wrapper-bar\"><button type=\"button\" class=\"ck-wrapper-save\" "
+        "id=\"ck-save\" title=\"Download as SVG\">Save SVG</button></div>"
+        f"<pre class=\"mermaid\">{esc(source)}</pre>"
+        "<script src=\"/api/mermaid.js\"></script>"
+        f"<script nonce=\"{esc(nonce)}\">"
+        f"{click_glue}"
+        f"try{{mermaid.initialize({{startOnLoad:true,theme:'neutral',securityLevel:'{level}'}});}}"
+        "catch(e){document.body.innerHTML='<p class=\\'err\\'>Mermaid failed to load: '+(e&&e.message||e)+'</p>';}"
+        "document.getElementById('ck-save').addEventListener('click',function(){"
+        "var svg=document.querySelector('.mermaid svg');"
+        "if(!svg){return;}"
+        "var xml=new XMLSerializer().serializeToString(svg);"
+        f"try{{window.parent.postMessage({{type:'ck-chart-export',filename:{json.dumps(safe_filename)},svg:xml}},'*');}}"
+        "catch(e){}"
+        "});"
+        "</script></body></html>"
+    )
+    csp = VISUAL_RENDER_CSP_TMPL.format(nonce=nonce)
+    return html.encode("utf-8"), "text/html; charset=utf-8", csp
 WRITER_FIELDS = ("by", "type", "schemaVersion")
 # Fields only the server computes on a lock (0.5.0): a page that sends one is refused.
 SERVER_LOCK_FIELDS = ("anchors",)
@@ -406,6 +475,7 @@ class Console:
         self.project = PC.load(cfg.root)
         self.store = Store(cfg.store)
         self.names = N.Names(cfg.state)   # 0.8.2: record id -> agent name, beside the store
+        self.favorites = FV.Favorites(cfg.state)   # 0.8.19: the owner's starred visuals and items
         self._lock = threading.Lock()
         self._working_lock = threading.Lock()   # working.json is read, changed and replaced by several agents
         # The live console (0.7.0): every change a page could show bumps `_epoch`
@@ -514,6 +584,7 @@ class Console:
         view = V.build(self.store, items, holds, names=self.names.mapping())
         view["tags"] = self.tags(view, items)
         view["config"] = {"specs_dir": self.project.specs_dir, "visuals_dir": self.project.visuals_dir}
+        view["favorites"] = self.favorites.list()   # 0.8.19: starred keys, newest first
         pushed = getattr(self.adapter, "pushed", None)
         if getattr(self.adapter, "problem", None):   # the items() above already read (and logged) it
             view["items_note"] = IT.UNREADABLE
@@ -575,6 +646,21 @@ class Console:
     def prs(self) -> dict:
         """The owner's PRs view: the steward's last push, or `pushed: false` and the note saying why (F63)."""
         return PR.load(self.cfg.state)
+
+    def favorite_toggle(self, body: object) -> dict:
+        """Toggle `body['id']` in STATE/favorites.json; return the new state and the keys.
+
+        0.8.19. Owner-only. Idempotent on repeat (a second call turns the star off, a third on). The id
+        is checked against `favorites.problem` so the file can only hold keys the view can resolve.
+        """
+        if not isinstance(body, dict) or set(body) - {"id", "nonce"} or "id" not in body:
+            raise RequestError(400, '/api/favorite takes {"id": "visual:<record id>" or "item:<item id>"}')
+        try:
+            out = self.favorites.toggle(body["id"])
+        except ValueError as e:
+            raise RequestError(400, str(e)) from None
+        self._bump()
+        return out
 
     def tags(self, view: dict, items: dict[str, dict]) -> dict:
         """Suggested next steps (0.8.0). A failure here costs the chips, never the page."""
@@ -651,6 +737,62 @@ class Console:
             return VIS.read(self.cfg.state, rec), rec["format"]
         except VIS.VisualError as e:
             raise RequestError(409, str(e)) from None
+
+    def visual_render(self, rid: str, nonce: str) -> tuple[bytes, str, str]:
+        """0.8.19: an HTML wrapper that renders a Mermaid visual as a diagram inside the sandboxed iframe.
+
+        Returns (bytes, content type, CSP). HTML visuals keep their existing CSP; this is Mermaid only. The
+        parent iframe grants `allow-scripts` but NOT `allow-same-origin`, so the document runs in an opaque
+        origin and cannot touch parent cookies, storage or network.
+        """
+        rec = self.store.get(rid)
+        if rec is None or rec["type"] != "visual":
+            raise RequestError(404, f"no visual {rid}")
+        if rec["format"] != "mmd":
+            raise RequestError(400, "visual-render is for Mermaid visuals; HTML mocks are served from /api/visual")
+        try:
+            source = VIS.read(self.cfg.state, rec).decode("utf-8", errors="replace")
+        except VIS.VisualError as e:
+            raise RequestError(409, str(e)) from None
+        title = rec.get("title") or rid
+        return _mermaid_wrapper(source, f"Visual: {title}", nonce, filename=f"visual-{rid[:12]}")
+
+    def item_chart(self, item: str, nonce: str) -> tuple[bytes, str, str]:
+        """0.8.19: an auto-generated Mermaid status flowchart for `item`, rendered the same way as a visual.
+
+        The source is built here from the view (no agent round-trip); the HTML wrapper and CSP are the same
+        as `visual_render`. Nodes click back to the parent (which scrolls to the question card). Raises
+        RequestError(404) when the item is not in the register.
+        """
+        items = self.items()
+        if item not in items:
+            raise RequestError(404, f"no item {item!r} in the project's item list")
+        view = self.payload()["view"]
+        try:
+            source = CH.build(view, items, item, clickable=True)
+        except KeyError as e:  # race: items changed between items() and payload()
+            raise RequestError(404, str(e)) from None
+        return _mermaid_wrapper(source, f"Status flowchart: {item}", nonce, clickable=True,
+                                filename=f"item-{item}-chart")
+
+    def project_chart(self, nonce: str, state: str | None = None) -> tuple[bytes, str, str]:
+        """0.8.19: a Mermaid tree of every item in the project, parent -> child, coloured by status roll-up.
+
+        Clicking an item opens it in the console. Same sandboxed wrapper and CSP as `visual_render`.
+        `state` narrows the tree to items whose own-questions roll-up equals it (plus their ancestors so the
+        tree is connected). Unknown or missing values show every item.
+        """
+        items = self.items()
+        view = self.payload()["view"]
+        source = CH.build_project(view, items, clickable=True, state_filter=state)
+        title = "Project map" + (f" — {state}" if state else "")
+        suffix = f"-{state}" if state else ""
+        return _mermaid_wrapper(source, title, nonce, clickable=True, filename=f"project-map{suffix}")
+
+    def mermaid_js(self) -> bytes:
+        """0.8.19: the vendored Mermaid library bytes; raises FileNotFoundError when it is not installed."""
+        path = Path(__file__).parent / MERMAID_JS
+        return path.read_bytes()
 
     def visual_export(self, body: object) -> dict:
         """Stored visuals for `agent.py visual-export`, each read from STATE and re-checked (0.8.1).
@@ -1709,9 +1851,20 @@ class OwnerHandler(_Handler):
             if data is None:
                 return self._send(404, {"error": "no dashboard page is staged"})
             return self._send_raw(200, data, "text/html; charset=utf-8", VISUAL_HTML_CSP)
+        if self.path == "/api/mermaid.js":   # 0.8.19: the vendored Mermaid lib for /api/visual-render
+            try:
+                data = self.console.mermaid_js()
+            except FileNotFoundError:
+                return self._send(503, {"error": "the vendored mermaid.min.js is not installed; "
+                                                 "re-install the plugin so plugin/kit/console_kit/vendor/ is present"})
+            return self._send_raw(200, data, "application/javascript; charset=utf-8",
+                                  "default-src 'none'; frame-ancestors 'self'")
         route, query = self._query()
+        if route == "/api/project-chart" and query is not None:
+            return self._project_chart(query)
         live = {"/api/wait": self._wait, "/api/feed": self._feed, "/api/evidence": self._evidence,
-                "/api/visual": self._visual}.get(route)
+                "/api/visual": self._visual, "/api/visual-render": self._visual_render,
+                "/api/item-chart": self._item_chart}.get(route)
         if live is not None and query is not None:
             try:
                 return live(query)
@@ -1801,6 +1954,36 @@ class OwnerHandler(_Handler):
             return self._send_raw(200, data, "text/html; charset=utf-8", VISUAL_HTML_CSP)
         self._send_raw(200, data, "text/plain; charset=utf-8", VISUAL_TEXT_CSP)
 
+    def _visual_render(self, query: dict[str, str]) -> None:
+        """0.8.19: a Mermaid visual rendered as a diagram inside the console's sandboxed iframe."""
+        self._only(query, {"id"}, "/api/visual-render")
+        rid = query.get("id")
+        if not isinstance(rid, str) or not S.RECORD_ID.match(rid):
+            raise RequestError(400, "id must be a visual's record id (24 lowercase hex)")
+        nonce = secrets.token_hex(16)
+        data, ctype, csp = self.console.visual_render(rid, nonce)
+        self._send_raw(200, data, ctype, csp)
+
+    def _item_chart(self, query: dict[str, str]) -> None:
+        """0.8.19: a Mermaid status flowchart built server-side from the view's own questions and rounds."""
+        self._only(query, {"item"}, "/api/item-chart")
+        item = query.get("item")
+        if not isinstance(item, str) or len(item) > 128 or not S.ITEM_ID.match(item):
+            raise RequestError(400, "item must be an item id")
+        nonce = secrets.token_hex(16)
+        data, ctype, csp = self.console.item_chart(item, nonce)
+        self._send_raw(200, data, ctype, csp)
+
+    def _project_chart(self, query: dict[str, str]) -> None:
+        """0.8.19: a Mermaid tree of every item, optionally narrowed to one state (plus ancestors)."""
+        self._only(query, {"state"}, "/api/project-chart")
+        state = query.get("state") or None
+        if state is not None and state not in CH.STATE_CLASS:
+            raise RequestError(400, f"state must be one of {', '.join(sorted(CH.STATE_CLASS))}")
+        nonce = secrets.token_hex(16)
+        data, ctype, csp = self.console.project_chart(nonce, state)
+        self._send_raw(200, data, ctype, csp)
+
     def _check(self) -> None:
         try:
             out = self.console.check()
@@ -1831,7 +2014,8 @@ class OwnerHandler(_Handler):
         if not self._gate():
             return
         kind = OWNER_ROUTES.get(self.path)
-        if kind is None and self.path not in ("/api/relock", "/api/lock-all", "/api/page-publish", "/api/refactor"):
+        if kind is None and self.path not in ("/api/relock", "/api/lock-all", "/api/page-publish",
+                                              "/api/refactor", OWNER_FAVORITE):
             return self._send(404, {"error": "not found"})
         # Browsers send Origin on every POST, same-origin included, so a missing one is refused too:
         # an absent header must not read as "trusted".
@@ -1846,6 +2030,8 @@ class OwnerHandler(_Handler):
                 return self._send(200, self.console.lock_all(self._body()))
             if self.path == "/api/page-publish":   # Q29: the owner's "Use this page"; no agent route publishes
                 return self._send(200, self.console.publish_page(self._body()))
+            if self.path == OWNER_FAVORITE:   # 0.8.19: toggle a star on a visual or an item
+                return self._send(200, self.console.favorite_toggle(self._body()))
             self._send(200, {"record": self.console.write(kind, self._body(), "owner")})
         except RequestError as e:
             self._send(e.code, {**e.extra, "error": str(e)})
