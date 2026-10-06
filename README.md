@@ -78,9 +78,17 @@ to run next. `INSTALL.md` (also in the zip) has the whole guide.
 
   Each step comes back as questions for you to lock. Nothing is written into
   the project before you lock.
-- **Request a visual** on an item. The agent answers with a Mermaid diagram,
-  or with an HTML mock shown only inside a sandboxed frame where its scripts
-  cannot run.
+- **Request a visual** on an item. The agent answers with a Mermaid diagram
+  (rendered right there inside a sandboxed frame — the vendored lib runs in an
+  opaque origin and cannot touch the console's cookies, storage or network;
+  **View source** still shows the raw `.mmd`), or with an HTML mock shown the
+  same way, scripts off entirely.
+- **A short chime when a visual arrives**, the drawn item surfaces at the top
+  of the Inbox under **New visuals**, and the Feed row says "Visual drawn".
+  The badge on the inbox button and the Feed tab counts it too, until you look.
+- **Star what matters.** Tap ☆ on a visual or an item (the item view's title
+  bar, the Inbox row, the New visuals row). The **Favorite** tab lists them,
+  grouped by item, newest first. Only the owner can star.
 - **Chat**, for a message not tied to a question. It wakes the watching
   session.
 
@@ -139,6 +147,14 @@ server cannot check it.
   badges, a link to each on GitHub, and an **Open** button for any item or
   question a title or branch names. The steward pushes the list
   (`agent.py prs-push`), and the tab says when it last did.
+- The **Favorite** tab lists everything you starred, grouped by item.
+- A **Back** control sits at the top of every item view, so **discuss** from
+  the dashboard always has a one-tap way home.
+- **Direction stays visible.** Each item in the Inbox carries a collapsible
+  "N answered on this item" under its open questions, showing the last few
+  locked rulings on it. Items whose questions are all locked within the last
+  day stay on the list under **Recently answered**, so you can see what was
+  asked and what you answered without leaving the Inbox.
 
 ## How it fits together
 
@@ -199,6 +215,36 @@ refuses the old token from the next request.
 - **An old per-project server is a way around it.** While one still listens on
   `STATE/agent.sock`, that socket answers without a token. Stop it before
   relying on the token.
+
+## Windows + WSL2 (optional)
+
+The server, the tunnel and the systemd units are POSIX; a convenient layout
+on a Windows host is to run them in WSL2 while a Claude Code session lives on
+either side. A few traps worth knowing:
+
+- **CRLF.** `git config core.autocrlf=true` on Windows gives every file in
+  the plugin cache CRLF endings. `install.sh` then fails at once
+  (`set: pipefail: invalid option name`), and systemd unit files with a `\r`
+  silently misbehave. Install the kit from a copy stripped of CR (`sed -i
+  's/\r$//'` on each `*.sh`, `*.in`, `*.py`, `*.js`, `*.css`, `*.html`) or
+  clone with `core.autocrlf=false`.
+- **Default branch.** `page-snapshot --from-ref origin/main` is the default
+  and fails on a repository whose default is anything else. Pass
+  `--from-ref HEAD --unreviewed` while bootstrapping, or point `--from-ref`
+  at your actual branch.
+- **Page path.** `onboard.py` defaults the page to `.console-kit/page.html`,
+  which `page-snapshot` refuses (leading dot). Move the page under
+  `docs/console/page.html` or similar.
+- **Items.** The server never runs your adapter. After onboarding, run
+  `agent.py --state STATE items-push --adapter PATH` once (and whenever the
+  item list changes); until then `ask` on any item but `PROJECT` is refused.
+- **Reaching the server from Windows.** The agent socket lives in WSL and
+  Windows cannot open a WSL2 Unix socket. Options: run the agent-side session
+  inside WSL (`wsl -e bash` wrapper), or use the one-server HTTP door with a
+  project token on loopback.
+- **Linger.** Systemd user units stop when WSL shuts down. Run
+  `loginctl enable-linger $USER` in WSL; a Windows process that keeps WSL
+  alive still helps when nothing else holds it.
 
 ## Trust
 

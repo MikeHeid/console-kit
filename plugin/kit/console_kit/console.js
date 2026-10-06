@@ -51,6 +51,7 @@
   let currentTab = 'inbox';     // 'inbox' | 'feed' | 'prs' | 'chat', inside inbox mode
   let arrived = new Set();      // qids and message ids that arrived with the latest live update
   let knownIds = null;          // every qid and message id the page has seen; null before the first view
+  let knownVisualIds = null;    // 0.8.19: every visual record id the page has seen
   let seenAtOpen = 0;           // the seen seq when the inbox was opened: what the Feed marks "new"
   const CHAT_ITEM = '@chat';    // mirrors schema.CHAT_ITEM
   const MAX_CHAT = 4000;        // mirrors schema.MAX_CHAT
@@ -372,9 +373,41 @@
   function noteArrivals() {
     const ids = new Set(Object.keys(view.questions || {}));
     for (const msgs of Object.values(view.threads || {})) for (const m of msgs) ids.add(m.id);
-    if (knownIds === null) { knownIds = ids; arrived = new Set(); return; }
+    // 0.8.19: visuals too. A visual drawn after the owner's last look is announced + beeped (seenVisuals).
+    const vids = new Set();
+    for (const vs of Object.values(view.visuals || {})) for (const v of vs) vids.add(v.id);
+    if (knownIds === null) { knownIds = ids; knownVisualIds = vids; arrived = new Set(); return; }
     arrived = new Set([...ids].filter(i => !knownIds.has(i)));
+    const newVisuals = [...vids].filter(i => !knownVisualIds.has(i));
     knownIds = ids;
+    knownVisualIds = vids;
+    if (newVisuals.length) {
+      beep();
+      announce(newVisuals.length === 1 ? 'A new visual was drawn.' : newVisuals.length + ' new visuals were drawn.');
+    }
+  }
+
+  // 0.8.19: a short tone when a visual arrives. Suspended AudioContexts are resumed on first click.
+  let audioCtx = null;
+  function beep() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      if (!audioCtx) audioCtx = new Ctx();
+      if (audioCtx.state === 'suspended') { audioCtx.resume().catch(() => {}); }
+      const t0 = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(660, t0);
+      osc.frequency.exponentialRampToValueAtTime(880, t0 + 0.08);
+      gain.gain.setValueAtTime(0.0001, t0);
+      gain.gain.exponentialRampToValueAtTime(0.18, t0 + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.25);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t0);
+      osc.stop(t0 + 0.27);
+    } catch (e) { /* audio blocked or unsupported; the live region still announces */ }
   }
 
   // Unread (0.7.0): what the AGENT wrote after the store seq this browser last
@@ -393,7 +426,22 @@
     let n = 0;
     for (const q of Object.values(view.questions || {})) if (q.question.seq > seen && q.question.by === 'agent') n++;
     for (const msgs of Object.values(view.threads || {})) for (const m of msgs) if (m.seq > seen && m.by === 'agent') n++;
+    // 0.8.19: visuals drawn after the last look count as unread too.
+    for (const vs of Object.values(view.visuals || {})) for (const v of vs) if (v.seq > seen) n++;
     return n;
+  }
+
+  // 0.8.19: visuals the owner has not seen yet, grouped by item (seq-gated per viewer).
+  function unseenVisualsByItem() {
+    if (!view || typeof view.seq !== 'number') return {};
+    const seen = seenSeq();
+    if (seen === null) return {};
+    const out = {};
+    for (const [item, vs] of Object.entries(view.visuals || {})) {
+      const unseen = vs.filter(v => v.seq > seen);
+      if (unseen.length) out[item] = unseen;
+    }
+    return out;
   }
   // The owner is looking at the inbox now: everything up to this view is seen.
   function markSeen() {
@@ -722,6 +770,8 @@
       renderFeed(body);
     } else if (currentTab === 'prs') {
       renderPRs(body);
+    } else if (currentTab === 'favorite') {
+      renderFavorites(body);
     } else if (currentTab === 'chat') {
       renderChat(body);
     } else {
@@ -734,8 +784,9 @@
     }
   }
 
-  // The inbox's three views (0.7.0): what waits on you, what happened, and the chat.
-  const TABS = [['inbox', 'Inbox'], ['feed', 'Feed'], ['prs', 'PRs'], ['chat', 'Chat']];
+  // The inbox's five views: what waits on you, what happened, PRs, starred visuals/items, and the chat.
+  // Order (0.8.19): Inbox Feed PRs Favorite Chat.
+  const TABS = [['inbox', 'Inbox'], ['feed', 'Feed'], ['prs', 'PRs'], ['favorite', 'Favorite'], ['chat', 'Chat']];
 
   function renderTabs() {
     const bar = el('div', { className: 'ck-tabs', role: 'tablist', 'aria-label': 'Inbox views' });
@@ -748,6 +799,7 @@
       let note = '';
       if (id === 'inbox' && view && view.inbox && view.inbox.length) note = String(view.inbox.length);
       if (id === 'feed' && unread) note = unread + ' new';
+      if (id === 'favorite' && view && view.favorites && view.favorites.length) note = String(view.favorites.length);
       if (id === 'chat' && view && view.chat && view.chat.awaiting_agent) note = '●';
       if (note) b.appendChild(el('span', { className: 'ck-tab-note' }, [' ' + note]));
       if (id === 'chat' && note) b.setAttribute('aria-label', 'Chat, waiting on an agent');
@@ -780,6 +832,33 @@
       body.appendChild(el('p', { className: 'ck-items-note', role: 'status',
         style: 'color: var(--c-fg-muted); padding: 12px 20px;' }, [view.items_note]));
     }
+    // 0.8.19: items whose visuals arrived since the last look, so a drawn flowchart is impossible to miss.
+    const newVisuals = unseenVisualsByItem();
+    const newVisualIds = Object.keys(newVisuals);
+    if (newVisualIds.length) {
+      body.appendChild(el('div', { className: 'ck-section-heading' }, ['New visuals']));
+      const list = el('div', { className: 'ck-inbox-list' });
+      for (const it of newVisualIds.sort()) {
+        const itemData = items[it];
+        const vs = newVisuals[it];
+        const row = el('div', { className: 'ck-inbox-item ck-inbox-item-visual', tabindex: '0',
+          'aria-label': 'New visual on ' + it + (itemData ? ', ' + itemData.title : '') }, [
+          el('span', { className: 'ck-q-state', dataState: 'visual' }, ['◫ ', vs.length === 1 ? 'drawn' : vs.length + ' drawn']),
+          el('span', { className: 'ck-inbox-item-id' }, [it]),
+          el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : '']),
+          renderStarButton('item:' + it, 'this item')
+        ]);
+        row.addEventListener('click', e => {
+          if (e.target.closest('.ck-star')) return;
+          openFromInbox(it);
+        });
+        row.addEventListener('keydown', e => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openFromInbox(it); }
+        });
+        list.appendChild(row);
+      }
+      body.appendChild(list);
+    }
     const rounds = new Map();
     const loose = [];
     for (const qid of view.inbox || []) {
@@ -801,13 +880,68 @@
       for (const fid of rounds.keys()) list.appendChild(renderRoundCard(fid));
       body.appendChild(list);
     }
+    // 0.8.19: for every item with open questions here, nest its locked rulings underneath as a collapsible,
+    // so the owner sees direction (what was asked → what you answered) without leaving the Inbox.
+    const rulingsByItem = {};
+    for (const qid of Object.keys(view.questions)) {
+      const q = view.questions[qid];
+      if (q.state !== 'locked') continue;
+      const it = q.question.item;
+      if (!rulingsByItem[it]) rulingsByItem[it] = [];
+      rulingsByItem[it].push(q);
+    }
+    for (const it of Object.keys(rulingsByItem)) {
+      rulingsByItem[it].sort((a, b) => (b.locked_at || b.question.ts || '').localeCompare(a.locked_at || a.question.ts || ''));
+    }
+    const footerShown = new Set();
+
     if (loose.length) {
       body.appendChild(el('div', { className: 'ck-section-heading' }, ['Questions for you']));
       const list = el('div', { className: 'ck-inbox-list' });
       const clusters = looseClusters(loose);
       const inCluster = new Set(clusters.flatMap(c => c.qs.map(q => q.question.qid)));
-      for (const c of clusters) list.appendChild(renderClusterCard(c));
-      for (const q of loose) if (!inCluster.has(q.question.qid)) list.appendChild(looseRow(q));
+      // Walk in the order that produced the inbox; after the last row for an item, append its "N answered".
+      const emit = (itemId, node) => {
+        list.appendChild(node);
+        if (!footerShown.has(itemId) && rulingsByItem[itemId] && rulingsByItem[itemId].length) {
+          list.appendChild(renderAnsweredFooter(itemId, rulingsByItem[itemId]));
+          footerShown.add(itemId);
+        }
+      };
+      for (const c of clusters) emit(c.item, renderClusterCard(c));
+      for (const q of loose) if (!inCluster.has(q.question.qid)) emit(q.question.item, looseRow(q));
+      body.appendChild(list);
+    }
+
+    // Items whose questions are all locked (nothing open), surfaced within the last 24h: shows "direction" too.
+    const RECENT_MS = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const recentlyAnswered = Object.keys(rulingsByItem)
+      .filter(it => !footerShown.has(it))
+      .filter(it => rulingsByItem[it].some(q => {
+        const t = Date.parse(q.locked_at || q.question.ts || '');
+        return Number.isFinite(t) && (now - t) <= RECENT_MS;
+      }))
+      .sort();
+    if (recentlyAnswered.length) {
+      body.appendChild(el('div', { className: 'ck-section-heading' }, ['Recently answered']));
+      const list = el('div', { className: 'ck-inbox-list' });
+      for (const it of recentlyAnswered) {
+        const itemData = items[it];
+        const row = el('div', { className: 'ck-inbox-item ck-inbox-item-answered', tabindex: '0' }, [
+          el('span', { className: 'ck-q-state', dataState: 'locked' }, [GLYPH.locked || '✓', ' locked']),
+          el('span', { className: 'ck-inbox-item-id' }, [it]),
+          el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : '']),
+          renderStarButton('item:' + it, 'this item')
+        ]);
+        row.addEventListener('click', e => {
+          if (e.target.closest('.ck-star')) return;
+          openFromInbox(it);
+        });
+        list.appendChild(row);
+        list.appendChild(renderAnsweredFooter(it, rulingsByItem[it]));
+        footerShown.add(it);
+      }
       body.appendChild(list);
     }
     const scanAll = renderScanAll();
@@ -882,6 +1016,47 @@
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
     });
     return item;
+  }
+
+  // 0.8.19: a collapsible "N answered" footer under an item in the Inbox. Each row is a locked ruling
+  // on this item; clicking it opens the item and scrolls to that question. Shows direction without leaving.
+  function renderAnsweredFooter(itemId, locked) {
+    const n = locked.length;
+    const wrap = el('details', { className: 'ck-answered-footer', dataItem: itemId });
+    const sum = el('summary', { className: 'ck-answered-summary' }, [
+      n + ' answered on ' + itemId
+    ]);
+    wrap.appendChild(sum);
+    const list = el('div', { className: 'ck-answered-list' });
+    for (const q of locked.slice(0, 8)) {
+      const row = el('div', { className: 'ck-answered-row', tabindex: '0',
+        'aria-label': 'Open answer for ' + q.question.qid }, [
+        el('span', { className: 'ck-q-state', dataState: 'locked' }, [GLYPH.locked || '✓', ' locked']),
+        el('span', { className: 'ck-inbox-item-qnum' }, ['Q' + qNum(q.question.qid)]),
+        el('span', { className: 'ck-answered-pick' }, [answerSummary(q)])
+      ]);
+      const go = () => openFromInbox(itemId, q.question.qid);
+      row.addEventListener('click', go);
+      row.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
+      });
+      list.appendChild(row);
+    }
+    if (n > 8) list.appendChild(el('div', { className: 'ck-muted ck-answered-more' }, [
+      '…and ' + (n - 8) + ' more; open the item to see them all.'
+    ]));
+    wrap.appendChild(list);
+    return wrap;
+  }
+
+  // One short phrase describing a locked ruling: the picked option label, or free text, or the state.
+  function answerSummary(q) {
+    const a = (q.answers && q.answers.length) ? q.answers[q.answers.length - 1] : null;
+    if (!a) return 'locked';
+    if (a.pick_labels && a.pick_labels.length) return a.pick_labels.join(' · ');
+    if (a.picks && a.picks.length) return a.picks.join(' · ');
+    if (a.text) return truncateText(a.text, 80);
+    return 'locked';
   }
 
   // CONSOLE-kit/Q35 (owner, 2026-10-02, the ★): loose questions about one item, asked by one agent within a
@@ -997,6 +1172,7 @@
         el('span', { className: 'ck-title-id' }, [itemId]),
         itemData ? ' — ' + itemData.title : ''
       ]),
+      renderStarButton('item:' + itemId, 'this item'),
       el('button', {
         className: 'ck-close-btn',
         type: 'button',
@@ -1621,7 +1797,11 @@
 
   function renderVisual(v) {
     const box = el('div', { className: 'ck-visual', dataFormat: v.format, dataVisual: v.id });
-    box.appendChild(el('div', { className: 'ck-visual-title' }, [v.title]));
+    const titleRow = el('div', { className: 'ck-visual-title-row' }, [
+      el('div', { className: 'ck-visual-title' }, [v.title]),
+      renderStarButton('visual:' + v.id, 'this visual')
+    ]);
+    box.appendChild(titleRow);
     box.appendChild(el('div', { className: 'ck-muted' }, [
       (v.format === 'html' ? 'HTML mock' : 'Mermaid diagram') + ' · ' + String(v.path).split('/').pop() +
       ' · ' + relTime(v.ts) + (v.agent ? ' · by ' + v.agent : '')]));
@@ -1641,17 +1821,49 @@
       frame.src = src;
       box.appendChild(frame);
     } else {
-      // Mermaid is shown as its source, as text: no diagram library runs on this page.
-      const pre = el('pre', { className: 'ck-visual-code', 'aria-label': 'Mermaid source: ' + v.title });
+      // 0.8.19: Mermaid is rendered as a diagram inside a sandboxed iframe (allow-scripts, NOT
+      // allow-same-origin). The vendored lib runs in an opaque origin: no parent cookies, no storage,
+      // no network to this origin. A "View source" toggle still shows the raw .mmd text when wanted.
+      const renderSrc = config.api + '/visual-render?id=' + encodeURIComponent(v.id);
+      const frame = document.createElement('iframe');
+      frame.setAttribute('sandbox', 'allow-scripts');
+      frame.setAttribute('referrerpolicy', 'no-referrer');
+      frame.setAttribute('title', 'Mermaid diagram: ' + v.title);
+      frame.className = 'ck-visual-frame ck-visual-frame-mermaid';
+      frame.src = renderSrc;
+      box.appendChild(frame);
+      const pre = el('pre', { className: 'ck-visual-code ck-visual-code-collapsed',
+        'aria-label': 'Mermaid source: ' + v.title, hidden: 'hidden' });
       pre.textContent = 'Loading…';
+      const toggle = el('button', { className: 'ck-btn ck-visual-source-toggle', type: 'button',
+        'aria-expanded': 'false', 'aria-controls': 'ck-src-' + v.id }, ['View source']);
+      pre.id = 'ck-src-' + v.id;
+      let loaded = false;
+      toggle.addEventListener('click', async () => {
+        const open = toggle.getAttribute('aria-expanded') === 'true';
+        if (open) {
+          toggle.setAttribute('aria-expanded', 'false');
+          toggle.textContent = 'View source';
+          pre.hidden = true;
+          return;
+        }
+        toggle.setAttribute('aria-expanded', 'true');
+        toggle.textContent = 'Hide source';
+        pre.hidden = false;
+        if (loaded) return;
+        try {
+          const resp = await fetch(src, { credentials: 'same-origin' });
+          const body = await resp.text();
+          if (resp.ok) { pre.textContent = body; loaded = true; return; }
+          let msg = 'HTTP ' + resp.status;
+          try { msg = JSON.parse(body).error || msg; } catch (e) { /* not JSON */ }
+          pre.textContent = 'Not shown: ' + msg;
+        } catch (e) {
+          pre.textContent = 'Not shown: ' + (e.message || 'network error');
+        }
+      });
+      box.appendChild(toggle);
       box.appendChild(pre);
-      fetch(src, { credentials: 'same-origin' }).then(async resp => {
-        const body = await resp.text();
-        if (resp.ok) { pre.textContent = body; return; }
-        let msg = 'HTTP ' + resp.status;
-        try { msg = JSON.parse(body).error || msg; } catch (e) { /* not JSON: keep the status */ }
-        pre.textContent = 'Not shown: ' + msg;
-      }).catch(e => { pre.textContent = 'Not shown: ' + (e.message || 'network error'); });
     }
     return box;
   }
@@ -3730,6 +3942,89 @@
     else box.appendChild(el('p', { className: 'ck-muted' }, ['Loading…']));
     // A live wake (a push bumps the version) or the first open: read the steward's push again.
     if (prsState.ver !== liveVer || (!prsState.data && !prsState.error)) loadPRs(box);
+  }
+
+  // 0.8.19: Favorite tab — starred visuals grouped under their items, plus any starred items with no stars yet.
+  function renderFavorites(body) {
+    const favs = (view && view.favorites) || [];
+    const favSet = new Set(favs);
+    const starredItems = favs.filter(k => k.startsWith('item:')).map(k => k.slice(5));
+    const starredVisuals = favs.filter(k => k.startsWith('visual:')).map(k => k.slice(7));
+    if (!favs.length) {
+      body.appendChild(el('p', { className: 'ck-muted', style: 'padding: 20px; text-align: center;' }, [
+        'Nothing starred yet. Tap ☆ on a visual or an item to keep it here.'
+      ]));
+      return;
+    }
+    // Walk every item that is starred or has starred visuals; show its row + its starred visuals.
+    const byItem = {};
+    for (const id of starredItems) if (!byItem[id]) byItem[id] = { item: id, visuals: [] };
+    for (const vid of starredVisuals) {
+      const v = findVisual(vid);
+      if (!v) continue;
+      const key = v.item || '_';
+      if (!byItem[key]) byItem[key] = { item: key, visuals: [] };
+      byItem[key].visuals.push(v);
+    }
+    const list = el('div', { className: 'ck-inbox-list ck-favorites' });
+    for (const id of Object.keys(byItem).sort()) {
+      const slot = byItem[id];
+      const itemData = items && items[id];
+      const header = el('div', { className: 'ck-inbox-item ck-favorite-item', tabindex: '0' }, [
+        el('span', { className: 'ck-star ck-star-on', 'aria-label': 'Starred item' }, ['★']),
+        el('span', { className: 'ck-inbox-item-id' }, [id]),
+        el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : ''])
+      ]);
+      if (itemData) header.addEventListener('click', () => openFromInbox(id));
+      list.appendChild(header);
+      for (const v of slot.visuals) {
+        const row = el('div', { className: 'ck-favorite-visual' }, [
+          el('span', { className: 'ck-star ck-star-on', 'aria-label': 'Starred visual' }, ['★']),
+          el('span', { className: 'ck-visual-title' }, [v.title]),
+          el('span', { className: 'ck-muted' }, [
+            ' · ' + (v.format === 'html' ? 'HTML mock' : 'Mermaid') + ' · ' + relTime(v.ts)
+          ])
+        ]);
+        row.addEventListener('click', () => openFromInbox(v.item));
+        list.appendChild(row);
+      }
+    }
+    body.appendChild(list);
+  }
+
+  function findVisual(vid) {
+    const byItem = (view && view.visuals) || {};
+    for (const id of Object.keys(byItem)) {
+      for (const v of byItem[id]) if (v.id === vid) return { ...v, item: id };
+    }
+    return null;
+  }
+
+  async function toggleFavorite(key) {
+    try {
+      const r = await apiPost('/favorite', { id: key }, 'fav-' + key);
+      if (r && r.error) announce('Could not change favorite: ' + r.error);
+    } catch (e) {
+      announce('Could not change favorite: ' + (e.message || 'error'));
+    }
+  }
+
+  // 0.8.19: a star toggle. `key` is "visual:<rid>" or "item:<id>"; `what` names it for the label.
+  function renderStarButton(key, what) {
+    const on = !!(view && view.favorites && view.favorites.indexOf(key) >= 0);
+    const btn = el('button', {
+      className: 'ck-star' + (on ? ' ck-star-on' : ''),
+      type: 'button',
+      'aria-pressed': on ? 'true' : 'false',
+      'aria-label': (on ? 'Unstar ' : 'Star ') + what,
+      title: on ? 'Starred — click to remove' : 'Star to keep in Favorites'
+    }, [on ? '★' : '☆']);
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      toggleFavorite(key);
+    });
+    return btn;
   }
 
   // Only GitHub, only https: anything else is shown as text with no link.

@@ -77,6 +77,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from . import anchors as A
 from . import doorbell as D
+from . import favorites as FV
 from . import gitseam as G
 from . import items as IT
 from . import pagesnap as PS
@@ -97,6 +98,8 @@ DRAIN_SECONDS = 2.0         # at most this long, in all, reading a body an early
 BODY_SECONDS = 30.0         # at most this long, in all, receiving one request body (the per-read timeout restarts)
 MAX_BODY = 64 * 1024        # far above any real answer (MAX_TEXT is 20 000 characters)
 OWNER_ROUTES = {"/api/message": "message", "/api/answer": "answer", "/api/lock": "lock"}
+# 0.8.19: starred visuals and items. A side-route (not a store kind): toggles are owner-only, idempotent, cheap.
+OWNER_FAVORITE = "/api/favorite"
 # The live console (0.7.0). A long poll: the page asks "has anything changed
 # since seq S?" and the server answers the moment something does, or after at
 # most WAIT_MAX seconds with "no". Well inside Cloudflare's 100 s response
@@ -125,6 +128,15 @@ VIEW_UNREADABLE = ("the console's stored state could not be read just now; if th
 VISUAL_HTML_CSP = ("sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; "
                    "base-uri 'none'; form-action 'none'; frame-ancestors 'self'")
 VISUAL_TEXT_CSP = "sandbox; default-src 'none'; frame-ancestors 'none'"
+# 0.8.19: a Mermaid visual rendered as a diagram, inside an iframe the parent sandboxes with "allow-scripts"
+# but NOT "allow-same-origin". The CSP here lets the vendored lib (same-origin) run and the init script with
+# a per-request nonce; it blocks every other source, inline style aside (mermaid writes SVG style attributes).
+VISUAL_RENDER_CSP_TMPL = (
+    "default-src 'none'; script-src 'self' 'nonce-{nonce}'; style-src 'unsafe-inline'; "
+    "img-src data: blob:; font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+)
+# The vendored mermaid.min.js is served from this path, same origin as /api/visual-render.
+MERMAID_JS = "vendor/mermaid.min.js"
 WRITER_FIELDS = ("by", "type", "schemaVersion")
 # Fields only the server computes on a lock (0.5.0): a page that sends one is refused.
 SERVER_LOCK_FIELDS = ("anchors",)
@@ -406,6 +418,7 @@ class Console:
         self.project = PC.load(cfg.root)
         self.store = Store(cfg.store)
         self.names = N.Names(cfg.state)   # 0.8.2: record id -> agent name, beside the store
+        self.favorites = FV.Favorites(cfg.state)   # 0.8.19: the owner's starred visuals and items
         self._lock = threading.Lock()
         self._working_lock = threading.Lock()   # working.json is read, changed and replaced by several agents
         # The live console (0.7.0): every change a page could show bumps `_epoch`
@@ -514,6 +527,7 @@ class Console:
         view = V.build(self.store, items, holds, names=self.names.mapping())
         view["tags"] = self.tags(view, items)
         view["config"] = {"specs_dir": self.project.specs_dir, "visuals_dir": self.project.visuals_dir}
+        view["favorites"] = self.favorites.list()   # 0.8.19: starred keys, newest first
         pushed = getattr(self.adapter, "pushed", None)
         if getattr(self.adapter, "problem", None):   # the items() above already read (and logged) it
             view["items_note"] = IT.UNREADABLE
@@ -575,6 +589,21 @@ class Console:
     def prs(self) -> dict:
         """The owner's PRs view: the steward's last push, or `pushed: false` and the note saying why (F63)."""
         return PR.load(self.cfg.state)
+
+    def favorite_toggle(self, body: object) -> dict:
+        """Toggle `body['id']` in STATE/favorites.json; return the new state and the keys.
+
+        0.8.19. Owner-only. Idempotent on repeat (a second call turns the star off, a third on). The id
+        is checked against `favorites.problem` so the file can only hold keys the view can resolve.
+        """
+        if not isinstance(body, dict) or set(body) - {"id", "nonce"} or "id" not in body:
+            raise RequestError(400, '/api/favorite takes {"id": "visual:<record id>" or "item:<item id>"}')
+        try:
+            out = self.favorites.toggle(body["id"])
+        except ValueError as e:
+            raise RequestError(400, str(e)) from None
+        self._bump()
+        return out
 
     def tags(self, view: dict, items: dict[str, dict]) -> dict:
         """Suggested next steps (0.8.0). A failure here costs the chips, never the page."""
@@ -651,6 +680,49 @@ class Console:
             return VIS.read(self.cfg.state, rec), rec["format"]
         except VIS.VisualError as e:
             raise RequestError(409, str(e)) from None
+
+    def visual_render(self, rid: str, nonce: str) -> tuple[bytes, str, str]:
+        """0.8.19: an HTML wrapper that renders a Mermaid visual as a diagram inside the sandboxed iframe.
+
+        Returns (bytes, content type, CSP). HTML visuals keep their existing CSP; this is Mermaid only. The
+        wrapper embeds the source as a `<pre class="mermaid">` with every HTML-special character escaped, loads
+        the vendored lib from a same-origin URL, and calls `mermaid.initialize` from an inline script carrying
+        this request's nonce. The parent iframe grants `allow-scripts` but NOT `allow-same-origin`, so the
+        document runs in an opaque origin and cannot touch parent cookies, storage or network.
+        """
+        rec = self.store.get(rid)
+        if rec is None or rec["type"] != "visual":
+            raise RequestError(404, f"no visual {rid}")
+        if rec["format"] != "mmd":
+            raise RequestError(400, "visual-render is for Mermaid visuals; HTML mocks are served from /api/visual")
+        try:
+            source = VIS.read(self.cfg.state, rec).decode("utf-8", errors="replace")
+        except VIS.VisualError as e:
+            raise RequestError(409, str(e)) from None
+        title = rec.get("title") or rid
+        esc = lambda s: (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        .replace('"', "&quot;").replace("'", "&#39;"))
+        html = (
+            "<!doctype html><html><head><meta charset=\"utf-8\">"
+            f"<title>Visual: {esc(title)}</title>"
+            "<style>html,body{margin:0;padding:12px;background:#fff;color:#111;font:14px system-ui,sans-serif}"
+            ".mermaid{display:flex;justify-content:center}"
+            ".err{color:#a00;font:12px/1.4 ui-monospace,monospace;white-space:pre-wrap}</style>"
+            "</head><body>"
+            f"<pre class=\"mermaid\">{esc(source)}</pre>"
+            "<script src=\"/api/mermaid.js\"></script>"
+            f"<script nonce=\"{esc(nonce)}\">"
+            "try{mermaid.initialize({startOnLoad:true,theme:'neutral',securityLevel:'strict'});}"
+            "catch(e){document.body.innerHTML='<p class=\\'err\\'>Mermaid failed to load: '+(e&&e.message||e)+'</p>';}"
+            "</script></body></html>"
+        )
+        csp = VISUAL_RENDER_CSP_TMPL.format(nonce=nonce)
+        return html.encode("utf-8"), "text/html; charset=utf-8", csp
+
+    def mermaid_js(self) -> bytes:
+        """0.8.19: the vendored Mermaid library bytes; raises FileNotFoundError when it is not installed."""
+        path = Path(__file__).parent / MERMAID_JS
+        return path.read_bytes()
 
     def visual_export(self, body: object) -> dict:
         """Stored visuals for `agent.py visual-export`, each read from STATE and re-checked (0.8.1).
@@ -1709,9 +1781,17 @@ class OwnerHandler(_Handler):
             if data is None:
                 return self._send(404, {"error": "no dashboard page is staged"})
             return self._send_raw(200, data, "text/html; charset=utf-8", VISUAL_HTML_CSP)
+        if self.path == "/api/mermaid.js":   # 0.8.19: the vendored Mermaid lib for /api/visual-render
+            try:
+                data = self.console.mermaid_js()
+            except FileNotFoundError:
+                return self._send(503, {"error": "the vendored mermaid.min.js is not installed; "
+                                                 "re-install the plugin so plugin/kit/console_kit/vendor/ is present"})
+            return self._send_raw(200, data, "application/javascript; charset=utf-8",
+                                  "default-src 'none'; frame-ancestors 'self'")
         route, query = self._query()
         live = {"/api/wait": self._wait, "/api/feed": self._feed, "/api/evidence": self._evidence,
-                "/api/visual": self._visual}.get(route)
+                "/api/visual": self._visual, "/api/visual-render": self._visual_render}.get(route)
         if live is not None and query is not None:
             try:
                 return live(query)
@@ -1801,6 +1881,16 @@ class OwnerHandler(_Handler):
             return self._send_raw(200, data, "text/html; charset=utf-8", VISUAL_HTML_CSP)
         self._send_raw(200, data, "text/plain; charset=utf-8", VISUAL_TEXT_CSP)
 
+    def _visual_render(self, query: dict[str, str]) -> None:
+        """0.8.19: a Mermaid visual rendered as a diagram inside the console's sandboxed iframe."""
+        self._only(query, {"id"}, "/api/visual-render")
+        rid = query.get("id")
+        if not isinstance(rid, str) or not S.RECORD_ID.match(rid):
+            raise RequestError(400, "id must be a visual's record id (24 lowercase hex)")
+        nonce = secrets.token_hex(16)
+        data, ctype, csp = self.console.visual_render(rid, nonce)
+        self._send_raw(200, data, ctype, csp)
+
     def _check(self) -> None:
         try:
             out = self.console.check()
@@ -1831,7 +1921,8 @@ class OwnerHandler(_Handler):
         if not self._gate():
             return
         kind = OWNER_ROUTES.get(self.path)
-        if kind is None and self.path not in ("/api/relock", "/api/lock-all", "/api/page-publish", "/api/refactor"):
+        if kind is None and self.path not in ("/api/relock", "/api/lock-all", "/api/page-publish",
+                                              "/api/refactor", OWNER_FAVORITE):
             return self._send(404, {"error": "not found"})
         # Browsers send Origin on every POST, same-origin included, so a missing one is refused too:
         # an absent header must not read as "trusted".
@@ -1846,6 +1937,8 @@ class OwnerHandler(_Handler):
                 return self._send(200, self.console.lock_all(self._body()))
             if self.path == "/api/page-publish":   # Q29: the owner's "Use this page"; no agent route publishes
                 return self._send(200, self.console.publish_page(self._body()))
+            if self.path == OWNER_FAVORITE:   # 0.8.19: toggle a star on a visual or an item
+                return self._send(200, self.console.favorite_toggle(self._body()))
             self._send(200, {"record": self.console.write(kind, self._body(), "owner")})
         except RequestError as e:
             self._send(e.code, {**e.extra, "error": str(e)})

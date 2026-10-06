@@ -623,3 +623,33 @@ skill inside the repository.
 - **"Answer these together" groups open questions only**, so a stale answer
   is never offered inside a group whose form would skip it.
 - Rounds, their forms, the server and the store are unchanged.
+
+## Rendered visuals, favorites, and direction in the inbox (0.8.19)
+
+- **Mermaid visuals are rendered as diagrams**, inside an iframe the console
+  grants `allow-scripts` but NOT `allow-same-origin`: the vendored lib runs in
+  an opaque origin, so it cannot touch parent cookies, storage or network. The
+  response's own CSP allows only the vendored `/api/mermaid.js` and the init
+  script that carries the request's nonce. **View source** still shows the raw
+  `.mmd`. HTML mocks keep their earlier, scripts-off sandbox.
+- **A visual drawn by an agent surfaces at once.** A short chime plays, the
+  item appears at the top of the Inbox under **New visuals** with a ◫ badge,
+  the Feed row says "Visual drawn", and the unread count rises until you look.
+  The badge is seq-gated per browser, like unread elsewhere.
+- **Favorite tab** (between PRs and Chat). Tap ☆ on a visual, on the item
+  view's title bar, or on an Inbox row to star it. The tab lists starred
+  visuals grouped under their items. Favorites are per console (not per
+  browser), kept in `STATE/favorites.json`; only the owner door writes to it.
+- **Direction stays visible in the Inbox.** Each item with open questions
+  carries a collapsible "N answered on this item" under its rows, listing the
+  last few locked rulings with the picked option. Items whose questions are
+  all locked within the last 24 hours stay on the list under **Recently
+  answered**, so what was asked and what you answered sit side by side without
+  leaving the Inbox.
+- **A Back control at the top of every item view.** The ← Back button no
+  longer hides at desktop widths, so **discuss** from the dashboard always has
+  a one-tap way home.
+- **Documentation.** The README now has a **Windows + WSL2** section covering
+  the CRLF trap (`core.autocrlf`), the `origin/main` default in
+  `page-snapshot`, the leading-dot page path, the first `items-push`, reaching
+  the agent socket from Windows, and `loginctl enable-linger`.
