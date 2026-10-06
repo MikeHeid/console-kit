@@ -649,6 +649,14 @@ skill inside the repository.
 - **A Back control at the top of every item view.** The ← Back button no
   longer hides at desktop widths, so **discuss** from the dashboard always has
   a one-tap way home.
+- **Status flowchart on every item** (collapsible). The server builds a
+  Mermaid flowchart from the item's own questions, rounds, `forked_from`,
+  `supersedes` and `follow_up_of`: the item at the left, question nodes
+  state-coloured, round nodes shaped apart, dotted edges where a newer
+  question supersedes an older one or a round follows up. Lazy-loaded; up to
+  40 questions shown, past that an ellipsis names how many more exist.
+  Served through `GET /api/item-chart?item=X`, same sandboxed Mermaid frame
+  as `/api/visual-render`.
 - **Documentation.** The README now has a **Windows + WSL2** section covering
   the CRLF trap (`core.autocrlf`), the `origin/main` default in
   `page-snapshot`, the leading-dot page path, the first `items-push`, reaching

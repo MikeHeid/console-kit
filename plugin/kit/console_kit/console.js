@@ -1201,6 +1201,8 @@
       qs.sort((a, b) => order.indexOf(a.state) - order.indexOf(b.state));
 
       body.appendChild(renderItemTools(itemId));
+      // 0.8.19: a status flowchart for the whole item, lazy-loaded on expand, re-rendered on live wake.
+      if (qs.length > 0) body.appendChild(renderItemChart(itemId));
 
       if (qs.length > 0) {
         body.appendChild(el('div', { className: 'ck-section-heading ck-questions-heading' }, ['Questions']));
@@ -1771,6 +1773,38 @@
     });
     form.appendChild(el('div', { className: 'ck-actions' }, [send]));
     return form;
+  }
+
+  // 0.8.19: a server-generated Mermaid flowchart of the item's questions and rounds.
+  // Collapsed by default: expanding sets the iframe src, so a page that never opens it costs nothing.
+  // Re-rendered under the live loop keeps the diagram fresh when a question is answered or added.
+  const openCharts = new Set();      // which items currently show the flowchart; survives re-renders
+  function renderItemChart(itemId) {
+    const wrap = el('details', { className: 'ck-item-chart', dataItem: itemId });
+    if (openCharts.has(itemId)) wrap.setAttribute('open', '');
+    const sum = el('summary', { className: 'ck-item-chart-summary' }, [
+      el('span', { className: 'ck-item-chart-title' }, ['Status flowchart']),
+      el('span', { className: 'ck-muted ck-item-chart-hint' }, [' — questions, rounds and how they relate'])
+    ]);
+    wrap.appendChild(sum);
+    const slot = el('div', { className: 'ck-item-chart-slot' });
+    wrap.appendChild(slot);
+    const load = () => {
+      if (slot.querySelector('iframe')) return;
+      const frame = document.createElement('iframe');
+      frame.setAttribute('sandbox', 'allow-scripts');
+      frame.setAttribute('referrerpolicy', 'no-referrer');
+      frame.setAttribute('title', 'Status flowchart: ' + itemId);
+      frame.className = 'ck-visual-frame ck-visual-frame-mermaid ck-item-chart-frame';
+      frame.src = config.api + '/item-chart?item=' + encodeURIComponent(itemId);
+      slot.appendChild(frame);
+    };
+    wrap.addEventListener('toggle', () => {
+      if (wrap.open) { openCharts.add(itemId); load(); }
+      else { openCharts.delete(itemId); }
+    });
+    if (openCharts.has(itemId)) load();
+    return wrap;
   }
 
   // This item's visual requests, newest first, each with what the agent drew.

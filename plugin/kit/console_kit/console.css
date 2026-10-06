@@ -1406,3 +1406,25 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 /* 0.8.19: a row in the Inbox for items whose visuals arrived since the last look. */
 .ck-q-state[data-state="visual"] { color: var(--c-accent); font-weight: 600; }
 .ck-inbox-item-visual { border-left: 3px solid var(--c-accent); }
+
+/* 0.8.19: Status flowchart section on an item — collapsible, lazy, re-renders on live wake. */
+.ck-item-chart {
+  margin: 10px 16px 14px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+}
+.ck-item-chart-summary {
+  padding: 8px 12px;
+  cursor: pointer; list-style: none;
+  font-size: 13px; font-weight: 600;
+}
+.ck-item-chart-summary::-webkit-details-marker { display: none; }
+.ck-item-chart-summary::before { content: '▸ '; display: inline-block; width: 1em; }
+.ck-item-chart[open] .ck-item-chart-summary::before { content: '▾ '; }
+.ck-item-chart-summary:hover, .ck-item-chart-summary:focus-visible {
+  background: var(--c-surface-alt); outline: none;
+}
+.ck-item-chart-hint { font-weight: 400; }
+.ck-item-chart-slot { padding: 8px 10px 12px; }
+.ck-item-chart-frame { height: 440px; min-height: 240px; }

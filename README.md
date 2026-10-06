@@ -78,6 +78,13 @@ to run next. `INSTALL.md` (also in the zip) has the whole guide.
 
   Each step comes back as questions for you to lock. Nothing is written into
   the project before you lock.
+- **Status flowchart on every item.** Each item view carries a collapsible
+  **Status flowchart** that the server builds from your questions and rounds:
+  the item at the left, open/stale/locked questions coloured, rounds as their
+  own shape, dotted edges where a newer question supersedes an older one or
+  a round follows up on an earlier one. It is lazy (nothing loads until you
+  expand it) and renders inside the same sandboxed Mermaid frame as a
+  requested visual.
 - **Request a visual** on an item. The agent answers with a Mermaid diagram
   (rendered right there inside a sandboxed frame — the vendored lib runs in an
   opaque origin and cannot touch the console's cookies, storage or network;
