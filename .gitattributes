@@ -1,0 +1,33 @@
+# 0.9.1: pin line endings so a Windows checkout (where git's core.autocrlf is
+# typically "true") does not inject CR into files the Linux side runs or parses.
+# Without this, install.sh fails at once with
+#   `set: pipefail: invalid option name`
+# and systemd unit templates misbehave silently. The vendored Mermaid lib and
+# everything under .claude-plugin/ ships as text with LF too, so its hash on a
+# Windows checkout matches GitHub's blob.
+* text=auto eol=lf
+
+# Executables and config shipped by the kit stay LF everywhere.
+*.sh      text eol=lf
+*.in      text eol=lf
+*.py      text eol=lf
+*.js      text eol=lf
+*.css     text eol=lf
+*.html    text eol=lf
+*.md      text eol=lf
+*.json    text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.toml    text eol=lf
+VERSION   text eol=lf
+
+# Known binary types: never touched by eol normalisation.
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.zip     binary
+*.gz      binary
+*.tar     binary
+*.pdf     binary

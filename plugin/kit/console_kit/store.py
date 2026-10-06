@@ -199,7 +199,9 @@ class Store:
         if item == S.CHAT_ITEM and kind == "message":
             pass
         elif item is not None and self.known_items is not None and item not in self.known_items:
-            raise StoreError(f"item {item!r} is not in the project's item list")
+            # 0.9.1: name the push the owner needs to run; before this, the refusal was silent about it.
+            raise StoreError(f"item {item!r} is not in the project's item list; "
+                             f"run `agent.py --state <STATE> items-push --adapter <ADAPTER>` to add it")
         if kind == "question":
             if self.question(rec["qid"]):
                 raise StoreError(f"qid {rec['qid']} already exists; a qid is minted once. Ask a new Q<n>")

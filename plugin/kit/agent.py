@@ -596,18 +596,37 @@ def _items_push(a) -> int:
     return 0
 
 
-REVIEWED = "origin/main"   # Q28: "reviewed and merged" is an ancestor of this, after a fetch the user runs
+REVIEWED_FALLBACK = "origin/main"   # Q28: used when origin/HEAD does not resolve
 GIT_SECONDS = 60
+
+
+def _resolve_reviewed(root: Path) -> str:
+    """0.9.1: the remote's default branch, e.g. `origin/main` or `origin/dev`.
+
+    Reads `git symbolic-ref --short refs/remotes/origin/HEAD`, so a project whose default branch is not
+    `main` (`claude/foo-bar`, `dev`, `trunk`, ...) still has a working `page-snapshot` default. Falls back
+    to `origin/main` when the symbolic ref is absent — the owner then needs to pass `--from-ref` or run
+    `git remote set-head origin --auto` once.
+    """
+    out = G.run(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], root, timeout=GIT_SECONDS, text=True)
+    if out:
+        s = out.strip()
+        if s:
+            return s
+    return REVIEWED_FALLBACK
 
 
 def _page_snapshot(a) -> int:
     """`page-snapshot` (Q28): the page read from a COMMIT here, never from the working tree; sent as data.
 
     The server stores what it is given and never runs git. So the guard is
-    here: the commit must be an ancestor of origin/main (reviewed and merged)
-    unless `--unreviewed` says otherwise, and then the footer says so. The
-    page is the blob at `--path` in that commit, a plain file (never a link),
-    read with `git cat-file`; an edit in the working tree never reaches it.
+    here: the commit must be an ancestor of origin's default branch (reviewed
+    and merged) unless `--unreviewed` says otherwise, and then the footer says
+    so. The default is read from `origin/HEAD` (0.9.1), so a project whose
+    default branch is `claude/foo-bar` or `dev` works without `--from-ref`.
+    The page is the blob at `--path` in that commit, a plain file (never a
+    link), read with `git cat-file`; an edit in the working tree never
+    reaches it.
     """
     import base64
     from console_kit import pagesnap as PS
@@ -634,20 +653,23 @@ def _page_snapshot(a) -> int:
     why = SF._page_problem(path)
     if why:
         return refuse(why)
-    if not PS.REF.match(a.from_ref):
-        return refuse(f"--from-ref {a.from_ref!r}: a ref of plain characters, such as origin/main or a tag")
-    out = G.run(["rev-parse", "--verify", "--quiet", f"{a.from_ref}^{{commit}}"], root, timeout=GIT_SECONDS,
+    reviewed = _resolve_reviewed(root)   # 0.9.1: origin's default branch, not hard-coded
+    from_ref = a.from_ref or reviewed
+    if not PS.REF.match(from_ref):
+        return refuse(f"--from-ref {from_ref!r}: a ref of plain characters, such as origin/main or a tag")
+    out = G.run(["rev-parse", "--verify", "--quiet", f"{from_ref}^{{commit}}"], root, timeout=GIT_SECONDS,
                 text=True)
     if not out:
-        return refuse(f"{a.from_ref} names no commit in {root}; for origin/main, run `git fetch` first")
+        return refuse(f"{from_ref} names no commit in {root}; for {reviewed}, run `git fetch` first")
     commit = out.strip()
     if not a.unreviewed:
-        if not G.run(["rev-parse", "--verify", "--quiet", f"{REVIEWED}^{{commit}}"], root, timeout=GIT_SECONDS):
-            return refuse(f"{REVIEWED} is not in {root}: run `git fetch`, or pass --unreviewed to send a page "
+        if not G.run(["rev-parse", "--verify", "--quiet", f"{reviewed}^{{commit}}"], root, timeout=GIT_SECONDS):
+            return refuse(f"{reviewed} is not in {root}: run `git fetch`, or pass --unreviewed to send a page "
                           f"nobody reviewed (the footer will say so)")
-        if G.run(["merge-base", "--is-ancestor", commit, REVIEWED], root, timeout=GIT_SECONDS) is None:
-            return refuse(f"{a.from_ref} @ {commit[:12]} is not in {REVIEWED}, so it was not reviewed and merged. "
+        if G.run(["merge-base", "--is-ancestor", commit, reviewed], root, timeout=GIT_SECONDS) is None:
+            return refuse(f"{from_ref} @ {commit[:12]} is not in {reviewed}, so it was not reviewed and merged. "
                           f"Merge it first, or pass --unreviewed (the footer will say \"unreviewed ref\")")
+    a.from_ref = from_ref   # the body echoes it below; keep it consistent after the default resolved
     entry = G.run(["ls-tree", "-z", commit, "--", path], root, timeout=GIT_SECONDS)
     head, _, name = (entry or b"").rstrip(b"\0").partition(b"\t")
     fields = head.split()
@@ -894,14 +916,15 @@ def main(argv=None) -> int:
     s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
     s = sub.add_parser("page-snapshot", description="Read the console's page from a COMMIT here (git cat-file, "
                        "never the working tree) and send it to the console server, which serves only that "
-                       "snapshot (CONSOLE-kit/Q28). Refuses a commit that is not in origin/main unless "
-                       "--unreviewed. Run it after an upgrade, and whenever the page's merged version changes.")
-    s.add_argument("--from-ref", default=REVIEWED, help=f"the ref to read the page from (default: {REVIEWED}, "
-                   "after a `git fetch` you run)")
+                       "snapshot (CONSOLE-kit/Q28). Refuses a commit that is not in origin's default branch "
+                       "unless --unreviewed. Run it after an upgrade, and whenever the page's merged "
+                       "version changes.")
+    s.add_argument("--from-ref", default=None, help="the ref to read the page from (default: origin/HEAD, "
+                   "the remote's default branch after a `git fetch` you run; origin/main is the fallback)")
     s.add_argument("--path", default=None, help="the page's path in the repository (default on the one server: "
                    "the project's page in server.json)")
-    s.add_argument("--unreviewed", action="store_true", help=f"send a commit that is not in {REVIEWED}; the footer "
-                   "says \"unreviewed ref\" instead of \"from the steward\"")
+    s.add_argument("--unreviewed", action="store_true", help="send a commit that is not in origin's default "
+                   "branch; the footer says \"unreviewed ref\" instead of \"from the steward\"")
     s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
     s = sub.add_parser("history-push", description="Read git HERE, in your own process, for what the console "
                        "server asks (the version each stale lock was taken against, the cited specs' last-commit "

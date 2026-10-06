@@ -57,7 +57,9 @@ SLUG = re.compile(r"^[A-Za-z0-9-]{1,255}\Z")   # one directory name: never "/", 
 HOSTNAME = re.compile(r"^(?=.{1,253}\Z)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\Z")
 AUD = re.compile(r"^[A-Za-z0-9_-]{1,256}\Z")
 TEAM = HOSTNAME
-PAGE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]{0,511}\Z")
+# 0.9.1: a single leading dot is allowed on the first path segment, so `.console-kit/page.html` validates
+# (the onboarding default). "." and ".." as full segments are still refused by `_page_problem`'s split check.
+PAGE = re.compile(r"^\.?[A-Za-z0-9_][A-Za-z0-9_./-]{0,511}\Z")
 TOKENS = "tokens"
 TOKEN_KEY = "token_sha256"
 TOKEN = re.compile(r"^ck1_[A-Za-z0-9_-]{43}\Z")      # 32 bytes, unpadded base64url

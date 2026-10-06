@@ -680,3 +680,30 @@ skill inside the repository.
   the CRLF trap (`core.autocrlf`), the `origin/main` default in
   `page-snapshot`, the leading-dot page path, the first `items-push`, reaching
   the agent socket from Windows, and `loginctl enable-linger`.
+
+## Code fixes for the Windows + WSL2 workarounds (0.9.1)
+
+Follow-up to 0.9.0: the README notes stay useful, but a fresh install no
+longer needs any of the workarounds they describe.
+
+- **`.gitattributes` pins LF.** Every text file ships as LF everywhere;
+  `*.sh`, `*.in` and `*.py` are explicit so `install.sh` and the systemd
+  unit templates do not pick up CR on a Windows checkout (`core.autocrlf`
+  default). The committed blobs already were LF; this makes the working-tree
+  guarantee explicit, so a WSL copy from the plugin cache no longer needs
+  the dos2unix dance.
+- **A dotfile page path is accepted.** `serverfile.PAGE` now allows a
+  single leading dot on the first path segment, so `.console-kit/page.html`
+  (the onboarding default) passes. `.`, `..`, `./foo` and empty components
+  are still refused by `_page_problem`.
+- **`page-snapshot` reads origin's default branch.** `--from-ref` defaults
+  to the ref `git symbolic-ref --short refs/remotes/origin/HEAD` returns
+  (`origin/main`, `origin/dev`, `origin/claude/foo-bar`, …), with
+  `origin/main` as the fallback when that is not set. The error messages
+  and `--unreviewed` wording follow suit. A project whose default branch is
+  not `main` no longer needs `--from-ref HEAD --unreviewed` just to bootstrap.
+- **`items-push` is called out.** `onboard.py` printed next-steps now
+  include an `agent.py … items-push --adapter …` line (step 6), and the
+  server's refusal when a write names an unknown item names the push to
+  run. The brief defect "item X is not in the project's item list" without
+  a next-step is gone.
