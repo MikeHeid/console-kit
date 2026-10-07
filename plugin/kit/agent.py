@@ -593,6 +593,61 @@ def _items_push(a) -> int:
         print(f"refused ({code}): {out.get('error')}", file=sys.stderr)
         return 1
     sys.stdout.write(_json(out))
+    # 0.9.13: --sync-dashboard DIR inserts a <details id="item-X" data-ck-item="X"> stub into the given
+    # dashboard page for every item not already present, nested under its parent. Idempotent.
+    if getattr(a, "sync_dashboard", None):
+        _sync_dashboard_write(root, a.sync_dashboard, body["items"])
+    return 0
+
+
+def _sync_dashboard(a) -> int:
+    """0.9.13: insert a stub section into the dashboard page for every item not already there."""
+    from console_kit import fold as FO
+    state = os.path.realpath(a.state)
+    found = R.enclosing(a.project)
+    if found is None or found[1].get("state") != state:
+        print(f"refused: {Path(a.project).resolve()} is not a project registered on the console at {state}",
+              file=sys.stderr)
+        return 1
+    root = Path(found[0])
+    try:
+        adapter = FO.load_adapter(FO.inside(root, a.adapter, "--adapter"))
+        items = adapter.items()
+    except FO.FoldError as e:
+        print(f"refused, nothing written: {e}", file=sys.stderr)
+        return 1
+    return _sync_dashboard_write(root, a.page, items)
+
+
+def _sync_dashboard_write(root: Path, page_rel: str, items: dict) -> int:
+    """Shared write-step for `sync-dashboard` and `items-push --sync-dashboard`."""
+    from console_kit import scaffold as SC
+    page = (Path(root) / page_rel).resolve()
+    if Path(root).resolve() not in page.parents:
+        print(f"refused: {page} is not inside {root}", file=sys.stderr)
+        return 1
+    try:
+        before = page.read_text(encoding="utf-8") if page.exists() else ""
+    except OSError as e:
+        print(f"refused: cannot read {page}: {e}", file=sys.stderr)
+        return 1
+    after, added = SC.sync_items_block(before or "<!doctype html>\n<html><body>\n</body></html>\n", items)
+    if not added and before:
+        print("sync-dashboard: every item already on the page; nothing changed.")
+        return 0
+    try:
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(after, encoding="utf-8")
+    except OSError as e:
+        print(f"refused: cannot write {page}: {e}", file=sys.stderr)
+        return 1
+    print(f"sync-dashboard: {len(added)} item{'' if len(added) == 1 else 's'} inserted into "
+          f"{page.relative_to(Path(root)).as_posix()}:")
+    for i in added:
+        print(f"  + {i}")
+    print()
+    print("Next: review the diff, `git commit`, then `agent.py page-snapshot --path "
+          f"{Path(page_rel).as_posix()}` and press 'Use this page' in the console.")
     return 0
 
 
@@ -1002,6 +1057,17 @@ def main(argv=None) -> int:
                        "code. Run it after an upgrade, and whenever the register changes.")
     s.add_argument("--adapter", required=True, help="the adapter, a path inside the project")
     s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
+    s.add_argument("--sync-dashboard", default=None, metavar="PAGE",
+                   help="0.9.13: after a successful push, insert a <details data-ck-item=...> stub into PAGE "
+                        "for every item not already there (idempotent, nested by parent). You still commit "
+                        "and run page-snapshot yourself.")
+    s = sub.add_parser("sync-dashboard", description="0.9.13: insert a <details id=item-X data-ck-item=X> stub "
+                       "into the dashboard page for every item not already there. Nested by parent via per-item "
+                       "markers so re-runs preserve hand-edits inside each node.")
+    s.add_argument("--adapter", default=".console-kit/adapter.py", help="the adapter, a path inside the project")
+    s.add_argument("--page", default="docs/console/page.html",
+                   help="the dashboard page to update (project-relative)")
+    s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
     s = sub.add_parser("items-watch", description="0.9.3: watch the project's adapter and items files and re-run "
                        "items-push whenever any of them changes. A plain stat loop (no file-watcher dependency); "
                        "Ctrl+C exits cleanly. Pair with the scaffolded board() to keep the dashboard fresh.")
@@ -1140,6 +1206,8 @@ def _run(a, bell: Path) -> int:
         return _items_watch(a)
     if a.cmd == "scaffold-dashboard":
         return _scaffold_dashboard(a)
+    if a.cmd == "sync-dashboard":
+        return _sync_dashboard(a)
     if a.cmd == "history-push":
         return _history_push(a)
     if a.cmd == "prs-push":
