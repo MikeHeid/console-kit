@@ -833,6 +833,9 @@ class Console:
         self.favorites = FV.Favorites(cfg.state)   # 0.8.19: the owner's starred visuals and items
         self.triggers = TR.Store()                 # 0.12.0: external-webhook triggers → playbooks
         self.triggers.set_all(TR.load(cfg.root))   # malformed config refuses the start, by name
+        self._cron_stop = threading.Event()        # 0.15.0: minute-tick thread for scheduled triggers
+        self._cron_thread = threading.Thread(target=self._cron_tick_loop, name="ck-cron", daemon=True)
+        self._cron_thread.start()
         self._lock = threading.Lock()
         self._working_lock = threading.Lock()   # working.json is read, changed and replaced by several agents
         # The live console (0.7.0): every change a page could show bumps `_epoch`
@@ -1041,6 +1044,55 @@ class Console:
             records.append(rec)
         return {"records": records, "skipped": skipped}
 
+    def _cron_tick_loop(self) -> None:
+        """0.15.0: every minute, check every trigger's cron and fire the matched ones.
+
+        We sleep until the next whole-minute boundary (+ a tiny jitter) so firings land at the top of a
+        minute even if the server started mid-minute. On a clock that jumps backward (ntp adjust, laptop
+        resume) we still only fire once per (name, minute) via the Store's claim-with-cooldown; and the
+        tick loop guards against double-firing by tracking the last-fired minute per trigger.
+        """
+        import datetime as _dt
+        last_fired_minute: dict[str, tuple] = {}
+        while not self._cron_stop.is_set():
+            now = _dt.datetime.now()
+            # Sleep to the top of the next minute (+ 0.2 s so we don't race the boundary).
+            delay = 60 - now.second - now.microsecond / 1_000_000 + 0.2
+            if delay < 0.1:
+                delay = 0.1
+            if self._cron_stop.wait(timeout=delay):
+                return
+            now = _dt.datetime.now()
+            tick_key = (now.year, now.month, now.day, now.hour, now.minute)
+            try:
+                for trigger in self.triggers.all().values():
+                    if trigger.cron is None:
+                        continue
+                    if not TR.cron_matches(trigger.cron, now):
+                        continue
+                    if last_fired_minute.get(trigger.name) == tick_key:
+                        continue
+                    last_fired_minute[trigger.name] = tick_key
+                    try:
+                        self.fire_cron(trigger.name)
+                    except Exception as e:  # noqa: BLE001 — one bad trigger must not stop the loop
+                        sys.stderr.write(f"console cron: {trigger.name!r} failed: {type(e).__name__}: {e}\n")
+            except Exception as e:  # noqa: BLE001
+                sys.stderr.write(f"console cron: tick failed: {type(e).__name__}: {e}\n")
+
+    def fire_cron(self, name: str) -> dict:
+        """0.15.0: fire a trigger from the clock. Bypasses the webhook rate-limit (cron is self-rate-limited
+        by minute granularity) and the token check (cron is a server-local firing). Same final path as
+        `fire_trigger`: run_playbook with a nonce derived from the trigger name + minute, so a repeated
+        tick in the same minute is a no-op on the server too.
+        """
+        import time as _t
+        trigger = self.triggers.get(name)
+        if trigger is None or trigger.cron is None:
+            raise RequestError(404, f"no cron trigger named {name!r}")
+        nonce = f"cron-{name}-{int(_t.time()) // 60}"
+        return self.run_playbook({"name": trigger.playbook, "nonce": nonce})
+
     def fire_trigger(self, name: str, token: str | None) -> dict:
         """0.12.0: an external HTTP call fires a trigger, which runs its playbook.
 
@@ -1051,6 +1103,8 @@ class Console:
         trigger = self.triggers.get(name)
         if trigger is None:
             raise RequestError(404, f"no trigger named {name!r}")
+        if trigger.token_sha256 is None:
+            raise RequestError(405, f"trigger {name!r} has no webhook (cron-only); it fires on its schedule")
         if not TR.token_matches(trigger, token or ""):
             raise RequestError(401, "the trigger token is missing or wrong")
         import time as _t

@@ -1,4 +1,4 @@
-"""External triggers: HTTP calls that fire a named playbook (0.12.0).
+"""Triggers: HTTP calls (webhooks, 0.12.0) and scheduled clock ticks (cron, 0.15.0) that fire a named playbook.
 
 A trigger is defined in `.console-kit/triggers.json`:
 
@@ -63,11 +63,17 @@ class TriggerError(ValueError):
 class Trigger:
     name: str
     playbook: str
-    token_sha256: str
+    token_sha256: str | None    # None → webhook disabled (cron-only trigger)
+    cron: tuple | None          # (minutes, hours, days-of-month, months, days-of-week) each a frozenset of ints
 
     def to_public(self) -> dict:
-        """For /view: the token_sha256 is not exposed; it is still an acceptor a caller could grind."""
-        return {"name": self.name, "playbook": self.playbook}
+        """For /view: token hash + cron shape aren't exposed; only name + playbook + what trigger kinds are armed."""
+        kinds = []
+        if self.token_sha256:
+            kinds.append("webhook")
+        if self.cron:
+            kinds.append("cron")
+        return {"name": self.name, "playbook": self.playbook, "kinds": kinds}
 
 
 class Store:
@@ -145,10 +151,95 @@ def _validate(name: str, cfg: object) -> Trigger:
     if not isinstance(playbook, str) or not NAME.match(playbook):
         raise TriggerError(f"{FILE}: triggers[{name!r}].playbook must name a playbook (slug-shaped)")
     token_sha = cfg.get("token_sha256")
-    if not isinstance(token_sha, str) or not _SHA256_HEX.match(token_sha):
-        raise TriggerError(f"{FILE}: triggers[{name!r}].token_sha256 is 64 lowercase hex chars "
-                           "(sha256 of the bearer token you give the sender)")
-    return Trigger(name=name, playbook=playbook, token_sha256=token_sha)
+    if token_sha is not None:
+        if not isinstance(token_sha, str) or not _SHA256_HEX.match(token_sha):
+            raise TriggerError(f"{FILE}: triggers[{name!r}].token_sha256 is 64 lowercase hex chars "
+                               "(sha256 of the bearer token you give the sender)")
+    cron_raw = cfg.get("cron")
+    cron_fields: tuple | None = None
+    if cron_raw is not None:
+        if not isinstance(cron_raw, str):
+            raise TriggerError(f"{FILE}: triggers[{name!r}].cron must be a 5-field cron string "
+                               "like '0 9 * * MON' or '*/15 * * * *'")
+        try:
+            cron_fields = parse_cron(cron_raw)
+        except ValueError as e:
+            raise TriggerError(f"{FILE}: triggers[{name!r}].cron: {e}") from None
+    if token_sha is None and cron_fields is None:
+        raise TriggerError(f"{FILE}: triggers[{name!r}] must set at least one of token_sha256 (webhook) "
+                           "or cron (schedule)")
+    return Trigger(name=name, playbook=playbook, token_sha256=token_sha, cron=cron_fields)
+
+
+# -- cron parser ------------------------------------------------------------------------
+# Minute Hour DayOfMonth Month DayOfWeek. `*`, `*/n`, ranges `a-b`, lists `a,b,c`, and `a-b/n`. Named
+# months (JAN..DEC) and days-of-week (SUN..SAT) are accepted; shortcuts like `@daily` are not — spell
+# the full form so a reader of the config can see exactly when it fires. DoW: 0 or 7 = Sunday.
+
+_MONTH = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,"JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+_DOW = {"SUN":0,"MON":1,"TUE":2,"WED":3,"THU":4,"FRI":5,"SAT":6}
+_FIELDS = (("minute", 0, 59, {}),
+           ("hour", 0, 23, {}),
+           ("day-of-month", 1, 31, {}),
+           ("month", 1, 12, _MONTH),
+           ("day-of-week", 0, 6, _DOW))
+
+
+def parse_cron(spec: str) -> tuple:
+    """Parse a 5-field cron string. Returns a tuple of frozensets, one per field."""
+    parts = spec.strip().split()
+    if len(parts) != 5:
+        raise ValueError(f"cron has 5 fields separated by spaces; got {len(parts)}")
+    out = []
+    for raw, (fname, lo, hi, aliases) in zip(parts, _FIELDS):
+        out.append(frozenset(_parse_cron_field(raw, lo, hi, aliases, fname)))
+    return tuple(out)
+
+
+def _parse_cron_field(raw: str, lo: int, hi: int, aliases: dict, fname: str) -> set:
+    def lookup(v: str) -> int:
+        v = v.strip().upper()
+        if v in aliases:
+            return aliases[v]
+        try:
+            return int(v)
+        except ValueError:
+            raise ValueError(f"{fname} cannot read {v!r}") from None
+    out: set = set()
+    for piece in raw.split(","):
+        step = 1
+        if "/" in piece:
+            piece, step_s = piece.rsplit("/", 1)
+            try:
+                step = int(step_s)
+            except ValueError:
+                raise ValueError(f"{fname} step {step_s!r} is not an integer") from None
+            if step < 1:
+                raise ValueError(f"{fname} step must be >= 1")
+        if piece == "*" or piece == "":
+            a, b = lo, hi
+        elif "-" in piece:
+            a_s, b_s = piece.split("-", 1)
+            a, b = lookup(a_s), lookup(b_s)
+        else:
+            v = lookup(piece)
+            a, b = v, v
+        # Day-of-week accepts 7 as a Sunday alias (same as 0).
+        if fname == "day-of-week":
+            if a == 7: a = 0
+            if b == 7: b = 0
+        if a < lo or b > hi or a > b:
+            raise ValueError(f"{fname} {piece!r} is out of range {lo}..{hi}")
+        out.update(range(a, b + 1, step))
+    return out
+
+
+def cron_matches(cron: tuple, now) -> bool:
+    """True when the local-time `now` matches every cron field. `now` is a datetime.datetime."""
+    minutes, hours, dom, months, dow = cron
+    return (now.minute in minutes and now.hour in hours and now.day in dom
+            and now.month in months and (now.weekday() + 1) % 7 in dow)
+#         ^ Python weekday: Mon=0..Sun=6; cron: Sun=0..Sat=6. (Mon=0 -> cron 1); (Sun=6 -> cron 0).
 
 
 def token_from_header(auth: str | None, extra: str | None) -> str | None:
