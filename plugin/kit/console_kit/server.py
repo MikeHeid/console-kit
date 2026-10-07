@@ -82,6 +82,7 @@ from . import favorites as FV
 from . import gitseam as G
 from . import items as IT
 from . import pagesnap as PS
+from . import playbooks as PB
 from . import prs as PR
 from . import names as N
 from . import projectcfg as PC
@@ -101,6 +102,7 @@ MAX_BODY = 64 * 1024        # far above any real answer (MAX_TEXT is 20 000 char
 OWNER_ROUTES = {"/api/message": "message", "/api/answer": "answer", "/api/lock": "lock"}
 # 0.8.19: starred visuals and items. A side-route (not a store kind): toggles are owner-only, idempotent, cheap.
 OWNER_FAVORITE = "/api/favorite"
+OWNER_PLAYBOOK = "/api/playbook"
 # The live console (0.7.0). A long poll: the page asks "has anything changed
 # since seq S?" and the server answers the moment something does, or after at
 # most WAIT_MAX seconds with "no". Well inside Cloudflare's 100 s response
@@ -846,6 +848,7 @@ class Console:
         view["tags"] = self.tags(view, items)
         view["config"] = {"specs_dir": self.project.specs_dir, "visuals_dir": self.project.visuals_dir,
                           "sections": self.project.sections}
+        view["playbooks"] = [p.to_dict() for p in PB.load(self.cfg.root).values()]
         view["favorites"] = self.favorites.list()   # 0.8.19: starred keys, newest first
         pushed = getattr(self.adapter, "pushed", None)
         if getattr(self.adapter, "problem", None):   # the items() above already read (and logged) it
@@ -908,6 +911,40 @@ class Console:
     def prs(self) -> dict:
         """The owner's PRs view: the steward's last push, or `pushed: false` and the note saying why (F63)."""
         return PR.load(self.cfg.state)
+
+    def run_playbook(self, body: object) -> dict:
+        """0.11.0: fan out a named playbook's steps as owner `message` writes, in order.
+
+        Each step goes through the regular `message` write path (same checks, same doorbell rings, same
+        view updates). Owner-only. A step that writes nothing because of a nonce retry does not fail the
+        rest. Returns {"records": [...], "skipped": [{index, why}, ...]}.
+        """
+        if (not isinstance(body, dict)
+                or set(body) - {"name", "nonce"}
+                or not isinstance(body.get("name"), str)
+                or not isinstance(body.get("nonce"), str)):
+            raise RequestError(400, '/api/playbook takes {"name": "<slug>", "nonce": "<nonce>"}')
+        if not PB.NAME.match(body["name"]):
+            raise RequestError(400, "playbook name is lowercase letters, digits, underscore or hyphen (1-64)")
+        books = PB.load(self.cfg.root)
+        pb = books.get(body["name"])
+        if pb is None:
+            raise RequestError(404, f"no playbook named {body['name']!r} under .console-kit/playbooks/")
+        items = self.items()
+        records: list[dict] = []
+        skipped: list[dict] = []
+        for index, step in enumerate(pb.steps):
+            if step["item"] != S.CHAT_ITEM and step["item"] not in items:
+                skipped.append({"index": index, "why": f"item {step['item']!r} is not in the project's item list"})
+                continue
+            step_nonce = f"{body['nonce']}-{index}"
+            try:
+                rec = self.write("message", {**PB.step_body(step), "nonce": step_nonce}, "owner")
+            except RequestError as e:
+                skipped.append({"index": index, "why": str(e)})
+                continue
+            records.append(rec)
+        return {"records": records, "skipped": skipped}
 
     def favorite_toggle(self, body: object) -> dict:
         """Toggle `body['id']` in STATE/favorites.json; return the new state and the keys.
@@ -2296,7 +2333,7 @@ class OwnerHandler(_Handler):
             return
         kind = OWNER_ROUTES.get(self.path)
         if kind is None and self.path not in ("/api/relock", "/api/lock-all", "/api/page-publish",
-                                              "/api/refactor", OWNER_FAVORITE):
+                                              "/api/refactor", OWNER_FAVORITE, OWNER_PLAYBOOK):
             return self._send(404, {"error": "not found"})
         # Browsers send Origin on every POST, same-origin included, so a missing one is refused too:
         # an absent header must not read as "trusted".
@@ -2313,6 +2350,8 @@ class OwnerHandler(_Handler):
                 return self._send(200, self.console.publish_page(self._body()))
             if self.path == OWNER_FAVORITE:   # 0.8.19: toggle a star on a visual or an item
                 return self._send(200, self.console.favorite_toggle(self._body()))
+            if self.path == OWNER_PLAYBOOK:   # 0.11.0: fan out a named playbook's steps
+                return self._send(200, self.console.run_playbook(self._body()))
             self._send(200, {"record": self.console.write(kind, self._body(), "owner")})
         except RequestError as e:
             self._send(e.code, {**e.extra, "error": str(e)})

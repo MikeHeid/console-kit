@@ -1649,3 +1649,4 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   color: var(--c-blocked);
 }
 .ck-delegate-status[hidden] { display: none; }
+.ck-del-playbookrow[hidden] { display: none; }
