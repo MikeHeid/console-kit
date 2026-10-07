@@ -1503,3 +1503,16 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 .ck-chip-on {
   background: var(--c-accent); color: #fff; border-color: var(--c-accent);
 }
+
+/* 0.9.10: inline error below the Confirm-proposal button so the owner sees the 409 message, not just "409". */
+.ck-confirm-error {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--c-blocked, #842029);
+  border-radius: var(--radius-sm);
+  background: var(--c-blocked-bg, #f8d7da);
+  color: var(--c-blocked, #842029);
+  font-size: 13px;
+  line-height: 1.4;
+}
+.ck-confirm-error[hidden] { display: none; }

@@ -436,25 +436,44 @@ SECURITY_HEADERS = (
 )
 
 
-def proposal_problem(anchors: list[dict], tree: A.Tree) -> str | None:
+def proposal_problem(anchors: list[dict], tree: A.Tree, strict_excerpts: list[dict] | None = None) -> str | None:
     """Why proposed anchors cannot be confirmed against `tree` as it is now; None when they can (property 4).
 
-    Every condition holds, and every excerpt is found EXACTLY once: an
-    excerpt found in several places would hold while the one meant changed.
+    `strict_excerpts` names the excerpts the steward is anchoring on in THIS proposal: those must be in the
+    file EXACTLY once (ambiguous anchor refused). Any excerpt NOT in `strict_excerpts` is a condition carried
+    over from the lock, whose lock-time invariant was "text present"; it is checked by `tree.holds()` only.
+    Pass None (the default) to keep the pre-0.9.10 behaviour of exactly-once on every excerpt — kept for
+    other callers that do not distinguish carried-over conditions.
+
+    Fix for the bug "a re-anchor proposal can never be confirmed when a kept excerpt is no longer unique":
+    the exactly-once invariant was a PROPOSAL-time rule for the newly cited anchor, never a continuing
+    guarantee the lock made. A carried-over excerpt whose text now appears several times still holds, so the
+    re-anchor completes; the stale check later still uses `holds()`, which is at-least-once.
     """
+    strict = _excerpt_set(strict_excerpts) if strict_excerpts is not None else None
     for c in anchors:
         if c["kind"] == "excerpt":
-            n = tree.norm(c["path"])
-            want = A.normalise(c["text"])
-            seen = 0 if n is None else n.count(want)
-            if len(want) < S.MIN_EXCERPT:
-                return f"the cited text in {c['path']} is under {S.MIN_EXCERPT} characters, too short to anchor on"
-            if seen != 1:
-                return (f"the cited text is in {c['path']} {seen} times now; it must be there exactly once"
-                        if n is not None else f"{c['path']} cannot be read now")
+            is_strict = strict is None or (c["path"], A.normalise(c["text"])) in strict
+            if is_strict:
+                n = tree.norm(c["path"])
+                want = A.normalise(c["text"])
+                seen = 0 if n is None else n.count(want)
+                if len(want) < S.MIN_EXCERPT:
+                    return f"the cited text in {c['path']} is under {S.MIN_EXCERPT} characters, too short to anchor on"
+                if seen != 1:
+                    return (f"the cited text is in {c['path']} {seen} times now; it must be there exactly once"
+                            if n is not None else f"{c['path']} cannot be read now")
+            else:
+                if not tree.holds(c):
+                    return f"{V.condition_words(c)} no longer holds"
         elif not tree.holds(c):
             return f"{V.condition_words(c)} no longer holds"
     return None
+
+
+def _excerpt_set(excerpts: list[dict]) -> set[tuple[str, str]]:
+    """A hashable set of (path, normalised_text) pairs for comparing which excerpts are the steward's new cites."""
+    return {(c["path"], A.normalise(c["text"])) for c in excerpts if c.get("kind") == "excerpt"}
 
 
 class BoardError(Exception):
@@ -1446,7 +1465,12 @@ class Console:
         return q, lk
 
     def _confirm_check(self, body: dict, q: dict, lk: dict, conds: list[dict], tree: A.Tree) -> None:
-        """Property 4: the proposal still holds against the files as they are NOW, and was made against these anchors."""
+        """Property 4: the proposal still holds against the files as they are NOW, and was made against these anchors.
+
+        0.9.10: `strict_excerpts` names only the steward's newly cited anchors; a carried-over condition is
+        checked by `tree.holds()`, matching its lock-time invariant. Without this split, a lock whose kept
+        excerpt text became non-unique after lock time could never be re-anchored (confirm 409'd every time).
+        """
         p = self.store.refactor.get(body.get("proposal"))
         if p is None or p["type"] != "proposal" or p["qid"] != q["qid"]:
             raise RequestError(404, f"no proposal {body.get('proposal')!r} for {q['qid']}")
@@ -1455,7 +1479,10 @@ class Console:
         if p["base"] != conds:
             raise RequestError(409, f"{q['qid']}'s anchors changed since proposal {p['id'][:8]} was made; ask the "
                                     f"steward to propose again")
-        why = proposal_problem(p["anchors"], tree)
+        base_excerpts = _excerpt_set([c for c in p["base"] if c.get("kind") == "excerpt"])
+        new_cites = [c for c in p["anchors"]
+                     if c.get("kind") == "excerpt" and (c["path"], A.normalise(c["text"])) not in base_excerpts]
+        why = proposal_problem(p["anchors"], tree, strict_excerpts=new_cites)
         if why:
             raise RequestError(409, f"proposal {p['id'][:8]} no longer holds: {why}. Nothing changed; ask the "
                                     f"steward to propose again")
