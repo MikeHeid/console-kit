@@ -1144,3 +1144,22 @@ flavour the trigger is armed for.
 Both `fire_trigger` and `fire_cron` wrap the playbook call in a
 try/except and log the outcome before re-raising, so a failing playbook
 still writes a log row with the error.
+
+## Impact graph filter chips (0.17.0)
+
+Dense impact graphs got hard to read. A chip row above the Cytoscape
+canvas now toggles visibility by:
+
+- **Kind**: item, question, round, section, file.
+- **State** (applied only to question nodes): awaiting_you, unlocked,
+  locked, stale.
+
+An empty selection in a group means "all shown"; selecting one or more
+narrows the group to just those. Multi-select across groups is AND
+(matching nodes in both). A **reset** chip clears everything. Hidden
+nodes drag their edges along via a `.ck-hidden` display:none rule.
+
+All filter state lives inside the sandboxed iframe; nothing round-trips
+to the server. The hint ("drag · wheel to zoom · click to highlight
+downstream") moved to the bottom of the stage so the chip row has
+breathing room.
