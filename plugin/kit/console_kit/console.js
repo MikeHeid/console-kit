@@ -873,6 +873,8 @@
       renderPRs(body);
     } else if (currentTab === 'favorite') {
       renderFavorites(body);
+    } else if (currentTab === 'portfolio') {
+      renderPortfolio(body);
     } else if (currentTab === 'chat') {
       renderChat(body);
     } else {
@@ -885,9 +887,9 @@
     }
   }
 
-  // The inbox's five views: what waits on you, what happened, PRs, starred visuals/items, and the chat.
-  // Order (0.8.19): Inbox Feed PRs Favorite Chat.
-  const TABS = [['inbox', 'Inbox'], ['feed', 'Feed'], ['prs', 'PRs'], ['favorite', 'Favorite'], ['chat', 'Chat']];
+  // The inbox's tabs. Order: Inbox Feed PRs Favorite Portfolio Chat.
+  const TABS = [['inbox', 'Inbox'], ['feed', 'Feed'], ['prs', 'PRs'],
+                ['favorite', 'Favorite'], ['portfolio', 'Portfolio'], ['chat', 'Chat']];
 
   function renderTabs() {
     const bar = el('div', { className: 'ck-tabs', role: 'tablist', 'aria-label': 'Inbox views' });
@@ -901,6 +903,10 @@
       if (id === 'inbox' && view && view.inbox && view.inbox.length) note = String(view.inbox.length);
       if (id === 'feed' && unread) note = unread + ' new';
       if (id === 'favorite' && view && view.favorites && view.favorites.length) note = String(view.favorites.length);
+      if (id === 'portfolio') {
+        const n = portfolioAwaitingTotal();
+        if (n) note = n + ' ?you';
+      }
       if (id === 'chat' && view && view.chat && view.chat.awaiting_agent) note = '●';
       if (note) b.appendChild(el('span', { className: 'ck-tab-note' }, [' ' + note]));
       if (id === 'chat' && note) b.setAttribute('aria-label', 'Chat, waiting on an agent');
@@ -4385,6 +4391,230 @@
     else box.appendChild(el('p', { className: 'ck-muted' }, ['Loading…']));
     // A live wake (a push bumps the version) or the first open: read the steward's push again.
     if (prsState.ver !== liveVer || (!prsState.data && !prsState.error)) loadPRs(box);
+  }
+
+  // Portfolio tab — a card per peer (and self), with state tallies and desktop notifications
+  // for new "awaiting_you" or "stale" counts. All data is fetched through the owner's own server
+  // (/api/portfolio); the browser never sees peer secrets, so a browser window on one console does
+  // not need direct Access to the others.
+  const portfolioState = {
+    data: null,         // last payload from /api/portfolio: { self, peers }
+    error: null,
+    ver: undefined,     // the liveVer when `data` was fetched; drives revalidation
+    loading: false,
+    lastSeen: {}        // name → { awaiting_you, stale, ts } — in-session dedupe for notifications
+  };
+  const PORTFOLIO_POLL_MS = 30000;       // soft background poll while the tab is open
+  const PORTFOLIO_NOTIFY_DEDUPE_MS = 60000;
+  let portfolioTimer = null;
+
+  function portfolioNotifyEnabled() {
+    try { return localStorage.getItem('ck-portfolio-notify') === '1'; } catch (e) { return false; }
+  }
+  function setPortfolioNotify(on) {
+    try { localStorage.setItem('ck-portfolio-notify', on ? '1' : '0'); } catch (e) {}
+  }
+  function portfolioDndUntil() {
+    try {
+      const v = Number(localStorage.getItem('ck-portfolio-dnd-until') || '0');
+      return Number.isFinite(v) ? v : 0;
+    } catch (e) { return 0; }
+  }
+  function setPortfolioDndUntil(ms) {
+    try { localStorage.setItem('ck-portfolio-dnd-until', String(ms || 0)); } catch (e) {}
+  }
+
+  async function loadPortfolio(container) {
+    if (portfolioState.loading) return;
+    portfolioState.loading = true;
+    const ver = liveVer;
+    try {
+      const resp = await fetch(config.api + '/portfolio', { credentials: 'same-origin' });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'HTTP ' + resp.status);
+      portfolioState.data = data;
+      portfolioState.error = null;
+      maybeNotifyPortfolio(data);
+    } catch (e) {
+      portfolioState.error = e.message || 'Network error';
+    }
+    portfolioState.ver = ver;
+    portfolioState.loading = false;
+    if (container && document.contains(container)) fillPortfolio(container);
+  }
+
+  // The browser-side notifier. Compares each peer's current `awaiting_you` and `stale` against the
+  // last-seen counts in this session; fires one OS notification per peer when either climbs. The
+  // dedupe window drops repeats, and the DND lid silences everything until a chosen moment.
+  function maybeNotifyPortfolio(data) {
+    if (!portfolioNotifyEnabled()) return;
+    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+    const now = Date.now();
+    if (now < portfolioDndUntil()) return;
+    const rows = (data && data.peers) || [];
+    for (const row of rows) {
+      if (!row || !row.ok || !row.name) continue;
+      const you = Number(row.awaiting_you || 0);
+      const stale = Number(row.stale || 0);
+      const prev = portfolioState.lastSeen[row.name] || { awaiting_you: 0, stale: 0, ts: 0 };
+      const grew = (you > prev.awaiting_you) || (stale > prev.stale);
+      portfolioState.lastSeen[row.name] = { awaiting_you: you, stale: stale, ts: prev.ts };
+      if (!grew) continue;
+      if (now - prev.ts < PORTFOLIO_NOTIFY_DEDUPE_MS) continue;
+      portfolioState.lastSeen[row.name].ts = now;
+      const bits = [];
+      if (you > prev.awaiting_you) bits.push((you - prev.awaiting_you) + ' new awaiting you');
+      if (stale > prev.stale) bits.push((stale - prev.stale) + ' newly stale');
+      try {
+        const n = new Notification((row.project || row.name) + ' · console-kit', {
+          body: bits.join(' · '),
+          tag: 'ck-portfolio-' + row.name,
+          silent: false
+        });
+        n.onclick = () => { try { window.open(row.url, '_blank', 'noopener'); n.close(); } catch (e) {} };
+      } catch (e) {}
+    }
+  }
+
+  // The roll-up for the Portfolio tab's note: total `awaiting_you` across every peer plus self.
+  function portfolioAwaitingTotal() {
+    const d = portfolioState.data;
+    if (!d) return 0;
+    let n = Number((d.self && d.self.awaiting_you) || 0);
+    for (const p of (d.peers || [])) if (p && p.ok) n += Number(p.awaiting_you || 0);
+    return n;
+  }
+
+  function renderPortfolio(body) {
+    const box = el('div', { className: 'ck-portfolio' });
+    body.appendChild(box);
+
+    // Notification controls strip.
+    const ctrl = el('div', { className: 'ck-portfolio-controls' });
+    const supportsNotify = typeof Notification !== 'undefined';
+    const notifOn = supportsNotify && portfolioNotifyEnabled() && Notification.permission === 'granted';
+    const btn = el('button', { className: 'ck-btn ck-portfolio-notify', type: 'button' },
+      [notifOn ? '🔔 Notifications on' : '🔕 Notifications off']);
+    btn.addEventListener('click', async () => {
+      if (!supportsNotify) { announce('This browser does not support desktop notifications.'); return; }
+      if (!portfolioNotifyEnabled() || Notification.permission !== 'granted') {
+        let perm = Notification.permission;
+        if (perm !== 'granted') {
+          try { perm = await Notification.requestPermission(); } catch (e) { perm = 'denied'; }
+        }
+        if (perm !== 'granted') { announce('Notifications blocked by the browser.'); return; }
+        setPortfolioNotify(true);
+        announce('Portfolio notifications on.');
+      } else {
+        setPortfolioNotify(false);
+        announce('Portfolio notifications off.');
+      }
+      renderPanel();
+    });
+    ctrl.appendChild(btn);
+
+    const dndUntil = portfolioDndUntil();
+    const dndActive = Date.now() < dndUntil;
+    const dnd = el('button', { className: 'ck-btn ck-portfolio-dnd', type: 'button' },
+      [dndActive ? ('🌙 Snoozed · ' + Math.max(1, Math.round((dndUntil - Date.now()) / 60000)) + ' min')
+                 : '🌙 Snooze 1h']);
+    dnd.addEventListener('click', () => {
+      if (dndActive) setPortfolioDndUntil(0);
+      else setPortfolioDndUntil(Date.now() + 60 * 60 * 1000);
+      renderPanel();
+    });
+    ctrl.appendChild(dnd);
+    box.appendChild(ctrl);
+
+    const grid = el('div', { className: 'ck-portfolio-grid' });
+    box.appendChild(grid);
+    if (portfolioState.data || portfolioState.error) fillPortfolio(box);
+    else grid.appendChild(el('p', { className: 'ck-muted' }, ['Loading…']));
+
+    if (portfolioState.ver !== liveVer || (!portfolioState.data && !portfolioState.error)) loadPortfolio(box);
+
+    // One soft background poll while the tab is open; cleared on redraw.
+    if (portfolioTimer) { clearTimeout(portfolioTimer); portfolioTimer = null; }
+    portfolioTimer = setTimeout(() => {
+      portfolioTimer = null;
+      if (currentTab === 'portfolio') loadPortfolio(box);
+    }, PORTFOLIO_POLL_MS);
+  }
+
+  function fillPortfolio(container) {
+    const grid = container.querySelector('.ck-portfolio-grid');
+    if (!grid) return;
+    grid.innerHTML = '';
+    if (portfolioState.error) {
+      grid.appendChild(el('p', { className: 'ck-portfolio-err', role: 'alert' },
+        ['Could not load the portfolio: ', portfolioState.error]));
+      return;
+    }
+    const data = portfolioState.data || {};
+    const self = data.self || null;
+    const peers = Array.isArray(data.peers) ? data.peers.slice() : [];
+    // Self first, then peers alphabetically by name.
+    peers.sort((a, b) => String(a && a.name || '').localeCompare(String(b && b.name || '')));
+    if (self) grid.appendChild(renderPortfolioCard(self, true));
+    for (const p of peers) grid.appendChild(renderPortfolioCard(p, false));
+    if (!self && !peers.length) {
+      grid.appendChild(el('p', { className: 'ck-muted' },
+        ['No peers configured. Add some in .console-kit/portfolio.json and ',
+         el('code', {}, ['agent.py portfolio-token']),
+         ' for setup.']));
+    }
+  }
+
+  function renderPortfolioCard(row, isSelf) {
+    const ok = !row || row.ok !== false;
+    const card = el('div', { className: 'ck-portfolio-card' + (isSelf ? ' ck-portfolio-self' : '') +
+      (ok ? '' : ' ck-portfolio-err-card'), tabindex: '0',
+      'aria-label': 'Project ' + (row.project || row.name || '?') + (isSelf ? ' (this console)' : '') });
+    const head = el('div', { className: 'ck-portfolio-head' }, [
+      el('span', { className: 'ck-portfolio-name' }, [String(row.project || row.name || '?')]),
+      isSelf ? el('span', { className: 'ck-portfolio-tag' }, ['this']) : null
+    ].filter(Boolean));
+    card.appendChild(head);
+    if (!ok) {
+      card.appendChild(el('div', { className: 'ck-portfolio-cardbody' }, [
+        el('span', { className: 'ck-portfolio-errline' }, [String(row.error || 'unreachable')])
+      ]));
+      return card;
+    }
+    const you = Number(row.awaiting_you || 0);
+    const unl = Number(row.unlocked || 0);
+    const lock = Number(row.locked || 0);
+    const stale = Number(row.stale || 0);
+    const vis = Number(row.visuals_waiting || 0);
+    const tallies = el('div', { className: 'ck-portfolio-tallies' }, [
+      renderTally('?you', you, 'awaiting-you'),
+      renderTally('~unl', unl, 'unlocked'),
+      renderTally('!stale', stale, 'stale'),
+      renderTally('○lock', lock, 'locked'),
+      vis ? renderTally('◫vis', vis, 'visual') : null
+    ].filter(Boolean));
+    card.appendChild(tallies);
+    const foot = el('div', { className: 'ck-portfolio-foot' }, [
+      el('span', { className: 'ck-portfolio-when' },
+        [row.last_activity_at ? ('active ' + relTime(row.last_activity_at)) : 'no activity yet']),
+      row.items != null ? el('span', { className: 'ck-portfolio-count ck-muted' },
+        [' · ' + row.items + ' item' + (row.items === 1 ? '' : 's')]) : null
+    ].filter(Boolean));
+    card.appendChild(foot);
+    if (!isSelf && row.url) {
+      const open = () => { try { window.open(row.url, '_blank', 'noopener'); } catch (e) {} };
+      card.addEventListener('click', open);
+      card.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+      });
+      card.style.cursor = 'pointer';
+    }
+    return card;
+  }
+
+  function renderTally(label, n, kind) {
+    return el('span', { className: 'ck-portfolio-tally', dataKind: kind, dataZero: n ? 'false' : 'true' },
+      [label + ' ', el('b', {}, [String(n)])]);
   }
 
   // 0.8.19: Favorite tab — starred visuals grouped under their items, plus any starred items with no stars yet.
