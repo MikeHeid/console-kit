@@ -864,3 +864,27 @@ family as the Access-cookie trap: subresources silently fail to render.
   pointer-based and routes clicks through `click` directives first.
   Reduced-motion viewers get no animation on either the loading bar or
   the pan transition.
+
+## Fix: a re-anchor proposal could never be confirmed when a kept excerpt went non-unique (0.9.10)
+
+Reported from gradiance-console (AB-findanchors/Q1, lock `3f1e5e31…`): a
+ruling with two excerpts went stale because excerpt #1 was removed; the
+steward proposed a new anchor for #1; `propose_anchor` kept excerpt #2
+(still holds) in the proposal; Confirm 409'd forever because excerpt
+#2's text had become non-unique in its file (3 occurrences). The owner
+had no path to re-anchor and had to use `advise --star keep`.
+
+- **`proposal_problem(anchors, tree, strict_excerpts=None)`** gains a
+  `strict_excerpts` parameter. When set, exactly-once is enforced only
+  on the excerpts in that list (the steward's newly cited anchors); any
+  carried-over condition is checked by `tree.holds()` only, matching
+  its lock-time invariant. `_confirm_check` computes
+  `strict_excerpts = proposal.anchors - proposal.base`, so kept
+  conditions can be ambiguous without blocking the confirm. The default
+  (no `strict_excerpts`) preserves the old exactly-once-everywhere
+  behaviour for other callers.
+- **The owner now sees the 409 message in the UI**, not just a silent
+  "409 conflict". `renderProposal`'s Confirm button shows the server's
+  refusal in an inline alert below itself, in addition to announcing it.
+  Styled with the kit's blocked tokens so it stands out against the
+  normal confirmation box.

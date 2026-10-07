@@ -2446,14 +2446,25 @@
     box.appendChild(cols);
     const go = el('button', { className: 'ck-btn ck-btn-primary ck-confirm-proposal', type: 'button',
       'aria-label': 'Confirm the proposed anchor for ' + qid }, ['Confirm this anchor']);
+    // 0.9.10: show the server's refusal (409 or other) inline below Confirm, so the owner sees why.
+    // Before this, only announce() fired, which many viewers never see.
+    const err = el('div', { className: 'ck-confirm-error', role: 'alert', hidden: 'hidden' });
     go.addEventListener('click', async () => {
       go.disabled = true;
+      err.hidden = true;
+      err.textContent = '';
       const result = await apiPost('/refactor', { action: 'confirm', qid: qid, proposal: p.id }, 'confirm-' + qid);
       go.disabled = false;
-      if (result.error) announce('Error: ' + result.error);
-      else renderPanel();
+      if (result && result.error) {
+        err.textContent = result.error;
+        err.hidden = false;
+        announce('Not confirmed: ' + result.error);
+      } else {
+        renderPanel();
+      }
     });
     box.appendChild(el('div', { className: 'ck-actions' }, [go]));
+    box.appendChild(err);
     return box;
   }
 
