@@ -1075,3 +1075,24 @@ in-server cron if the webhook path proves solid.
 - Browser portfolio UI is deferred (per-project origins + Access
   cookies make a cross-origin aggregator thorny). The CLI covers 90 %
   of the "where should I spend my time" ask today.
+
+## Impact graph — Cytoscape (0.14.0)
+
+The fifth and last step on the orchestrator arc. Each item view gains an
+**Impact graph** collapsible beside the Status flowchart. Nodes: the
+item + its ancestors, every question on it, mapped dashboard sections,
+cited files. Edges: `parent`, `fork`, `supersedes`, `in_section`,
+`cites`. Click a node to highlight everything downstream; click again
+to clear. Clicking a question or item node also opens that card in the
+panel (same `postMessage` channel as the Mermaid charts).
+
+- **`cytoscape.min.js`** vendored (~425 KB) alongside `mermaid.min.js`;
+  both inlined into the wrapper response so the opaque-origin iframe
+  does not need Access-authenticated subresources.
+- **`impact.py`** builds the Cytoscape-shaped graph; capped at 120
+  nodes.
+- **`GET /api/impact-graph?item=X`** returns an HTML wrapper with the
+  lib + JSON data + a self-contained init. CSP + sandbox match the
+  Mermaid wrapper exactly.
+- Default layout is `breadthfirst, directed`; wheel-zoom clamped
+  0.1x–4x. Drag nodes freely; the layout keeps edges live.

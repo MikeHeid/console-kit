@@ -80,6 +80,7 @@ from . import chart as CH
 from . import doorbell as D
 from . import favorites as FV
 from . import gitseam as G
+from . import impact as IM
 from . import items as IT
 from . import pagesnap as PS
 from . import playbooks as PB
@@ -146,7 +147,9 @@ VISUAL_RENDER_CSP_TMPL = (
 # make an authenticated subresource request. The endpoint stays for direct debugging and for callers that are
 # themselves same-origin to the console.
 MERMAID_JS = "vendor/mermaid.min.js"
+CYTOSCAPE_JS = "vendor/cytoscape.min.js"
 _MERMAID_JS_CACHE: tuple[bytes, int] | None = None
+_CYTOSCAPE_JS_CACHE: tuple[bytes, int] | None = None
 
 
 def _mermaid_js_bytes() -> bytes:
@@ -160,6 +163,94 @@ def _mermaid_js_bytes() -> bytes:
     data = path.read_bytes()
     _MERMAID_JS_CACHE = (data, key)
     return data
+
+
+def _cytoscape_js_bytes() -> bytes:
+    """Return the vendored cytoscape.min.js, cached per server process."""
+    global _CYTOSCAPE_JS_CACHE
+    path = Path(__file__).parent / CYTOSCAPE_JS
+    st = os.stat(path)
+    key = int(st.st_mtime_ns)
+    if _CYTOSCAPE_JS_CACHE is not None and _CYTOSCAPE_JS_CACHE[1] == key:
+        return _CYTOSCAPE_JS_CACHE[0]
+    data = path.read_bytes()
+    _CYTOSCAPE_JS_CACHE = (data, key)
+    return data
+
+
+def _impact_wrapper(elements: dict, title: str, nonce: str) -> tuple[bytes, str, str]:
+    """0.14.0: HTML wrapper that inlines Cytoscape + the graph JSON + a tiny init. Same opaque-origin story
+    as `_mermaid_wrapper`: the lib + styles are inline, so no subresource fetch is blocked by Access.
+    """
+    def esc(s: str) -> str:
+        return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                .replace('"', "&quot;").replace("'", "&#39;"))
+    try:
+        lib_source = _cytoscape_js_bytes().decode("utf-8", errors="replace")
+        lib_source = lib_source.replace("</script>", "<\\/script>").replace("<!--", "<\\!--")
+        lib_block = f"<script nonce=\"{esc(nonce)}\">{lib_source}</script>"
+    except (FileNotFoundError, OSError) as e:
+        lib_block = (f"<script nonce=\"{esc(nonce)}\">"
+                     f"document.body.innerHTML='<p class=\\'err\\'>Cytoscape vendored lib missing: {esc(str(e))}</p>';"
+                     "</script>")
+    data_json = json.dumps(elements)
+    html = (
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        f"<title>{esc(title)}</title>"
+        f"<style nonce=\"{esc(nonce)}\">{WRAPPER_CSS}"
+        "#ck-cyto{position:absolute;inset:0;}"
+        ".ck-cyto-note{position:absolute;left:12px;top:12px;z-index:2;font:12px system-ui,sans-serif;"
+        "color:var(--wrap-fg-muted);background:var(--wrap-surface);padding:4px 10px;border:1px solid var(--wrap-border);border-radius:6px}"
+        "</style>"
+        "</head><body>"
+        "<div class=\"ck-wrapper-bar\"><span class=\"ck-cyto-note\">Drag nodes · wheel to zoom · click to highlight</span></div>"
+        "<div class=\"ck-stage\" id=\"ck-stage\"><div id=\"ck-cyto\"></div></div>"
+        f"{lib_block}"
+        f"<script nonce=\"{esc(nonce)}\" id=\"ck-data\" type=\"application/json\">{data_json}</script>"
+        f"<script nonce=\"{esc(nonce)}\">"
+        "(function(){"
+        "var raw=JSON.parse(document.getElementById('ck-data').textContent);"
+        "if(typeof cytoscape==='undefined'){document.body.innerHTML='<p class=\\'err\\'>Cytoscape failed to load.</p>';return;}"
+        "var nodes=raw.nodes.map(function(n){return {data:n,classes:(n.kind||'')+(n.state?' s-'+n.state:'')}});"
+        "var edges=raw.edges.map(function(e){return {data:e,classes:e.kind||''}});"
+        "var style=["
+          "{selector:'node',style:{'label':'data(label)','text-wrap':'wrap','text-max-width':120,"
+          "'font-size':11,'text-valign':'center','color':'#111',"
+          "'background-color':'#eef1f5','border-color':'#d0d7de','border-width':1,'padding':'6px','shape':'round-rectangle','width':'label','height':'label'}},"
+          "{selector:'node.item',style:{'background-color':'#e7eef7','border-color':'#1f4e8c','font-weight':'bold'}},"
+          "{selector:'node.question',style:{'background-color':'#fff8c5','border-color':'#9a6700'}},"
+          "{selector:'node.question.s-locked',style:{'background-color':'#dafbe1','border-color':'#1a7f37'}},"
+          "{selector:'node.question.s-stale',style:{'background-color':'#ffebe9','border-color':'#cf222e'}},"
+          "{selector:'node.question.s-awaiting_you',style:{'background-color':'#fff8c5','border-color':'#9a6700'}},"
+          "{selector:'node.question.s-unlocked',style:{'background-color':'#f6f8fa','border-color':'#57606a'}},"
+          "{selector:'node.fork',style:{'background-color':'#efe6fa','border-color':'#5a2a9b','shape':'hexagon'}},"
+          "{selector:'node.section',style:{'background-color':'#ddf4ff','border-color':'#0969da','shape':'tag'}},"
+          "{selector:'node.file',style:{'background-color':'#f6f8fa','border-color':'#6e7781','shape':'ellipse','font-family':'ui-monospace, monospace','font-size':10}},"
+          "{selector:'edge',style:{'curve-style':'bezier','width':1.5,'line-color':'#8b949e','target-arrow-color':'#8b949e','target-arrow-shape':'triangle'}},"
+          "{selector:'edge.supersedes',style:{'line-style':'dashed','line-color':'#cf222e','target-arrow-color':'#cf222e'}},"
+          "{selector:'edge.cites',style:{'line-color':'#6e7781','target-arrow-shape':'none','line-style':'dotted'}},"
+          "{selector:'.ck-dim',style:{'opacity':0.15}},"
+          "{selector:'.ck-hi',style:{'line-color':'#0969da','target-arrow-color':'#0969da','width':3,'opacity':1}}"
+        "];"
+        "var cy=cytoscape({container:document.getElementById('ck-cyto'),elements:nodes.concat(edges),style:style,"
+          "layout:{name:'breadthfirst',directed:true,padding:20,spacingFactor:1.1},"
+          "wheelSensitivity:0.2,minZoom:0.1,maxZoom:4});"
+        # Click to highlight downstream. A second click clears.
+        "cy.on('tap','node',function(ev){"
+          "var n=ev.target;"
+          "if(n.hasClass('ck-focus')){cy.elements().removeClass('ck-dim ck-hi ck-focus');return;}"
+          "cy.elements().removeClass('ck-dim ck-hi ck-focus');"
+          "var walk=n.successors();cy.elements().not(walk).not(n).addClass('ck-dim');walk.addClass('ck-hi');n.addClass('ck-focus');"
+          # Also post click up to parent, like Mermaid charts do, so navigating to a question/item is possible.
+          "try{var d=n.data();var kind=d.kind;var target=d.id.replace(/^(q|item|section|file|fork):/, '');"
+          "if(kind==='question'||kind==='item'){window.parent.postMessage({type:'ck-chart-click',kind:kind,target:target},'*');}}catch(e){}"
+        "});"
+        "cy.on('tap',function(ev){if(ev.target===cy){cy.elements().removeClass('ck-dim ck-hi ck-focus');}});"
+        "})();"
+        "</script></body></html>"
+    )
+    csp = VISUAL_RENDER_CSP_TMPL.format(nonce=nonce)
+    return html.encode("utf-8"), "text/html; charset=utf-8", csp
 
 # 0.9.6: a shared stylesheet for every Mermaid wrapper iframe (visual, item chart, project map).
 # Served from /api/wrapper.css under the same per-request nonce so the sandboxed iframe can load it even
@@ -1112,6 +1203,22 @@ class Console:
         title = "Project map" + (f" — {state}" if state else "")
         suffix = f"-{state}" if state else ""
         return _mermaid_wrapper(source, title, nonce, clickable=True, filename=f"project-map{suffix}")
+
+    def item_impact(self, item: str, nonce: str) -> tuple[bytes, str, str]:
+        """0.14.0: an interactive impact graph (Cytoscape) for `item`."""
+        items = self.items()
+        if item not in items:
+            raise RequestError(404, f"no item {item!r} in the project's item list")
+        view = self.payload()["view"]
+        try:
+            elements = IM.build_item(view, items, item, sections=self.project.sections)
+        except KeyError as e:
+            raise RequestError(404, str(e)) from None
+        return _impact_wrapper(elements, f"Impact: {item}", nonce)
+
+    def cytoscape_js(self) -> bytes:
+        """0.14.0: the vendored Cytoscape library bytes."""
+        return _cytoscape_js_bytes()
 
     def mermaid_js(self) -> bytes:
         """0.8.19: the vendored Mermaid library bytes; raises FileNotFoundError when it is not installed."""
@@ -2202,12 +2309,19 @@ class OwnerHandler(_Handler):
         if self.path == "/api/wrapper.css":   # 0.9.6: shared stylesheet for every Mermaid wrapper iframe
             return self._send_raw(200, WRAPPER_CSS_BYTES, "text/css; charset=utf-8",
                                   "default-src 'none'; frame-ancestors 'self'")
+        if self.path == "/api/cytoscape.js":   # 0.14.0: vendored Cytoscape, for direct debugging
+            try:
+                data = self.console.cytoscape_js()
+            except FileNotFoundError:
+                return self._send(503, {"error": "the vendored cytoscape.min.js is not installed"})
+            return self._send_raw(200, data, "application/javascript; charset=utf-8",
+                                  "default-src 'none'; frame-ancestors 'self'")
         route, query = self._query()
         if route == "/api/project-chart" and query is not None:
             return self._project_chart(query)
         live = {"/api/wait": self._wait, "/api/feed": self._feed, "/api/evidence": self._evidence,
                 "/api/visual": self._visual, "/api/visual-render": self._visual_render,
-                "/api/item-chart": self._item_chart}.get(route)
+                "/api/item-chart": self._item_chart, "/api/impact-graph": self._impact_graph}.get(route)
         if live is not None and query is not None:
             try:
                 return live(query)
@@ -2335,6 +2449,16 @@ class OwnerHandler(_Handler):
         except RequestError as e:
             return self._send(e.code, {"error": str(e)})
         self._send(200, result)
+
+    def _impact_graph(self, query: dict[str, str]) -> None:
+        """0.14.0: Cytoscape impact graph scoped to one item."""
+        self._only(query, {"item"}, "/api/impact-graph")
+        item = query.get("item")
+        if not isinstance(item, str) or len(item) > 128 or not S.ITEM_ID.match(item):
+            raise RequestError(400, "item must be an item id")
+        nonce = secrets.token_hex(16)
+        data, ctype, csp = self.console.item_impact(item, nonce)
+        self._send_raw(200, data, ctype, csp)
 
     def _project_chart(self, query: dict[str, str]) -> None:
         """0.8.19: a Mermaid tree of every item, optionally narrowed to one state (plus ancestors)."""
