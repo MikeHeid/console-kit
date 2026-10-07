@@ -857,6 +857,7 @@
     panelEl.appendChild(makeHeader(['Inbox'], closePanel, 'Back to board'));
     panelEl.appendChild(renderTabs());
     panelEl.appendChild(renderStatusBar(null));
+    panelEl.appendChild(renderDelegateBar());   // Delegate ▾ — orchestrate from anywhere, not only on an item.
 
     // One tab panel; the tab bar above says which view it holds (0.7.0).
     const body = el('div', { className: 'ck-body', role: 'tabpanel', id: 'ck-tabpanel',
@@ -1958,6 +1959,109 @@
   function shortQid(qid) {
     if (typeof qid !== 'string') return String(qid || '');
     return qid.length > 24 ? qid.slice(0, 24) + '…' : qid;
+  }
+
+  // Delegate: a one-stop entry point so the owner can start a round, request a visual, or post a chat
+  // without first opening an item. Reuses existing /api/message endpoints — no new server routes.
+  // Posting is handled client-side; the collapsed <details> state persists across live wakes via a module var.
+  let delegateOpen = false;
+  function renderDelegateBar() {
+    const wrap = el('details', { className: 'ck-delegate-bar' });
+    if (delegateOpen) wrap.setAttribute('open', '');
+    const sum = el('summary', { className: 'ck-delegate-summary' }, [
+      el('span', { className: 'ck-delegate-icon', 'aria-hidden': 'true' }, ['⚑ ']),
+      el('span', {}, ['Delegate']),
+      el('span', { className: 'ck-muted ck-delegate-hint' }, [' — start a round, request a visual, or chat'])
+    ]);
+    wrap.appendChild(sum);
+    wrap.addEventListener('toggle', () => { delegateOpen = wrap.open; });
+
+    const body = el('div', { className: 'ck-delegate-body' });
+
+    // Row 1: pick what to do.
+    const kindFs = el('fieldset', { className: 'ck-roster', 'aria-label': 'What to delegate' },
+      [el('legend', {}, ['What'])]);
+    const kinds = [
+      ['round', 'Deliberate (full round)'],
+      ['visual', 'Request a visual'],
+      ['chat', 'Chat with the agent']
+    ];
+    kinds.forEach(([v, label], i) => {
+      const r = el('input', { type: 'radio', name: 'ck-del-kind', value: v });
+      if (i === 0) r.checked = true;
+      kindFs.appendChild(el('label', { className: 'ck-option' }, [r, ' ' + label]));
+    });
+    body.appendChild(kindFs);
+
+    // Row 2: pick an item (except for chat, which goes to @chat).
+    const itemSel = el('select', { className: 'ck-select', id: 'ck-del-item' });
+    for (const id of (items ? Object.keys(items).sort() : [])) {
+      const data = items[id] || {};
+      itemSel.appendChild(el('option', { value: id }, [id + (data.title ? ' — ' + truncateText(data.title, 60) : '')]));
+    }
+    body.appendChild(el('div', { className: 'ck-field ck-del-itemrow' }, [
+      el('label', { for: 'ck-del-item', className: 'ck-field-label' }, ['On item']),
+      itemSel
+    ]));
+
+    // Row 3: round-only — mode + focus.
+    const modeSel = el('select', { className: 'ck-select', id: 'ck-del-mode' });
+    for (const m of ['explore', 'tighten']) modeSel.appendChild(el('option', { value: m }, [m]));
+    const focusSel = el('select', { className: 'ck-select', id: 'ck-del-focus' });
+    for (const f of FOCUSES) focusSel.appendChild(el('option', { value: f }, [f === 'whole' ? 'the whole thing' : f]));
+    const roundRow = el('div', { className: 'ck-field ck-del-roundrow' }, [
+      el('label', { for: 'ck-del-mode', className: 'ck-field-label' }, ['Mode']), modeSel,
+      el('label', { for: 'ck-del-focus', className: 'ck-field-label' }, ['Focus']), focusSel
+    ]);
+    body.appendChild(roundRow);
+
+    // Row 4: the owner's brief.
+    const text = el('textarea', { className: 'ck-textarea', rows: '2',
+      placeholder: 'What should the agent look at? (optional for a round; required for a visual)' });
+    body.appendChild(text);
+
+    // Row 5: send + status.
+    const status = el('div', { className: 'ck-delegate-status', role: 'alert', hidden: 'hidden' });
+    const send = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' }, ['Delegate']);
+    const updateVisibility = () => {
+      const kind = body.querySelector('input[name="ck-del-kind"]:checked').value;
+      roundRow.hidden = kind !== 'round';
+      itemSel.disabled = kind === 'chat';
+    };
+    body.querySelectorAll('input[name="ck-del-kind"]').forEach(r =>
+      r.addEventListener('change', updateVisibility));
+    updateVisibility();
+
+    send.addEventListener('click', async () => {
+      status.hidden = true; status.textContent = '';
+      const kind = body.querySelector('input[name="ck-del-kind"]:checked').value;
+      const brief = text.value.trim();
+      let payload;
+      if (kind === 'round') {
+        payload = { item: itemSel.value, intent: 'fork', mode: modeSel.value, focus: focusSel.value,
+          text: brief || ('Deliberate the full round: ' + itemSel.value + ' and everything under it.') };
+      } else if (kind === 'visual') {
+        if (!brief) { status.textContent = 'A visual needs a brief: what should it show?'; status.hidden = false; return; }
+        payload = { item: itemSel.value, intent: 'visual', text: brief };
+      } else {
+        if (!brief) { status.textContent = 'Say what you want the agent to do.'; status.hidden = false; return; }
+        payload = { item: '@chat', intent: 'chat', text: brief };
+      }
+      send.disabled = true;
+      const result = await apiPost('/message', payload, 'delegate-' + Date.now());
+      send.disabled = false;
+      if (result && result.error) {
+        status.textContent = 'Not delegated: ' + result.error;
+        status.hidden = false;
+      } else {
+        text.value = '';
+        announce('Delegated.');
+      }
+    });
+    body.appendChild(el('div', { className: 'ck-actions' }, [send, status]));
+
+    wrap.appendChild(body);
+    return wrap;
   }
 
   function renderItemChart(itemId) {
