@@ -167,7 +167,8 @@ WRAPPER_CSS = """
   --wrap-fg-muted: #5a5f66;
   --wrap-bg: #ffffff;
   --wrap-surface: #fafbfc;
-  --wrap-border: #dde0e4;
+  --wrap-surface-alt: #eef1f5;
+  --wrap-border: #d7dade;
   --wrap-accent: #1f4e8c;
   --wrap-accent-soft: #e7eef7;
   --wrap-err: #a00000;
@@ -176,12 +177,13 @@ WRAPPER_CSS = """
 @media (prefers-color-scheme: dark) {
   :root {
     --wrap-fg: #e8ebef;
-    --wrap-fg-muted: #a0a5ad;
-    --wrap-bg: #1a1d21;
-    --wrap-surface: #22262b;
-    --wrap-border: #353a40;
+    --wrap-fg-muted: #a2a7af;
+    --wrap-bg: #0f1114;
+    --wrap-surface: #1a1d22;
+    --wrap-surface-alt: #262a30;
+    --wrap-border: #3a3f46;
     --wrap-accent: #6ea0d9;
-    --wrap-accent-soft: #2a3850;
+    --wrap-accent-soft: #253349;
     --wrap-err: #ff8f8f;
   }
 }
@@ -191,25 +193,100 @@ html, body {
   background: var(--wrap-bg);
   color: var(--wrap-fg);
   font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  overflow: hidden;
 }
+/* 0.9.9: zoom/pan viewport. The mermaid pre element gets replaced with an SVG; both wear this positioning. */
+.ck-stage {
+  position: relative;
+  width: 100%;
+  height: calc(100vh - 60px);
+  min-height: 180px;
+  overflow: hidden;
+  border: 1px solid var(--wrap-border);
+  border-radius: var(--wrap-radius);
+  background: var(--wrap-surface);
+  touch-action: none;
+}
+.ck-pan {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(1);
+  transform-origin: center center;
+  will-change: transform;
+  transition: transform 120ms ease;
+  cursor: grab;
+}
+.ck-pan.ck-panning { cursor: grabbing; transition: none; }
+/* 0.9.9: hide the source text until Mermaid has replaced it; show a loading bar instead. */
 .mermaid {
-  display: flex;
-  justify-content: center;
-  padding: 10px 0;
-  min-height: 60px;
+  display: block;
+  visibility: hidden;
+  padding: 0;
+  margin: 0;
+  font: 11px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre;
+  color: var(--wrap-fg);
 }
+.mermaid[data-processed="true"] { visibility: visible; }
 .mermaid .clickable { cursor: pointer; }
-.mermaid svg { max-width: 100%; height: auto; }
+.mermaid svg { display: block; }
+.ck-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--wrap-fg-muted);
+  font-size: 12px;
+  pointer-events: none;
+}
+.ck-loading[hidden] { display: none; }
+.ck-loading-bar {
+  position: relative;
+  width: 180px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--wrap-surface-alt);
+  overflow: hidden;
+}
+.ck-loading-bar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -40%;
+  width: 40%;
+  height: 100%;
+  background: var(--wrap-accent);
+  border-radius: inherit;
+  animation: ck-loading-slide 1.1s cubic-bezier(.4, 0, .2, 1) infinite;
+}
+@keyframes ck-loading-slide {
+  0% { left: -40%; }
+  60% { left: 100%; }
+  100% { left: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ck-loading-bar::after { animation: none; left: 30%; width: 40%; }
+  .ck-pan { transition: none; }
+}
 .ck-wrapper-bar {
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
   align-items: center;
   gap: 6px;
-  margin: 0 0 6px;
+  margin: 0 0 8px;
 }
-.ck-wrapper-save {
+.ck-zoom {
+  display: inline-flex;
+  gap: 4px;
+}
+.ck-zoom button, .ck-wrapper-save {
   font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  padding: 5px 12px;
+  padding: 5px 10px;
+  min-width: 28px;
   cursor: pointer;
   border: 1px solid var(--wrap-border);
   border-radius: var(--wrap-radius);
@@ -217,6 +294,7 @@ html, body {
   color: var(--wrap-fg);
   transition: border-color 120ms ease, background 120ms ease;
 }
+.ck-zoom button:hover, .ck-zoom button:focus-visible,
 .ck-wrapper-save:hover, .ck-wrapper-save:focus-visible {
   border-color: var(--wrap-accent);
   background: var(--wrap-accent-soft);
@@ -278,19 +356,52 @@ def _mermaid_wrapper(source: str, title: str, nonce: str, clickable: bool = Fals
         f"<title>{esc(title)}</title>"
         f"<style nonce=\"{esc(nonce)}\">{WRAPPER_CSS}</style>"
         "</head><body>"
-        "<div class=\"ck-wrapper-bar\"><button type=\"button\" class=\"ck-wrapper-save\" "
-        "id=\"ck-save\" title=\"Download as SVG\">Save SVG</button></div>"
-        f"<pre class=\"mermaid\">{esc(source)}</pre>"
+        "<div class=\"ck-wrapper-bar\">"
+        "  <div class=\"ck-zoom\" aria-label=\"Zoom\">"
+        "    <button type=\"button\" id=\"ck-zoom-out\" title=\"Zoom out\" aria-label=\"Zoom out\">−</button>"
+        "    <button type=\"button\" id=\"ck-zoom-reset\" title=\"Reset view\" aria-label=\"Reset view\">⬚</button>"
+        "    <button type=\"button\" id=\"ck-zoom-in\" title=\"Zoom in\" aria-label=\"Zoom in\">+</button>"
+        "  </div>"
+        "  <button type=\"button\" class=\"ck-wrapper-save\" id=\"ck-save\" title=\"Download as SVG\">Save SVG</button>"
+        "</div>"
+        "<div class=\"ck-stage\" id=\"ck-stage\">"
+        "  <div class=\"ck-loading\" id=\"ck-loading\" role=\"status\" aria-live=\"polite\">"
+        "    <div class=\"ck-loading-bar\" aria-hidden=\"true\"></div>"
+        "    <div>Rendering…</div>"
+        "  </div>"
+        f"  <div class=\"ck-pan\" id=\"ck-pan\"><pre class=\"mermaid\">{esc(source)}</pre></div>"
+        "</div>"
         f"{lib_block}"
         f"<script nonce=\"{esc(nonce)}\">"
         f"{click_glue}"
         "var ckShowErr=function(m){document.body.innerHTML='<p class=\\'err\\'>Mermaid failed to render: '+m+'</p>';};"
+        "var ckLoaded=function(){var l=document.getElementById('ck-loading');if(l){l.hidden=true;}};"
         "if(typeof mermaid==='undefined'){ckShowErr('mermaid is not defined after the inlined lib ran; check the server log.');}"
         f"else{{try{{"
         f"mermaid.initialize({{startOnLoad:false,theme:'neutral',securityLevel:'{level}'}});"
         "var r=mermaid.run();"
-        "if(r&&typeof r.catch==='function'){r.catch(function(e){ckShowErr((e&&e.message)||e);});}"
+        "if(r&&typeof r.then==='function'){r.then(ckLoaded,function(e){ckShowErr((e&&e.message)||e);});}else{ckLoaded();}"
         "}catch(e){ckShowErr((e&&e.message)||e);}}"
+        # Zoom + pan: CSS transform on .ck-pan; wheel scales, buttons step, drag translates.
+        "(function(){"
+        "var stage=document.getElementById('ck-stage'),pan=document.getElementById('ck-pan');"
+        "if(!stage||!pan){return;}"
+        "var scale=1,tx=0,ty=0,dragging=false,sx=0,sy=0,startTx=0,startTy=0;"
+        "var apply=function(){pan.style.transform='translate(calc(-50% + '+tx+'px),calc(-50% + '+ty+'px)) scale('+scale+')';};"
+        "var clamp=function(v){return Math.max(0.2,Math.min(6,v));};"
+        "var zoomAt=function(cx,cy,factor){"
+          "var rect=stage.getBoundingClientRect();"
+          "var dx=cx-rect.left-rect.width/2-tx,dy=cy-rect.top-rect.height/2-ty;"
+          "var ns=clamp(scale*factor);var k=ns/scale;scale=ns;tx-=dx*(k-1);ty-=dy*(k-1);apply();};"
+        "stage.addEventListener('wheel',function(e){e.preventDefault();zoomAt(e.clientX,e.clientY,e.deltaY<0?1.15:1/1.15);},{passive:false});"
+        "pan.addEventListener('pointerdown',function(e){if(e.target.closest('a,.clickable,.node')){return;}dragging=true;sx=e.clientX;sy=e.clientY;startTx=tx;startTy=ty;pan.classList.add('ck-panning');pan.setPointerCapture(e.pointerId);});"
+        "pan.addEventListener('pointermove',function(e){if(!dragging){return;}tx=startTx+(e.clientX-sx);ty=startTy+(e.clientY-sy);apply();});"
+        "var stop=function(e){if(dragging){dragging=false;pan.classList.remove('ck-panning');try{pan.releasePointerCapture(e.pointerId);}catch(err){}}};"
+        "pan.addEventListener('pointerup',stop);pan.addEventListener('pointercancel',stop);"
+        "document.getElementById('ck-zoom-in').addEventListener('click',function(){var r=stage.getBoundingClientRect();zoomAt(r.left+r.width/2,r.top+r.height/2,1.25);});"
+        "document.getElementById('ck-zoom-out').addEventListener('click',function(){var r=stage.getBoundingClientRect();zoomAt(r.left+r.width/2,r.top+r.height/2,1/1.25);});"
+        "document.getElementById('ck-zoom-reset').addEventListener('click',function(){scale=1;tx=0;ty=0;apply();});"
+        "})();"
         "document.getElementById('ck-save').addEventListener('click',function(){"
         "var svg=document.querySelector('.mermaid svg');"
         "if(!svg){return;}"

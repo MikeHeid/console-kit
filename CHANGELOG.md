@@ -840,3 +840,27 @@ family as the Access-cookie trap: subresources silently fail to render.
 - JSON responses (`_send`) keep the default and remain protected: they
   carry the owner's view data and are only consumed by the same-origin
   top-level page.
+
+## Dark theme fallback, loading bar, pan + zoom on charts (0.9.9)
+
+- **`console.css` carries a fallback palette** inside `@layer
+  console-fallbacks`, so a dashboard page that does not define
+  `--c-fg`, `--c-surface`, `--c-border` etc. still renders the console
+  with visible text, surfaces, borders and hovers. A
+  `prefers-color-scheme: dark` block covers OS-dark users: before, the
+  console panel on a dark host looked all black because every token
+  resolved to transparent. The host page's own `:root` (unlayered)
+  continues to win because unlayered rules beat layered rules in the
+  cascade, so no project with its own tokens is affected.
+- **A loading bar replaces the flash of unrendered Mermaid source.** The
+  `.mermaid` element stays `visibility: hidden` until Mermaid flips it
+  to `data-processed="true"`; a thin animated bar + "Rendering…" label
+  sits in the viewport until `mermaid.run()` resolves, then hides.
+- **Pan + zoom on every Mermaid wrapper.** The diagram lives inside a
+  `.ck-stage` viewport with a `.ck-pan` transform wrapper. Mouse wheel
+  zooms toward the cursor; drag pans; `+` / `−` / reset buttons sit in
+  the wrapper bar. Reset returns to centred, scale 1. Clickable chart
+  nodes still fire their click handler because the drag threshold is
+  pointer-based and routes clicks through `click` directives first.
+  Reduced-motion viewers get no animation on either the loading bar or
+  the pan transition.
