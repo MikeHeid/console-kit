@@ -600,6 +600,111 @@ def _items_push(a) -> int:
     return 0
 
 
+def _portfolio(a) -> int:
+    """0.13.0: cross-project overview, read from each project's STATE directory, no HTTP.
+
+    Scans the registry (`~/.config/console-kit/projects.json`), opens each state's `store.jsonl` and
+    `items.json` directly, and tallies open-question backlog + last-locked-at per project. One line per
+    project; `--json` emits a list of dicts for programmatic use.
+    """
+    from console_kit.store import Store
+    from console_kit import items as IT
+    from console_kit import registry as R
+    import datetime as _dt
+    import json as _json
+
+    try:
+        found = R.load()
+    except R.RegistryError as e:
+        print(f"portfolio: {e}", file=sys.stderr)
+        return 1
+    if not found:
+        print("portfolio: no projects are registered (`agent.py register`).")
+        return 0
+
+    rows: list[dict] = []
+    for project_root, entry in sorted(found.items()):
+        state = entry.get("state", "")
+        row: dict = {"project": project_root, "state": state,
+                     "awaiting_you": 0, "unlocked": 0, "locked": 0, "visuals_waiting": 0,
+                     "last_locked_at": None, "error": None}
+        try:
+            store = Store(Path(state) / "store.jsonl") if (Path(state) / "store.jsonl").exists() else None
+            items_doc = IT.SnapshotAdapter(Path(state), tolerant=True)
+            known = items_doc.items()
+            row["items"] = len(known)
+            if store is None:
+                row["error"] = "no store.jsonl"
+                rows.append(row); continue
+            # Count: a locked question has a lock on its latest answer.
+            # unlocked = has answer, no lock. awaiting_you = question, no answer.
+            records = store.records()
+            answers_by_qid: dict[str, dict] = {}
+            questions: dict[str, dict] = {}
+            locked_at: dict[str, str] = {}
+            visual_requests: set[str] = set()
+            visual_drawn_for: set[str] = set()
+            for r in records:
+                t = r.get("type")
+                if t == "question":
+                    questions[r["qid"]] = r
+                elif t == "answer":
+                    # keep the latest answer per qid
+                    cur = answers_by_qid.get(r["qid"])
+                    if cur is None or r["seq"] > cur["seq"]:
+                        answers_by_qid[r["qid"]] = r
+                elif t == "lock":
+                    locked_at[r["qid"]] = r.get("ts", "")
+                elif t == "message" and r.get("intent") == "visual" and r.get("by") == "owner":
+                    visual_requests.add(r["id"])
+                elif t == "visual":
+                    req = r.get("request")
+                    if req:
+                        visual_drawn_for.add(req)
+            for qid, q in questions.items():
+                if qid in locked_at:
+                    row["locked"] += 1
+                elif qid in answers_by_qid:
+                    row["unlocked"] += 1
+                else:
+                    row["awaiting_you"] += 1
+            row["visuals_waiting"] = len(visual_requests - visual_drawn_for)
+            if locked_at:
+                row["last_locked_at"] = max(locked_at.values())
+        except Exception as e:  # noqa: BLE001 — never break the whole portfolio over one bad project
+            row["error"] = f"{type(e).__name__}: {e}"
+        rows.append(row)
+
+    if a.json:
+        print(_json.dumps(rows, indent=2))
+        return 0
+
+    # Compact table.
+    def _rel(ts: str | None) -> str:
+        if not ts:
+            return "—"
+        try:
+            when = _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return ts
+        delta = _dt.datetime.now(when.tzinfo) - when
+        s = int(delta.total_seconds())
+        if s < 3600: return f"{s // 60}m ago"
+        if s < 86400: return f"{s // 3600}h ago"
+        return f"{s // 86400}d ago"
+
+    print(f"{'Project':<40} {'Items':>5} {'?You':>5} {'~Unl':>5} {'oLock':>5} {'◫Vis':>5} {'LastLock':<12}")
+    print("-" * 80)
+    for r in rows:
+        proj = r["project"] if len(r["project"]) <= 40 else "…" + r["project"][-39:]
+        if r["error"]:
+            print(f"{proj:<40}  (error: {r['error']})")
+            continue
+        print(f"{proj:<40} {r.get('items', 0):>5} {r['awaiting_you']:>5} "
+              f"{r['unlocked']:>5} {r['locked']:>5} {r['visuals_waiting']:>5} {_rel(r['last_locked_at']):<12}")
+    return 0
+
+
 def _sync_dashboard(a) -> int:
     """0.9.13: insert a stub section into the dashboard page for every item not already there."""
     from console_kit import fold as FO
@@ -1063,6 +1168,9 @@ def main(argv=None) -> int:
                         "and run page-snapshot yourself.")
     sub.add_parser("trigger-token", description="0.12.0: mint a fresh bearer token and its sha256 for a "
                    "trigger. Print the plaintext (for the sender) and the sha256 (for triggers.json).")
+    s = sub.add_parser("portfolio", description="0.13.0: list every project registered on this machine with "
+                       "its open-question backlog read from each STATE directly. Read-only; no HTTP calls.")
+    s.add_argument("--json", action="store_true", help="emit JSON instead of a table")
     s = sub.add_parser("sync-dashboard", description="0.9.13: insert a <details id=item-X data-ck-item=X> stub "
                        "into the dashboard page for every item not already there. Nested by parent via per-item "
                        "markers so re-runs preserve hand-edits inside each node.")
@@ -1210,6 +1318,8 @@ def _run(a, bell: Path) -> int:
         return _scaffold_dashboard(a)
     if a.cmd == "sync-dashboard":
         return _sync_dashboard(a)
+    if a.cmd == "portfolio":
+        return _portfolio(a)
     if a.cmd == "trigger-token":
         from console_kit import triggers as TR
         token, sha = TR.mint()

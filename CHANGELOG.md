@@ -1058,3 +1058,20 @@ functions, and custom scripts work out of the box.
 
 On deck: 0.13 cross-project overview, 0.14 impact graph. Also 0.12.1 for
 in-server cron if the webhook path proves solid.
+
+## Portfolio — one view across every registered console (0.13.0)
+
+- **`agent.py portfolio`** reads `~/.config/console-kit/projects.json`
+  and, for each registered project, opens its `STATE/store.jsonl`
+  directly. No HTTP calls, no running server required: it tallies
+  open-questions-awaiting-you, unlocked, locked, waiting visuals, and
+  the last-locked timestamp per project, then prints a compact table.
+  `--json` emits the full rows for programmatic use.
+- A single malformed project's state surfaces as `"(error: ...)"` on
+  its row; the other projects still render.
+- The one-server variant was always able to host many projects
+  (`agent.py server add`); this makes the owner's cross-project
+  backlog visible in one place without opening N browser tabs.
+- Browser portfolio UI is deferred (per-project origins + Access
+  cookies make a cross-origin aggregator thorny). The CLI covers 90 %
+  of the "where should I spend my time" ask today.
