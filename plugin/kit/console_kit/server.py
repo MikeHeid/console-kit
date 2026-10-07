@@ -134,12 +134,29 @@ VISUAL_TEXT_CSP = "sandbox; default-src 'none'; frame-ancestors 'none'"
 # a per-request nonce; it blocks every other source, inline style aside (mermaid writes SVG style attributes).
 VISUAL_RENDER_CSP_TMPL = (
     "default-src 'none'; "
-    "script-src 'self' 'nonce-{nonce}'; "
-    "style-src 'self' 'nonce-{nonce}' 'unsafe-inline'; "
+    "script-src 'nonce-{nonce}'; "
+    "style-src 'nonce-{nonce}' 'unsafe-inline'; "
     "img-src data: blob:; font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
 )
 # The vendored mermaid.min.js is served from this path, same origin as /api/visual-render.
+# 0.9.7: the lib is also INLINED into the wrapper HTML so a sandboxed iframe (opaque origin) does not need to
+# make an authenticated subresource request. The endpoint stays for direct debugging and for callers that are
+# themselves same-origin to the console.
 MERMAID_JS = "vendor/mermaid.min.js"
+_MERMAID_JS_CACHE: tuple[bytes, int] | None = None
+
+
+def _mermaid_js_bytes() -> bytes:
+    """Return the vendored mermaid.min.js, cached per server process. FileNotFoundError when it is not present."""
+    global _MERMAID_JS_CACHE
+    path = Path(__file__).parent / MERMAID_JS
+    st = os.stat(path)
+    key = int(st.st_mtime_ns)
+    if _MERMAID_JS_CACHE is not None and _MERMAID_JS_CACHE[1] == key:
+        return _MERMAID_JS_CACHE[0]
+    data = path.read_bytes()
+    _MERMAID_JS_CACHE = (data, key)
+    return data
 
 # 0.9.6: a shared stylesheet for every Mermaid wrapper iframe (visual, item chart, project map).
 # Served from /api/wrapper.css under the same per-request nonce so the sandboxed iframe can load it even
@@ -241,36 +258,39 @@ def _mermaid_wrapper(source: str, title: str, nonce: str, clickable: bool = Fals
         "catch(e){}};" if clickable else ""
     )
     safe_filename = re.sub(r"[^A-Za-z0-9._-]+", "-", filename).strip("-") or "chart"
-    # 0.9.5: the mermaid script tag carries the same nonce as the inline script. In a sandboxed iframe
-    # WITHOUT `allow-same-origin` (the parent sets `sandbox="allow-scripts"`), Chrome rejects a `'self'`
-    # match in script-src because the document's effective origin is opaque; the nonce path is honoured
-    # whichever way the browser resolves 'self'. Belt-and-suspenders. The init call is also gated on the
-    # lib's `load` event so a slow fetch does not race ahead of mermaid.initialize.
-    # 0.9.6: the wrapper's own CSS is served from /api/wrapper.css with the request's nonce, so the sandboxed
-    # iframe can load it even when Chrome refuses `style-src 'self'` matches. Styles match the console's
-    # palette and respect `prefers-color-scheme`.
+    # 0.9.7: the Mermaid lib and the wrapper CSS are INLINED into the response. Subresource requests from a
+    # sandbox-without-allow-same-origin iframe go out with an opaque origin and so DO NOT carry the parent's
+    # Cloudflare Access cookies; Access then challenges or blocks /api/mermaid.js and /api/wrapper.css, which
+    # the iframe cannot follow. Inlining removes every subresource request. CSP's nonce path authorises both
+    # inline blocks. The lib is read from disk and cached per server process (_mermaid_js_bytes).
+    try:
+        lib_source = _mermaid_js_bytes().decode("utf-8", errors="replace")
+        # Defensive: a literal "</script>" inside the inlined source would end the <script> element.
+        # The current vendored mermaid.min.js has none, but a future bump might; the \/ escape is a no-op in JS.
+        lib_source = lib_source.replace("</script>", "<\\/script>").replace("<!--", "<\\!--")
+        lib_block = f"<script nonce=\"{esc(nonce)}\">{lib_source}</script>"
+    except (FileNotFoundError, OSError) as e:
+        lib_block = (f"<script nonce=\"{esc(nonce)}\">"
+                     f"document.body.innerHTML='<p class=\\'err\\'>Mermaid vendored lib missing: {esc(str(e))}. "
+                     f"Re-install the plugin so plugin/kit/console_kit/vendor/ is present.</p>';</script>")
     html = (
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         f"<title>{esc(title)}</title>"
-        f"<link rel=\"stylesheet\" href=\"/api/wrapper.css\" nonce=\"{esc(nonce)}\">"
+        f"<style nonce=\"{esc(nonce)}\">{WRAPPER_CSS}</style>"
         "</head><body>"
         "<div class=\"ck-wrapper-bar\"><button type=\"button\" class=\"ck-wrapper-save\" "
         "id=\"ck-save\" title=\"Download as SVG\">Save SVG</button></div>"
         f"<pre class=\"mermaid\">{esc(source)}</pre>"
-        f"<script id=\"ck-mermaid-lib\" src=\"/api/mermaid.js\" nonce=\"{esc(nonce)}\"></script>"
+        f"{lib_block}"
         f"<script nonce=\"{esc(nonce)}\">"
         f"{click_glue}"
         "var ckShowErr=function(m){document.body.innerHTML='<p class=\\'err\\'>Mermaid failed to render: '+m+'</p>';};"
-        f"var ckInit=function(){{try{{"
+        "if(typeof mermaid==='undefined'){ckShowErr('mermaid is not defined after the inlined lib ran; check the server log.');}"
+        f"else{{try{{"
         f"mermaid.initialize({{startOnLoad:false,theme:'neutral',securityLevel:'{level}'}});"
         "var r=mermaid.run();"
         "if(r&&typeof r.catch==='function'){r.catch(function(e){ckShowErr((e&&e.message)||e);});}"
-        "}catch(e){ckShowErr((e&&e.message)||e);}};"
-        "if(typeof mermaid!=='undefined'){ckInit();}else{"
-        "var lib=document.getElementById('ck-mermaid-lib');"
-        "if(lib){lib.addEventListener('load',ckInit);"
-        "lib.addEventListener('error',function(){document.body.innerHTML='<p class=\\'err\\'>Mermaid did not load from /api/mermaid.js — the sandboxed iframe may be blocking it. Check the server has plugin/kit/console_kit/vendor/mermaid.min.js installed.</p>';});}"
-        "else{document.body.innerHTML='<p class=\\'err\\'>Mermaid script tag missing from the page.</p>';}}"
+        "}catch(e){ckShowErr((e&&e.message)||e);}}"
         "document.getElementById('ck-save').addEventListener('click',function(){"
         "var svg=document.querySelector('.mermaid svg');"
         "if(!svg){return;}"
