@@ -762,3 +762,17 @@ longer needs any of the workarounds they describe.
   `page-snapshot`, `prs-push`, `inbox`. The last-seen version is kept in
   `STATE/last_seen_kit_version`, so the note prints once per project per
   bump.
+
+## Fix 'Mermaid is not defined' in the sandboxed iframe (0.9.5)
+
+- **The vendored lib's `<script>` tag now carries the per-request nonce**
+  as well as `src="/api/mermaid.js"`. In an iframe sandboxed with
+  `sandbox="allow-scripts"` but no `allow-same-origin`, Chrome rejects a
+  `script-src 'self'` match because the document's effective origin is
+  opaque, so the lib never ran and `mermaid.initialize` fell into the
+  "Mermaid failed to load: mermaid is not defined" fallback. The nonce
+  path is honoured whichever way the browser resolves `'self'`.
+- **Init is gated on the lib's `load` event** so a slow fetch never races
+  ahead of `mermaid.initialize`, and the error UI now names the file to
+  check (`plugin/kit/console_kit/vendor/mermaid.min.js`) rather than only
+  the exception.
