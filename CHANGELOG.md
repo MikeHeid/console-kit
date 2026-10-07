@@ -1096,3 +1096,32 @@ panel (same `postMessage` channel as the Mermaid charts).
   Mermaid wrapper exactly.
 - Default layout is `breadthfirst, directed`; wheel-zoom clamped
   0.1x–4x. Drag nodes freely; the layout keeps edges live.
+
+## Cron triggers — the clock fires playbooks (0.15.0)
+
+Companion to 0.12.0's webhooks: triggers can now carry a `cron`
+expression and fire on the server's clock, with no external POST.
+
+    {"triggers": {"monday-triage": {"playbook": "inbox-triage",
+                                    "cron": "0 9 * * MON"}}}
+
+- 5-field cron: `minute hour day-of-month month day-of-week`. Accepts
+  `*`, `a-b`, `a,b,c`, `a-b/n`, `*/n`. Named months (`JAN..DEC`) and
+  days-of-week (`SUN..SAT`); 7 is a Sunday alias.
+- A background thread sleeps until the top of each minute (+ 0.2 s so
+  firings don't race the boundary); fires every matching trigger exactly
+  once per (name, minute). A clock jump backward doesn't double-fire;
+  a `run_playbook` nonce derived from `name + minute` makes the server
+  side idempotent too.
+- A trigger can carry `token_sha256` (webhook), `cron` (schedule), or
+  both. A webhook POST to a cron-only trigger returns 405 with "cron-
+  only; it fires on its schedule".
+- `view.triggers[*].kinds` lists `["webhook"]`, `["cron"]`, or both
+  so the UI can tell them apart. The cron expression itself stays
+  server-side.
+- Smoke-tested: 6 valid specs parse, 6 bad shapes refuse by name,
+  Mon/Sun/Sat alignments, step matching, cron-only config loads,
+  trigger-with-neither refuses the start.
+
+The orchestrator arc now folds the clock in: external HTTP, scheduled
+tick, or owner click all share the same playbook execution path.
