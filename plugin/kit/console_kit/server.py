@@ -163,6 +163,11 @@ def _mermaid_wrapper(source: str, title: str, nonce: str, clickable: bool = Fals
         "catch(e){}};" if clickable else ""
     )
     safe_filename = re.sub(r"[^A-Za-z0-9._-]+", "-", filename).strip("-") or "chart"
+    # 0.9.5: the mermaid script tag carries the same nonce as the inline script. In a sandboxed iframe
+    # WITHOUT `allow-same-origin` (the parent sets `sandbox="allow-scripts"`), Chrome rejects a `'self'`
+    # match in script-src because the document's effective origin is opaque; the nonce path is honoured
+    # whichever way the browser resolves 'self'. Belt-and-suspenders. The init call is also gated on the
+    # lib's `load` event so a slow fetch does not race ahead of mermaid.initialize.
     html = (
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         f"<title>{esc(title)}</title>"
@@ -178,11 +183,16 @@ def _mermaid_wrapper(source: str, title: str, nonce: str, clickable: bool = Fals
         "<div class=\"ck-wrapper-bar\"><button type=\"button\" class=\"ck-wrapper-save\" "
         "id=\"ck-save\" title=\"Download as SVG\">Save SVG</button></div>"
         f"<pre class=\"mermaid\">{esc(source)}</pre>"
-        "<script src=\"/api/mermaid.js\"></script>"
+        f"<script id=\"ck-mermaid-lib\" src=\"/api/mermaid.js\" nonce=\"{esc(nonce)}\"></script>"
         f"<script nonce=\"{esc(nonce)}\">"
         f"{click_glue}"
-        f"try{{mermaid.initialize({{startOnLoad:true,theme:'neutral',securityLevel:'{level}'}});}}"
-        "catch(e){document.body.innerHTML='<p class=\\'err\\'>Mermaid failed to load: '+(e&&e.message||e)+'</p>';}"
+        f"var ckInit=function(){{try{{mermaid.initialize({{startOnLoad:true,theme:'neutral',securityLevel:'{level}'}});}}"
+        "catch(e){document.body.innerHTML='<p class=\\'err\\'>Mermaid failed to load: '+(e&&e.message||e)+'</p>';}};"
+        "if(typeof mermaid!=='undefined'){ckInit();}else{"
+        "var lib=document.getElementById('ck-mermaid-lib');"
+        "if(lib){lib.addEventListener('load',ckInit);"
+        "lib.addEventListener('error',function(){document.body.innerHTML='<p class=\\'err\\'>Mermaid did not load from /api/mermaid.js — the sandboxed iframe may be blocking it. Check the server has plugin/kit/console_kit/vendor/mermaid.min.js installed.</p>';});}"
+        "else{document.body.innerHTML='<p class=\\'err\\'>Mermaid script tag missing from the page.</p>';}}"
         "document.getElementById('ck-save').addEventListener('click',function(){"
         "var svg=document.querySelector('.mermaid svg');"
         "if(!svg){return;}"
