@@ -821,3 +821,22 @@ loaded fine — it was its own navigation and carried the cookie.
 - Defensive escape: `</script>` and `<!--` inside the inlined lib are
   replaced with their JS-safe forms; the current lib has neither, but a
   future bump might.
+
+## Fix: Cross-Origin-Resource-Policy blocked everything served to a sandbox (0.9.8)
+
+0.9.7's inlining dodged the subresource problem for Mermaid, but every
+raw response (`_send_raw`: visuals, charts, mocks, the inlined wrapper
+HTML itself) carried `Cross-Origin-Resource-Policy: same-origin`. A
+sandbox-opaque-origin iframe is not same-origin to the server, so the
+browser refused the response with a CORP violation — the same symptom
+family as the Access-cookie trap: subresources silently fail to render.
+
+- `_send_raw` now sets `Cross-Origin-Resource-Policy: cross-origin`.
+  These responses are specifically designed to be consumed by sandboxed
+  iframes with opaque origins; the data (static Mermaid wrapper HTML,
+  inlined lib, inlined CSS, stored visuals the owner requested) is not
+  sensitive, and the Cloudflare Access tunnel still gates every byte at
+  the perimeter.
+- JSON responses (`_send`) keep the default and remain protected: they
+  carry the owner's view data and are only consumed by the same-origin
+  top-level page.

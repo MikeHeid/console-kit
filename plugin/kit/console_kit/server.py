@@ -1858,7 +1858,15 @@ class _Handler(BaseHTTPRequestHandler):
         return b"".join(chunks)
 
     def _send_raw(self, code: int, data: bytes, ctype: str, csp: str) -> None:
-        """A body that is not JSON, under its own Content-Security-Policy (0.8.0, a stored visual)."""
+        """A body that is not JSON, under its own Content-Security-Policy (0.8.0, a stored visual).
+
+        0.9.8: `Cross-Origin-Resource-Policy: cross-origin`, not same-origin. Raw responses are consumed
+        by SANDBOXED iframes (`sandbox="allow-scripts"` or `sandbox=""`) whose documents have an opaque
+        origin; the browser refuses a `same-origin` CORP response because the opaque origin is not the
+        server's origin, and the resource silently fails to load. The data served here (static Mermaid
+        wrapper HTML, inlined lib, inlined CSS, stored visuals the owner themselves requested) is not
+        sensitive, and the Cloudflare Access tunnel still gates every byte at the perimeter.
+        """
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -1866,7 +1874,7 @@ class _Handler(BaseHTTPRequestHandler):
             if k != "Content-Security-Policy":
                 self.send_header(k, v)
         self.send_header("Content-Security-Policy", csp)
-        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "cross-origin")
         self.end_headers()
         self.wfile.write(data)
 
