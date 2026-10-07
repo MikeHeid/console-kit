@@ -1000,3 +1000,26 @@ This is step 1 of the "ultimate web orchestrator" arc. On deck:
 0.11 playbooks (codified multi-step delegations), 0.12 triggers
 (cron + webhooks that fire delegations), 0.13 cross-project overview,
 0.14 impact graph (Cytoscape).
+
+## Playbooks — codified multi-step delegations (0.11.0)
+
+A playbook is `.console-kit/playbooks/<slug>.json` with a `description`
+and an ordered list of `steps`. Each step is `{"kind": "round"|"visual"
+|"chat", "item": "...", "text": "...", mode/focus (round only)}`.
+Picked from the Delegate bar's "Run a playbook" option.
+
+- **`playbooks.py`** loads, validates, caps (128 files, 24 steps,
+  32 KiB). A malformed or badly-named file is skipped silently so one
+  bad playbook never hides the rest. `view.playbooks` carries
+  `[{name, description, steps}]`.
+- **`POST /api/playbook`** fans each step out as an owner `message`
+  write (same path the Delegate bar posts individually; same checks,
+  same doorbell rings, same view updates). Owner-only. Returns
+  `{records, skipped}` so the UI can report partial runs.
+- **Delegate bar** gets a fourth option "Run a playbook" with a picker.
+  Hidden/empty when no files are present (with a hint pointing at the
+  folder). Submit calls the new endpoint and reports step-by-step
+  skips if any item is missing from the register.
+- No new agent-side work: a step is just an owner message with the
+  usual intent (`fork` / `visual` / `chat`); the steward's `watch`
+  picks each up in order.

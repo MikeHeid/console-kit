@@ -1984,7 +1984,8 @@
     const kinds = [
       ['round', 'Deliberate (full round)'],
       ['visual', 'Request a visual'],
-      ['chat', 'Chat with the agent']
+      ['chat', 'Chat with the agent'],
+      ['playbook', 'Run a playbook']
     ];
     kinds.forEach(([v, label], i) => {
       const r = el('input', { type: 'radio', name: 'ck-del-kind', value: v });
@@ -2015,6 +2016,23 @@
     ]);
     body.appendChild(roundRow);
 
+    // Row 3b: playbook picker (shown only when kind=playbook).
+    const playbookSel = el('select', { className: 'ck-select', id: 'ck-del-playbook' });
+    const playbooks = (view && view.playbooks) || [];
+    for (const pb of playbooks) {
+      const descr = pb.description ? ' — ' + truncateText(pb.description, 50) : '';
+      playbookSel.appendChild(el('option', { value: pb.name }, [pb.name + descr]));
+    }
+    const playbookRow = el('div', { className: 'ck-field ck-del-playbookrow' }, [
+      el('label', { for: 'ck-del-playbook', className: 'ck-field-label' }, ['Playbook']),
+      playbookSel
+    ]);
+    if (!playbooks.length) {
+      playbookRow.appendChild(el('span', { className: 'ck-muted' },
+        [' (no playbooks under .console-kit/playbooks/*.json)']));
+    }
+    body.appendChild(playbookRow);
+
     // Row 4: the owner's brief.
     const text = el('textarea', { className: 'ck-textarea', rows: '2',
       placeholder: 'What should the agent look at? (optional for a round; required for a visual)' });
@@ -2026,7 +2044,10 @@
     const updateVisibility = () => {
       const kind = body.querySelector('input[name="ck-del-kind"]:checked').value;
       roundRow.hidden = kind !== 'round';
-      itemSel.disabled = kind === 'chat';
+      playbookRow.hidden = kind !== 'playbook';
+      itemSel.disabled = kind === 'chat' || kind === 'playbook';
+      text.hidden = kind === 'playbook';
+      send.textContent = kind === 'playbook' ? 'Run playbook' : 'Delegate';
     };
     body.querySelectorAll('input[name="ck-del-kind"]').forEach(r =>
       r.addEventListener('change', updateVisibility));
@@ -2036,26 +2057,40 @@
       status.hidden = true; status.textContent = '';
       const kind = body.querySelector('input[name="ck-del-kind"]:checked').value;
       const brief = text.value.trim();
-      let payload;
-      if (kind === 'round') {
-        payload = { item: itemSel.value, intent: 'fork', mode: modeSel.value, focus: focusSel.value,
-          text: brief || ('Deliberate the full round: ' + itemSel.value + ' and everything under it.') };
-      } else if (kind === 'visual') {
-        if (!brief) { status.textContent = 'A visual needs a brief: what should it show?'; status.hidden = false; return; }
-        payload = { item: itemSel.value, intent: 'visual', text: brief };
-      } else {
-        if (!brief) { status.textContent = 'Say what you want the agent to do.'; status.hidden = false; return; }
-        payload = { item: '@chat', intent: 'chat', text: brief };
-      }
       send.disabled = true;
-      const result = await apiPost('/message', payload, 'delegate-' + Date.now());
+      let result;
+      if (kind === 'playbook') {
+        if (!playbookSel.value) {
+          send.disabled = false;
+          status.textContent = 'Add a JSON file under .console-kit/playbooks/ to run one.'; status.hidden = false; return;
+        }
+        result = await apiPost('/playbook', { name: playbookSel.value }, 'playbook-' + playbookSel.value + '-' + Date.now());
+      } else {
+        let payload;
+        if (kind === 'round') {
+          payload = { item: itemSel.value, intent: 'fork', mode: modeSel.value, focus: focusSel.value,
+            text: brief || ('Deliberate the full round: ' + itemSel.value + ' and everything under it.') };
+        } else if (kind === 'visual') {
+          if (!brief) { send.disabled = false; status.textContent = 'A visual needs a brief: what should it show?'; status.hidden = false; return; }
+          payload = { item: itemSel.value, intent: 'visual', text: brief };
+        } else {
+          if (!brief) { send.disabled = false; status.textContent = 'Say what you want the agent to do.'; status.hidden = false; return; }
+          payload = { item: '@chat', intent: 'chat', text: brief };
+        }
+        result = await apiPost('/message', payload, 'delegate-' + Date.now());
+      }
       send.disabled = false;
       if (result && result.error) {
         status.textContent = 'Not delegated: ' + result.error;
         status.hidden = false;
+      } else if (result && Array.isArray(result.skipped) && result.skipped.length) {
+        const first = result.skipped[0];
+        status.textContent = (result.records || []).length + ' step(s) ran; '
+          + result.skipped.length + ' skipped (step ' + first.index + ': ' + first.why + ').';
+        status.hidden = false;
       } else {
         text.value = '';
-        announce('Delegated.');
+        announce(kind === 'playbook' ? 'Playbook ran.' : 'Delegated.');
       }
     });
     body.appendChild(el('div', { className: 'ck-actions' }, [send, status]));
