@@ -1023,3 +1023,38 @@ Picked from the Delegate bar's "Run a playbook" option.
 - No new agent-side work: a step is just an owner message with the
   usual intent (`fork` / `visual` / `chat`); the steward's `watch`
   picks each up in order.
+
+## Webhook triggers — external events fire playbooks (0.12.0)
+
+Codify an external event → playbook mapping in `.console-kit/triggers.json`:
+
+    {"triggers": {"pr-merged": {"playbook": "security-review",
+                                "token_sha256": "<sha256 of the bearer token, hex>"}}}
+
+A caller sends `POST /api/trigger/pr-merged` with
+`Authorization: Bearer <token>`. Two gates:
+
+- **Cloudflare Access service token** at the perimeter (configured on the
+  Access application).
+- **Per-trigger bearer token** at the server: it hashes the received token
+  with SHA-256 and compares (constant-time) to the configured
+  `token_sha256`. The server **never** stores the plaintext token.
+
+Rate-limited to one firing per trigger per 10 s (in-process). The firing
+runs the trigger's named playbook (same path as the Delegate bar's "Run
+a playbook"); `{records, skipped}` returns.
+
+- **`agent.py trigger-token`** mints a `token` + its `sha256` so the
+  operator can paste the sha into `triggers.json` and hand the plaintext
+  to the sender.
+- `view.triggers` carries the public shape (`name`, `playbook`) — never
+  the token hash — so the UI can list what is wired.
+- Smoke-tested: mint round-trip, header extraction, rate limiter,
+  config validation for bad names / bad playbook / bad hash.
+
+GitHub webhooks use HMAC-SHA256, not bearer tokens — a 10-line Worker or
+small shim can bridge them (document in RUNBOOK). cron.io, cloud
+functions, and custom scripts work out of the box.
+
+On deck: 0.13 cross-project overview, 0.14 impact graph. Also 0.12.1 for
+in-server cron if the webhook path proves solid.
