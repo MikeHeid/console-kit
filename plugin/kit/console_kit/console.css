@@ -1371,14 +1371,6 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 .ck-pr-row .ck-btn-quiet { margin-top: 6px; }
 
 /* --- Inbox UX (owner rulings CONSOLE-kit/Q33-Q37, motion from Q38) --- */
-/* Q33: the one-tap lock's countdown. Its text changes every second, so it is no live region; the page
-   announces the start, the Undo and the outcome once each. */
-.ck-lock-countdown {
-  display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
-  padding: 6px 10px; border: 1px solid var(--c-accent); border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--c-accent) 8%, transparent); font-size: 13px; color: var(--c-fg);
-}
-.ck-lock-left { font-variant-numeric: tabular-nums; font-weight: 600; }
 .ck-lock-error { margin: 8px 0 0; }
 /* Q37: a settled question is one line that opens on click. */
 .ck-question-rolled { margin-bottom: 8px; }
@@ -1563,3 +1555,69 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   line-height: 1.4;
 }
 .ck-confirm-error[hidden] { display: none; }
+
+/* 0.9.12: dashboard section links in the item view header area. */
+.ck-section-links {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 8px 16px 4px;
+  font-size: 12px;
+  align-items: center;
+}
+.ck-section-links-label { color: var(--c-fg-muted); font-weight: 600; }
+.ck-section-link {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px 10px;
+  background: var(--c-surface-alt);
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  color: var(--c-accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.ck-section-link:hover, .ck-section-link:focus-visible {
+  background: var(--c-accent); color: var(--c-accent-fg); border-color: var(--c-accent);
+  outline: none;
+}
+
+/* 0.9.12: Direction strip under each question's text — forked_from, supersedes, superseded by, cites. */
+.ck-direction {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px;
+  font-size: 12px;
+}
+.ck-direction-chip {
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--c-surface-alt);
+  color: var(--c-fg-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.ck-direction-chip.ck-direction-link {
+  cursor: pointer; color: var(--c-fg);
+  border: 1px solid var(--c-border);
+}
+.ck-direction-chip.ck-direction-link:hover,
+.ck-direction-chip.ck-direction-link:focus-visible {
+  border-color: var(--c-accent); background: var(--c-accent-soft, var(--c-surface));
+  color: var(--c-accent); outline: none;
+}
+.ck-direction-icon { color: var(--c-fg-muted); }
+
+/* 0.9.12: dashboard overlay badge, injected onto any host-page element with [data-ck-item]. */
+.ck-section-badge {
+  display: inline-flex; align-items: center; gap: 10px;
+  float: right; margin: 0 0 8px 12px;
+  padding: 4px 10px;
+  font: 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.02em;
+  background: var(--c-surface-alt);
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  color: var(--c-fg);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ck-section-badge:hover, .ck-section-badge:focus-visible {
+  background: var(--c-accent); color: var(--c-accent-fg); border-color: var(--c-accent);
+  outline: none;
+}

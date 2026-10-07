@@ -43,8 +43,7 @@
   const lockAllError = {};      // 0.8.5: item -> why its last 'Lock all' stopped
   // CONSOLE-kit/Q33: one tap locks one answer after a countdown this page holds. Nothing is sent before it
   // ends; Undo, leaving the question or leaving the page sends nothing. There is no server record of it.
-  const LOCK_DELAY_S = 5;
-  const pendingLocks = new Map(); // qid -> { answer, item, left, timer }
+  // The 5-second lock countdown was removed; lock is immediate. These globals are retired.
   const lockErrors = {};          // qid -> why its last lock was refused
   const justLocked = new Set();   // qids locked from this page and not yet drawn rolled up (Q37's roll-up)
   // 0.7.0: the inbox's tabs, the round form, and the live loop.
@@ -309,6 +308,7 @@
       noteArrivals();
       updateInboxButton();
       updateItemButtons();
+      updateSectionBadges();   // Overlay a tiny count on any [data-ck-item] section on the host page.
       return data;
     } catch (e) {
       cursor = cursor || {};
@@ -633,6 +633,40 @@
       }
       if (btn.hasAttribute('data-drawn') && before !== btn.textContent) pulse(btn);  // a live change, not the first draw
       btn.setAttribute('data-drawn', 'true');
+    });
+  }
+
+  // Dashboard section overlay: for every element on the HOST page carrying `data-ck-item="X"`, inject a tiny
+  // badge summarising X's state so a section shows what questions and answers it carries, inline. The badge
+  // is a button: clicking it opens the console panel focused on X. Idempotent — re-runs just update the text.
+  function updateSectionBadges() {
+    if (!view || !items) return;
+    document.querySelectorAll('[data-ck-item]').forEach(el => {
+      const id = el.getAttribute('data-ck-item');
+      if (!id || !items[id]) return;
+      const t = view.items && view.items[id] && view.items[id].total;
+      if (!t) return;
+      const parts = [];
+      if (t.awaiting_you > 0) parts.push(GLYPH.awaiting_you + ' ' + t.awaiting_you);
+      if (t.unlocked > 0) parts.push(GLYPH.unlocked + ' ' + t.unlocked);
+      if (t.stale > 0) parts.push(GLYPH.stale + ' ' + t.stale);
+      if (t.locked > 0) parts.push(GLYPH.locked + ' ' + t.locked);
+      let badge = el.querySelector(':scope > .ck-section-badge');
+      if (!parts.length) { if (badge) badge.remove(); return; }
+      if (!badge) {
+        badge = document.createElement('button');
+        badge.className = 'ck-section-badge';
+        badge.type = 'button';
+        badge.setAttribute('aria-label', 'Open ' + id + ' in the console');
+        badge.addEventListener('click', () => openPanel(id, 'item'));
+        el.insertBefore(badge, el.firstChild);
+      }
+      const words = id + '  ' + parts.join('  ');
+      if (badge.textContent !== words) {
+        badge.textContent = words;
+        if (badge.hasAttribute('data-drawn')) pulse(badge);
+      }
+      badge.setAttribute('data-drawn', 'true');
     });
   }
 
@@ -1263,6 +1297,9 @@
       const order = ['awaiting_you', 'unlocked', 'stale', 'locked', 'superseded', 'withdrawn'];
       qs.sort((a, b) => order.indexOf(a.state) - order.indexOf(b.state));
 
+      // Dashboard section links: `.console-kit.json` can map this item to one or more #anchors on the host page.
+      const sectionLinks = renderSectionLinks(itemId);
+      if (sectionLinks) body.appendChild(sectionLinks);
       body.appendChild(renderItemTools(itemId));
       // 0.8.19: a status flowchart for the whole item, lazy-loaded on expand, re-rendered on live wake.
       if (qs.length > 0) body.appendChild(renderItemChart(itemId));
@@ -1532,6 +1569,8 @@
     if (qData.agent) textCol.appendChild(el('div', { className: 'ck-q-agent' }, ['asked by ' + qData.agent]));
     const chips = tagChips(questionTags(qData.qid));
     if (chips) textCol.appendChild(chips);
+    const direction = renderDirectionStrip(q);
+    if (direction) textCol.appendChild(direction);
     hdr.appendChild(textCol);
     card.appendChild(hdr);
 
@@ -1617,16 +1656,14 @@
       const asked = askedLine(qData.qid);
       if (asked) bodyEl.appendChild(asked);
     } else if (state === 'unlocked') {
-      // CONSOLE-kit/Q33: one tap, then a countdown with Undo; the lock is sent only when it ends.
+      // One tap locks: the Undo countdown was removed; the request goes immediately.
       bodyEl.appendChild(renderReceipt(qData, headAnswer));
       if (lockErrors[qData.qid]) {
         bodyEl.appendChild(el('p', { className: 'ck-error-msg ck-lock-error' }, ['Not locked: ' + lockErrors[qData.qid]]));
       }
       const actions = el('div', { className: 'ck-actions' });
       const truncText = truncateText(qData.text, 40);
-      if (pendingLocks.has(qData.qid)) {
-        actions.appendChild(renderLockCountdown(qData));
-      } else {
+      {
         const lockBtn = el('button', {
           className: 'ck-btn ck-btn-primary ck-lock-one',
           type: 'button',
@@ -1842,6 +1879,85 @@
   // Collapsed by default: expanding sets the iframe src, so a page that never opens it costs nothing.
   // Re-rendered under the live loop keeps the diagram fresh when a question is answered or added.
   const openCharts = new Set();      // which items currently show the flowchart; survives re-renders
+  // Dashboard section chips for an item, driven by `.console-kit.json`'s `sections` map. Returns null when the
+  // item has none mapped. The link uses target="_top" to break out of the console panel's docked frame.
+  function renderSectionLinks(itemId) {
+    const cfg = view && view.config;
+    const list = (cfg && cfg.sections && cfg.sections[itemId]) || [];
+    if (!list.length) return null;
+    const wrap = el('div', { className: 'ck-section-links', 'aria-label': 'This item in the dashboard' });
+    wrap.appendChild(el('span', { className: 'ck-section-links-label' }, ['Dashboard:']));
+    for (const anchor of list) {
+      const label = anchor.replace(/^#/, '');
+      const a = el('a', { className: 'ck-section-link', href: anchor, target: '_top',
+        rel: 'noopener', 'aria-label': 'Jump to ' + label + ' on the dashboard' }, [
+        el('span', {}, [label]),
+        el('span', { 'aria-hidden': 'true' }, [' →'])
+      ]);
+      wrap.appendChild(a);
+    }
+    return wrap;
+  }
+
+  // "Direction" strip above a question's text: the fork it was asked by, what it supersedes or is superseded
+  // by, and the files its evidence cites. Pure CSS/JS over the view JSON; no new endpoints.
+  function renderDirectionStrip(q) {
+    const qd = q.question || {};
+    const chips = [];
+    if (qd.forked_from) {
+      chips.push({ icon: '↑', label: 'from round ' + qd.forked_from.slice(0, 8), qid: null, fork: qd.forked_from });
+    }
+    const supersedes = qd.supersedes || qd.replaces;
+    if (supersedes) {
+      chips.push({ icon: '←', label: 'supersedes ' + shortQid(supersedes), qid: supersedes, fork: null });
+    }
+    // Reverse direction: did a newer question supersede this one?
+    for (const other of Object.values(view.questions || {})) {
+      const od = other.question || {};
+      if ((od.supersedes || od.replaces) === qd.qid) {
+        chips.push({ icon: '→', label: 'superseded by ' + shortQid(od.qid), qid: od.qid, fork: null });
+      }
+    }
+    const ev = Array.isArray(qd.evidence) ? qd.evidence : [];
+    const cited = new Set();
+    for (const row of ev) {
+      const p = row && row.cite ? String(row.cite).split(':')[0] : null;
+      if (p && !cited.has(p)) {
+        cited.add(p);
+        chips.push({ icon: '↳', label: p, qid: null, fork: null });
+      }
+    }
+    if (!chips.length) return null;
+    const wrap = el('div', { className: 'ck-direction', 'aria-label': 'Related questions and sources' });
+    for (const c of chips) {
+      const chip = el('span', { className: 'ck-direction-chip' }, [
+        el('span', { className: 'ck-direction-icon', 'aria-hidden': 'true' }, [c.icon + ' ']),
+        c.label
+      ]);
+      if (c.qid) {
+        chip.classList.add('ck-direction-link');
+        chip.setAttribute('role', 'button');
+        chip.setAttribute('tabindex', '0');
+        const go = () => {
+          const sel = '[data-qid="' + cssEscape(c.qid) + '"]';
+          const node = panelEl.querySelector('.ck-question' + sel) || panelEl.querySelector(sel);
+          if (node) { node.scrollIntoView({ behavior: 'smooth', block: 'center' }); pulse(node); }
+        };
+        chip.addEventListener('click', go);
+        chip.addEventListener('keydown', e => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
+        });
+      }
+      wrap.appendChild(chip);
+    }
+    return wrap;
+  }
+
+  function shortQid(qid) {
+    if (typeof qid !== 'string') return String(qid || '');
+    return qid.length > 24 ? qid.slice(0, 24) + '…' : qid;
+  }
+
   function renderItemChart(itemId) {
     const wrap = el('details', { className: 'ck-item-chart', dataItem: itemId });
     if (openCharts.has(itemId)) wrap.setAttribute('open', '');
@@ -2468,122 +2584,41 @@
     return box;
   }
 
-  // Render lock confirmation step (fix #4: two-step with Cancel)
-  // CONSOLE-kit/Q33 (owner, 2026-10-02, the ★): locking one answer is one tap. The page counts down
-  // LOCK_DELAY_S seconds with an Undo, and only then sends the lock: the same POST the old confirm sent, so
-  // the owner door's checks are unchanged. The countdown is this page's alone: no record, no route, and a
-  // page that is closed, reloaded or navigated away mid-count has sent nothing.
-  function startLock(q, answer) {
+  // Locking one answer is one tap. The 5-second Undo countdown was removed; the request goes right away
+  // (same POST the old confirm sent, so the owner door's checks are unchanged). lockErrors[qid] keeps the
+  // server's refusal if one lands, so the question card can surface "Not locked: ..." on the next render.
+  async function startLock(q, answer) {
     const qid = q.question.qid;
-    if (pendingLocks.has(qid) || !answer) return;
+    if (!answer) return;
     delete lockErrors[qid];
-    const p = { answer: answer.id, item: q.question.item, left: LOCK_DELAY_S, timer: null };
-    p.timer = setInterval(() => tickLock(qid), 1000);
-    pendingLocks.set(qid, p);
-    redrawKeepingPlace();
-    const undo = panelEl.querySelector('.ck-lock-undo[data-focus-key="undo-' + CSS.escape(qid) + '"]');
-    if (undo) undo.focus();
-    announce('Locking in ' + LOCK_DELAY_S + ' seconds. Press Undo to keep it unlocked.');
-  }
-
-  function renderLockCountdown(qData) {
-    const p = pendingLocks.get(qData.qid);
-    const wrap = el('div', { className: 'ck-lock-countdown', dataQid: qData.qid });
-    // Not a live region: it changes every second. The start, Undo and the outcome are announced once each.
-    wrap.appendChild(el('span', { className: 'ck-lock-left' }, ['Locking in ' + p.left + ' s']));
-    const undo = el('button', { className: 'ck-btn ck-lock-undo', type: 'button', dataFocusKey: 'undo-' + qData.qid,
-      'aria-label': 'Undo: do not lock ' + truncateText(qData.text, 40) }, ['Undo']);
-    undo.addEventListener('click', () => {
-      // Once the count ends the lock is on its way: an Undo then would say something untrue.
-      if (!undoLock(qData.qid, 'Not locked. Nothing was sent.')) return;
-      redrawKeepingPlace();
-      const again = panelEl.querySelector('.ck-lock-one[data-focus-key="lock-' + CSS.escape(qData.qid) + '"]');
-      if (again) again.focus();
-    });
-    wrap.appendChild(el('span', { 'aria-hidden': 'true' }, [' · ']));
-    wrap.appendChild(undo);
-    return wrap;
-  }
-
-  function tickLock(qid) {
-    const p = pendingLocks.get(qid);
-    if (!p) return;
-    p.left -= 1;
-    if (p.left > 0) { setCountdown(qid, 'Locking in ' + p.left + ' s', false); return; }
-    // Out of the map BEFORE the request: nothing can send this lock twice, or Undo it once it is on its way.
-    clearInterval(p.timer);
-    pendingLocks.delete(qid);
-    setCountdown(qid, 'Locking…', true);
-    sendLock(qid, p);
-  }
-
-  // The countdown's words, changed in place: a box the owner is typing in elsewhere is never redrawn for it.
-  function setCountdown(qid, words, done) {
-    for (const c of panelEl.querySelectorAll('.ck-lock-countdown[data-qid="' + CSS.escape(qid) + '"]')) {
-      const left = c.querySelector('.ck-lock-left');
-      if (left) left.textContent = words;
-      const undo = c.querySelector('.ck-lock-undo');
-      if (done && undo) undo.setAttribute('aria-disabled', 'true');
-    }
-  }
-
-  async function sendLock(qid, p) {
-    // Asked before the request: its own refresh redraws the panel, and the Undo is gone by the time it answers.
     const ae = document.activeElement;
-    const wasHere = !!(ae && ae.getAttribute && ae.getAttribute('data-focus-key') === 'undo-' + qid);
-    const result = await apiPost('/lock', { qid: qid, answer: p.answer }, 'lock-' + qid);
-    if (result.error) {
+    const wasOnLockBtn = !!(ae && ae.getAttribute && ae.getAttribute('data-focus-key') === 'lock-' + qid);
+    const result = await apiPost('/lock', { qid: qid, answer: answer.id }, 'lock-' + qid);
+    if (result && result.error) {
       lockErrors[qid] = result.error;
       announce('Not locked: ' + result.error);
-      setCountdown(qid, 'Not locked: ' + result.error, true);
     } else {
       justLocked.add(qid);
       announce('Locked.');
-      setCountdown(qid, 'Locked.', true);
     }
-    if (panelEl.getAttribute('data-open') !== 'true') return;
+    if (!panelEl || panelEl.getAttribute('data-open') !== 'true') return;
     if (busyInPanel()) { pendingLive = true; return; }
     redrawKeepingPlace();
-    // The Undo that had focus is gone: land on the question's own line, which the lock just rolled up.
-    if (wasHere) {
+    // The Lock button that had focus is gone (the question rolled up); land on the question's own line.
+    if (wasOnLockBtn && !lockErrors[qid]) {
       const line = panelEl.querySelector('.ck-q-line[data-qid="' + CSS.escape(qid) + '"]') ||
         panelEl.querySelector('.ck-questions-heading');
-      if (line) { if (!line.hasAttribute('tabindex') && line.tagName !== 'BUTTON') line.setAttribute('tabindex', '-1'); line.focus(); }
+      if (line) {
+        if (!line.hasAttribute('tabindex') && line.tagName !== 'BUTTON') line.setAttribute('tabindex', '-1');
+        line.focus();
+      }
     }
   }
 
-  function undoLock(qid, words) {
-    const p = pendingLocks.get(qid);
-    if (!p) return false;
-    clearInterval(p.timer);
-    pendingLocks.delete(qid);
-    if (words) announce(words);
-    return true;
-  }
-
-  // Leaving the question, the panel or the page takes the countdown with it: a lock is never sent from a
-  // place the owner can no longer see, so it can never land by accident.
-  function dropAllLocks() {
-    let dropped = 0;
-    for (const qid of [...pendingLocks.keys()]) if (undoLock(qid, null)) dropped += 1;
-    if (!dropped) return;
-    announce(dropped === 1 ? 'Not locked: you left the page before it locked.'
-      : dropped + ' answers not locked: you left the page before they locked.');
-    // What is on show still says "Locking in N s": put the Lock button back. A box being typed in is not
-    // redrawn (it cannot be typed in while the page is hidden; on return the next live redraw shows it).
-    if (panelEl && panelEl.getAttribute('data-open') === 'true' && !busyInPanel()) redrawKeepingPlace();
-  }
-
-  function dropLocksNotOnShow() {
-    let dropped = 0;
-    for (const [qid, p] of [...pendingLocks]) {
-      const shown = panelEl && panelEl.getAttribute('data-open') === 'true' && currentMode === 'item' &&
-        currentItem === p.item;
-      if (!shown && undoLock(qid, null)) dropped += 1;
-    }
-    if (dropped) announce(dropped === 1 ? 'Not locked: you left the question before it locked.'
-      : dropped + ' answers not locked: you left them before they locked.');
-  }
+  // Compatibility stubs: the countdown apparatus is gone, so nothing is ever pending.
+  // Kept as no-ops because pagehide / visibilitychange listeners below still call them.
+  function dropAllLocks() { /* no-op: lock is immediate; there is nothing in flight to drop */ }
+  function dropLocksNotOnShow() { /* no-op: see above */ }
 
   // Render thread/messages
   function renderThread(itemId) {

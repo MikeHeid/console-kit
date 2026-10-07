@@ -43,6 +43,11 @@ FILE = ".console-kit.json"
 MAX_FILE = 64 * 1024
 DIR = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*(/[A-Za-z0-9_][A-Za-z0-9_.\-]*)*/?\Z")
 SKILL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:\-]{0,79}\Z")
+# A section anchor is a URL fragment the dashboard page's HTML carries on an id or data-ck-item. Shape it
+# the way a browser accepts a fragment: letters, digits, `-_./:` and a required leading `#`, at most 128
+# chars. Not resolved by the server; passed to the console script to turn into deep links.
+SECTION = re.compile(r"^#[A-Za-z0-9][A-Za-z0-9._/:\-]{0,127}\Z")
+MAX_SECTIONS_PER_ITEM = 16
 
 
 class ConfigError(ValueError):
@@ -54,6 +59,10 @@ class ProjectConfig:
     specs_dir: str | None = None     # normalised: no trailing slash
     visuals_dir: str | None = None
     next_step: dict = field(default_factory=dict)
+    # {item_id: [section_anchor, ...]}; the console turns these into deep-links from the item view to the
+    # dashboard page's sections (0.9.12). Validated here only; the server does not resolve them against the
+    # page (it never reads the page's HTML).
+    sections: dict = field(default_factory=dict)
 
 
 def _dir(root: Path, v: object, key: str) -> str:
@@ -103,7 +112,38 @@ def load(root: Path) -> ProjectConfig:
     if specs and visuals and (visuals == specs or visuals.startswith(specs + "/")):
         raise ConfigError(f"{FILE}: visuals_dir {visuals!r} is inside specs_dir {specs!r}; keep them apart, "
                           f"or every visual would read as a spec")
-    return ProjectConfig(specs_dir=specs, visuals_dir=visuals, next_step=dict(steps))
+    sections = _sections(doc.get("sections"))
+    return ProjectConfig(specs_dir=specs, visuals_dir=visuals, next_step=dict(steps), sections=sections)
+
+
+def _sections(v: object) -> dict:
+    """Parse an optional `sections` map: {item_id: [#anchor, ...]}; refused by name on any bad entry.
+
+    Returns {} when absent. Each item id must pass `S.ITEM_ID`; each anchor must match SECTION (a URL
+    fragment of plain characters), with at most MAX_SECTIONS_PER_ITEM anchors per item. The server never
+    resolves the anchors against the page itself: they are only passed through to the console script.
+    """
+    if v is None:
+        return {}
+    if not isinstance(v, dict):
+        raise ConfigError(f"{FILE}: sections must be an object mapping item ids to lists of #anchors")
+    out: dict[str, list[str]] = {}
+    for item_id, anchors in v.items():
+        if not isinstance(item_id, str) or not S.ITEM_ID.match(item_id):
+            raise ConfigError(f"{FILE}: sections key {item_id!r} is not an item id")
+        if not isinstance(anchors, list) or not anchors:
+            raise ConfigError(f"{FILE}: sections[{item_id!r}] must be a non-empty list of #anchors")
+        if len(anchors) > MAX_SECTIONS_PER_ITEM:
+            raise ConfigError(f"{FILE}: sections[{item_id!r}] has {len(anchors)} anchors; at most "
+                              f"{MAX_SECTIONS_PER_ITEM}")
+        checked: list[str] = []
+        for a in anchors:
+            if not isinstance(a, str) or not SECTION.match(a):
+                raise ConfigError(f"{FILE}: sections[{item_id!r}] anchor {a!r} must look like '#features/rollout'")
+            if a not in checked:
+                checked.append(a)
+        out[item_id] = checked
+    return out
 
 
 def user_config_dir() -> Path:

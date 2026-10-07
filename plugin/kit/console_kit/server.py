@@ -824,7 +824,8 @@ class Console:
         holds = A.evaluator(self.cfg.root, self._status(items), snapshot=True)  # one reading per request
         view = V.build(self.store, items, holds, names=self.names.mapping())
         view["tags"] = self.tags(view, items)
-        view["config"] = {"specs_dir": self.project.specs_dir, "visuals_dir": self.project.visuals_dir}
+        view["config"] = {"specs_dir": self.project.specs_dir, "visuals_dir": self.project.visuals_dir,
+                          "sections": self.project.sections}
         view["favorites"] = self.favorites.list()   # 0.8.19: starred keys, newest first
         pushed = getattr(self.adapter, "pushed", None)
         if getattr(self.adapter, "problem", None):   # the items() above already read (and logged) it
