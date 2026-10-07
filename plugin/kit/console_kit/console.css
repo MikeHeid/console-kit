@@ -1650,3 +1650,23 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 }
 .ck-delegate-status[hidden] { display: none; }
 .ck-del-playbookrow[hidden] { display: none; }
+
+/* 0.16.0: Trigger log in the Inbox header area. */
+.ck-triggers { margin: 8px 16px; }
+.ck-trigger-configured { margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px; }
+.ck-trigger-row { font-size: 13px; }
+.ck-trigger-row code { background: var(--c-surface-alt); padding: 1px 5px; border-radius: 4px; }
+.ck-trigger-log {
+  list-style: none; padding: 0; margin: 4px 0; display: flex; flex-direction: column; gap: 6px;
+}
+.ck-trigger-log-row {
+  padding: 6px 10px; border-left: 3px solid var(--c-border);
+  background: var(--c-surface-alt); font-size: 13px;
+}
+.ck-trigger-log-time {
+  display: inline-block; min-width: 90px; color: var(--c-fg-muted); font-variant-numeric: tabular-nums;
+}
+.ck-trigger-log-name { background: transparent; font-weight: 600; }
+.ck-trigger-log-err {
+  margin-top: 4px; color: var(--c-blocked); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}

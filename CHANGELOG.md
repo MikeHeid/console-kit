@@ -1125,3 +1125,22 @@ expression and fire on the server's clock, with no external POST.
 
 The orchestrator arc now folds the clock in: external HTTP, scheduled
 tick, or owner click all share the same playbook execution path.
+
+## Trigger log in the Inbox (0.16.0)
+
+Without visibility, webhook and cron firings felt opaque. 0.16.0 shows
+them in the Inbox under a **Triggers** collapsible beside Delegate:
+
+- The configured triggers (name → playbook, with its kinds: webhook,
+  cron, or both).
+- The last 20 firings, newest first: timestamp, name, kind, step and
+  skip counts, and any error.
+
+The server keeps the last 100 firings in an in-process ring; older
+ones drop off on restart. `view.trigger_log` carries the slice;
+`view.triggers[*].kinds` carries webhook/cron so the row says which
+flavour the trigger is armed for.
+
+Both `fire_trigger` and `fire_cron` wrap the playbook call in a
+try/except and log the outcome before re-raising, so a failing playbook
+still writes a log row with the error.
