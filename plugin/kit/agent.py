@@ -756,6 +756,27 @@ def _sync_dashboard_write(root: Path, page_rel: str, items: dict) -> int:
     return 0
 
 
+def _playbook_run(a) -> int:
+    """0.18.0: run a named playbook via the agent socket. Returns {records, skipped} from the server."""
+    import time as _t
+    door = _door(a.state)
+    if door.project is None and not door.sock.is_socket():
+        print(f"no console server answers for {a.state}: no {door.sock}, and server.json hosts no project "
+              f"there", file=sys.stderr)
+        return 2
+    body = {"name": a.name, "nonce": f"pb-{a.name}-{int(_t.time())}"}
+    try:
+        code, out = door.request("POST", "/playbook", body, agent=a.agent)
+    except OSError as e:
+        print(f"the console server is not answering on {door.sock}: {e}", file=sys.stderr)
+        return 2
+    if code != 200:
+        print(f"refused ({code}): {out.get('error')}", file=sys.stderr)
+        return 1
+    sys.stdout.write(_json(out))
+    return 0
+
+
 REVIEWED_FALLBACK = "origin/main"   # Q28: used when origin/HEAD does not resolve
 GIT_SECONDS = 60
 
@@ -1171,6 +1192,10 @@ def main(argv=None) -> int:
     s = sub.add_parser("portfolio", description="0.13.0: list every project registered on this machine with "
                        "its open-question backlog read from each STATE directly. Read-only; no HTTP calls.")
     s.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+    s = sub.add_parser("playbook", description="0.18.0: run a named playbook (.console-kit/playbooks/<name>.json) "
+                       "through this console's agent socket. Each step lands as an owner message write; the "
+                       "steward's watch picks them up as it does any delegation.")
+    s.add_argument("name", help="the playbook's slug (file basename without .json)")
     s = sub.add_parser("sync-dashboard", description="0.9.13: insert a <details id=item-X data-ck-item=X> stub "
                        "into the dashboard page for every item not already there. Nested by parent via per-item "
                        "markers so re-runs preserve hand-edits inside each node.")
@@ -1320,6 +1345,8 @@ def _run(a, bell: Path) -> int:
         return _sync_dashboard(a)
     if a.cmd == "portfolio":
         return _portfolio(a)
+    if a.cmd == "playbook":
+        return _playbook_run(a)
     if a.cmd == "trigger-token":
         from console_kit import triggers as TR
         token, sha = TR.mint()

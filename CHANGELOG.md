@@ -1163,3 +1163,24 @@ All filter state lives inside the sandboxed iframe; nothing round-trips
 to the server. The hint ("drag · wheel to zoom · click to highlight
 downstream") moved to the bottom of the stage so the chip row has
 breathing room.
+
+## `/console-kit:playbook` — run a playbook from any Claude session (0.18.0)
+
+The browser was the only way to run a playbook; now any Claude session
+on the project's machine can.
+
+- New plugin skill **`playbook`** (`/console-kit:playbook <slug>`): the
+  agent reads `view.playbooks`, confirms the slug and the step count,
+  dispatches, and reports `{records, skipped}` from the server.
+- New CLI **`agent.py playbook <name>`** POSTs through the console's
+  agent socket.
+- New agent-door route **`POST /playbook`** calls the same
+  `run_playbook` as the owner door. The agent socket is a user-only
+  Unix socket (0600 in a 0700 dir) — the same trust surface
+  `items-push`, `prs-push`, and `page-snapshot` already use for
+  owner-privileged writes.
+- The nonce is minted from `playbook-slug + current second` so a retry
+  within the same second dedupes on the server. Slash-command runs are
+  not currently logged in the trigger log (that stays scoped to
+  webhook + cron firings — slash-command dispatch is closer to a
+  Delegate-bar click).

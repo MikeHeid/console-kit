@@ -2725,6 +2725,10 @@ class AgentHandler(_Handler):
             if self.path == "/page-snapshot":   # Q28: the ONLY way a page reaches a server; git ran in the steward
                 self.max_body = PS.MAX_BODY   # per instance, safe for the same reason as /history-blob above
                 return self._send(200, self.console.push_page_snapshot(self._body()))
+            if self.path == "/playbook":   # 0.18.0: a session on the owner's machine runs a named playbook
+                # The agent socket is user-only (0600, in a 0700 dir): same trust surface as the owner door
+                # for owner-privileged actions, matching items-push / prs-push / page-snapshot.
+                return self._send(200, self.console.run_playbook(self._body()))
             kind = AGENT_ROUTES.get(self.path)
             if kind is None:
                 return self._send(404, {"error": "not found"})
