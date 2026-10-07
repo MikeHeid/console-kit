@@ -858,6 +858,9 @@
     panelEl.appendChild(renderTabs());
     panelEl.appendChild(renderStatusBar(null));
     panelEl.appendChild(renderDelegateBar());   // Delegate ▾ — orchestrate from anywhere, not only on an item.
+    const trgs = view && Array.isArray(view.triggers) ? view.triggers : [];
+    const log = view && Array.isArray(view.trigger_log) ? view.trigger_log : [];
+    if (trgs.length || log.length) panelEl.appendChild(renderTriggerLog(trgs, log));
 
     // One tab panel; the tab bar above says which view it holds (0.7.0).
     const body = el('div', { className: 'ck-body', role: 'tabpanel', id: 'ck-tabpanel',
@@ -2126,6 +2129,69 @@
       else { openCharts.delete(itemId); }
     });
     if (openCharts.has(itemId)) load();
+    return wrap;
+  }
+
+  // Trigger log (0.16.0): the Inbox shows configured triggers + the last N firings so webhook / cron are
+  // not opaque. The log is bounded in-process (100 entries); older firings drop off on server restart.
+  let triggerLogOpen = false;
+  function renderTriggerLog(triggers, log) {
+    const wrap = el('details', { className: 'ck-item-chart ck-triggers' });
+    if (triggerLogOpen) wrap.setAttribute('open', '');
+    const kinds = (triggers || []).map(t => t.kinds && t.kinds.length
+      ? t.name + ' (' + t.kinds.join('+') + ')'
+      : t.name);
+    const hint = (triggers && triggers.length)
+      ? triggers.length + ' trigger' + (triggers.length === 1 ? '' : 's') +
+        (log.length ? '; ' + log.length + ' recent firing' + (log.length === 1 ? '' : 's') : '; no firings yet')
+      : (log.length ? log.length + ' recent firing' + (log.length === 1 ? '' : 's') : '');
+    const sum = el('summary', { className: 'ck-item-chart-summary' }, [
+      el('span', { className: 'ck-item-chart-title' }, ['Triggers']),
+      el('span', { className: 'ck-muted ck-item-chart-hint' }, [' — ' + hint])
+    ]);
+    wrap.appendChild(sum);
+    wrap.addEventListener('toggle', () => { triggerLogOpen = wrap.open; });
+
+    const body = el('div', { className: 'ck-item-chart-slot' });
+
+    if (triggers.length) {
+      body.appendChild(el('div', { className: 'ck-section-heading' }, ['Configured']));
+      const configured = el('div', { className: 'ck-trigger-configured' });
+      for (const t of triggers) {
+        configured.appendChild(el('div', { className: 'ck-trigger-row' }, [
+          el('code', {}, [t.name]),
+          el('span', { className: 'ck-muted' }, [' → playbook ']),
+          el('code', {}, [t.playbook]),
+          el('span', { className: 'ck-muted' }, [t.kinds && t.kinds.length ? '  (' + t.kinds.join(' + ') + ')' : '']),
+        ]));
+      }
+      body.appendChild(configured);
+    }
+
+    if (log.length) {
+      body.appendChild(el('div', { className: 'ck-section-heading' }, ['Recent firings']));
+      const list = el('ol', { className: 'ck-trigger-log', 'aria-label': 'Recent trigger firings, newest first' });
+      for (const row of log) {
+        const li = el('li', { className: 'ck-trigger-log-row' });
+        li.appendChild(el('span', { className: 'ck-trigger-log-time' }, [relTime(row.ts) || row.ts || '?']));
+        li.appendChild(el('code', { className: 'ck-trigger-log-name' }, [row.name || '?']));
+        li.appendChild(el('span', { className: 'ck-muted' }, [' (' + (row.kind || '?') + ') · ']));
+        li.appendChild(el('span', {}, [(row.records || 0) + ' step' + ((row.records || 0) === 1 ? '' : 's')]));
+        if (row.skipped) {
+          li.appendChild(el('span', { className: 'ck-muted' }, ['  · ' + row.skipped + ' skipped']));
+        }
+        if (row.error) {
+          li.appendChild(el('div', { className: 'ck-trigger-log-err' }, ['error: ' + row.error]));
+        }
+        list.appendChild(li);
+      }
+      body.appendChild(list);
+    } else if (!triggers.length) {
+      body.appendChild(el('p', { className: 'ck-muted' },
+        ['Add .console-kit/triggers.json to arm webhook or cron triggers.']));
+    }
+
+    wrap.appendChild(body);
     return wrap;
   }
 

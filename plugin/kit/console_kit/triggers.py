@@ -76,13 +76,18 @@ class Trigger:
         return {"name": self.name, "playbook": self.playbook, "kinds": kinds}
 
 
+HISTORY_LIMIT = 100   # most-recent firings kept in-process (bounded ring); older ones drop off
+
+
 class Store:
-    """Thread-safe in-process registry + rate limiter."""
+    """Thread-safe in-process registry + rate limiter + firing history (0.16.0)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._triggers: dict[str, Trigger] = {}
         self._last_fired: dict[str, float] = {}
+        import collections
+        self._history: collections.deque = collections.deque(maxlen=HISTORY_LIMIT)
 
     def set_all(self, triggers: dict[str, Trigger]) -> None:
         with self._lock:
@@ -105,6 +110,19 @@ class Store:
                 return last + MIN_INTERVAL_S
             self._last_fired[name] = now
             return None
+
+    def log(self, name: str, kind: str, ts: str, records: int, skipped: int, error: str | None = None) -> None:
+        """Append one firing record to the in-process history ring, newest-first on reads via `recent`."""
+        with self._lock:
+            self._history.append({"name": name, "kind": kind, "ts": ts,
+                                  "records": records, "skipped": skipped, "error": error})
+
+    def recent(self, limit: int = 20) -> list[dict]:
+        """The newest `limit` firings, newest first."""
+        with self._lock:
+            items = list(self._history)
+        items.reverse()
+        return items[: max(1, min(HISTORY_LIMIT, limit))]
 
 
 def load(root: Path) -> dict[str, Trigger]:

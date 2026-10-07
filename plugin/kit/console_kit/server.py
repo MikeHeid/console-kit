@@ -152,6 +152,12 @@ _MERMAID_JS_CACHE: tuple[bytes, int] | None = None
 _CYTOSCAPE_JS_CACHE: tuple[bytes, int] | None = None
 
 
+def _iso_now() -> str:
+    """UTC timestamp in the same ISO-8601-Z shape the store uses."""
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _mermaid_js_bytes() -> bytes:
     """Return the vendored mermaid.min.js, cached per server process. FileNotFoundError when it is not present."""
     global _MERMAID_JS_CACHE
@@ -947,6 +953,7 @@ class Console:
                           "sections": self.project.sections}
         view["playbooks"] = [p.to_dict() for p in PB.load(self.cfg.root).values()]
         view["triggers"] = [t.to_public() for t in self.triggers.all().values()]
+        view["trigger_log"] = self.triggers.recent(20)
         view["favorites"] = self.favorites.list()   # 0.8.19: starred keys, newest first
         pushed = getattr(self.adapter, "pushed", None)
         if getattr(self.adapter, "problem", None):   # the items() above already read (and logged) it
@@ -1084,14 +1091,25 @@ class Console:
         """0.15.0: fire a trigger from the clock. Bypasses the webhook rate-limit (cron is self-rate-limited
         by minute granularity) and the token check (cron is a server-local firing). Same final path as
         `fire_trigger`: run_playbook with a nonce derived from the trigger name + minute, so a repeated
-        tick in the same minute is a no-op on the server too.
+        tick in the same minute is a no-op on the server too. 0.16.0: log the firing in the Store so the
+        Inbox UI can show it.
         """
         import time as _t
         trigger = self.triggers.get(name)
         if trigger is None or trigger.cron is None:
             raise RequestError(404, f"no cron trigger named {name!r}")
         nonce = f"cron-{name}-{int(_t.time()) // 60}"
-        return self.run_playbook({"name": trigger.playbook, "nonce": nonce})
+        err: str | None = None
+        try:
+            out = self.run_playbook({"name": trigger.playbook, "nonce": nonce})
+        except RequestError as e:
+            err = str(e)
+            out = {"records": [], "skipped": []}
+        self.triggers.log(name, "cron", _iso_now(), len(out.get("records", [])),
+                          len(out.get("skipped", [])), err)
+        if err:
+            raise RequestError(500, err)
+        return out
 
     def fire_trigger(self, name: str, token: str | None) -> dict:
         """0.12.0: an external HTTP call fires a trigger, which runs its playbook.
@@ -1114,7 +1132,17 @@ class Console:
                                      f"{int(next_at)}")
         # Re-use the playbook path; mint a nonce from the trigger name + now so a retry is idempotent.
         nonce = f"trg-{name}-{int(_t.time())}"
-        return self.run_playbook({"name": trigger.playbook, "nonce": nonce})
+        err: str | None = None
+        try:
+            out = self.run_playbook({"name": trigger.playbook, "nonce": nonce})
+        except RequestError as e:
+            err = str(e)
+            out = {"records": [], "skipped": []}
+        self.triggers.log(name, "webhook", _iso_now(), len(out.get("records", [])),
+                          len(out.get("skipped", [])), err)
+        if err:
+            raise RequestError(500, err)
+        return out
 
     def favorite_toggle(self, body: object) -> dict:
         """Toggle `body['id']` in STATE/favorites.json; return the new state and the keys.
