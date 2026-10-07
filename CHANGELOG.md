@@ -918,3 +918,32 @@ the tag styling for every state the view emits.
 - A host page's own `:root` still wins (unlayered rules beat layered),
   so projects that already define Primer-aligned tokens see no change;
   projects that define a different palette see their own values.
+
+## Dashboard section links, Direction strip, immediate lock (0.9.12)
+
+- **Dashboard section links.** `.console-kit.json` gains an optional
+  `sections` map: `{"AB-2": ["#features/rollout", "#features/timeline"]}`.
+  Each item id maps to one or more `#anchor` fragments on the dashboard
+  page. The item view renders them as "Dashboard: #features/rollout →"
+  chips that break out of the console frame to the dashboard page. Up
+  to 16 anchors per item; schema refuses bad shapes by name at server
+  start. The server does not resolve them against the page HTML — it is
+  pass-through.
+- **A `[data-ck-item="X"]` on the host page gets a live badge** injected
+  by `console.js` on every live wake: `"X  ◐ 2  ◑ 1  ◌ 3  ○ 4"` (short
+  tallies by state). Click the badge to open the panel on that item.
+  The badge updates in place on each live wake.
+- **Direction strip under each question's text.** Four kinds of chip,
+  each wearing a direction glyph: `↑ from round <id>` (forked_from),
+  `← supersedes <qid>` (what this ruling replaces), `→ superseded by
+  <qid>` (what replaced it), `↳ <path>` (every file an evidence row
+  cites, de-duplicated). The supersedes/superseded-by chips are
+  clickable and scroll to that question's card in the panel. All
+  chip data is already in the view JSON; no new endpoint.
+- **The 5-second lock countdown is gone.** `Lock this answer` now sends
+  immediately. The countdown apparatus (`renderLockCountdown`,
+  `tickLock`, `setCountdown`, `undoLock`, `sendLock`, `pendingLocks`,
+  `.ck-lock-countdown` CSS) is removed; `dropAllLocks` /
+  `dropLocksNotOnShow` are no-op stubs so the existing pagehide /
+  visibilitychange listeners don't need changing. Server-side
+  lock-processing is unchanged.
