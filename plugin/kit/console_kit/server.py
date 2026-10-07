@@ -83,6 +83,7 @@ from . import gitseam as G
 from . import items as IT
 from . import pagesnap as PS
 from . import playbooks as PB
+from . import triggers as TR
 from . import prs as PR
 from . import names as N
 from . import projectcfg as PC
@@ -739,6 +740,8 @@ class Console:
         self.store = Store(cfg.store)
         self.names = N.Names(cfg.state)   # 0.8.2: record id -> agent name, beside the store
         self.favorites = FV.Favorites(cfg.state)   # 0.8.19: the owner's starred visuals and items
+        self.triggers = TR.Store()                 # 0.12.0: external-webhook triggers → playbooks
+        self.triggers.set_all(TR.load(cfg.root))   # malformed config refuses the start, by name
         self._lock = threading.Lock()
         self._working_lock = threading.Lock()   # working.json is read, changed and replaced by several agents
         # The live console (0.7.0): every change a page could show bumps `_epoch`
@@ -849,6 +852,7 @@ class Console:
         view["config"] = {"specs_dir": self.project.specs_dir, "visuals_dir": self.project.visuals_dir,
                           "sections": self.project.sections}
         view["playbooks"] = [p.to_dict() for p in PB.load(self.cfg.root).values()]
+        view["triggers"] = [t.to_public() for t in self.triggers.all().values()]
         view["favorites"] = self.favorites.list()   # 0.8.19: starred keys, newest first
         pushed = getattr(self.adapter, "pushed", None)
         if getattr(self.adapter, "problem", None):   # the items() above already read (and logged) it
@@ -945,6 +949,27 @@ class Console:
                 continue
             records.append(rec)
         return {"records": records, "skipped": skipped}
+
+    def fire_trigger(self, name: str, token: str | None) -> dict:
+        """0.12.0: an external HTTP call fires a trigger, which runs its playbook.
+
+        Three guards here: trigger exists → bearer token matches sha256 → rate limit allows. Beyond that
+        this is the same path as `run_playbook`: writes land as owner messages, the doorbell rings, the
+        view updates. Returns {records, skipped} like `run_playbook`.
+        """
+        trigger = self.triggers.get(name)
+        if trigger is None:
+            raise RequestError(404, f"no trigger named {name!r}")
+        if not TR.token_matches(trigger, token or ""):
+            raise RequestError(401, "the trigger token is missing or wrong")
+        import time as _t
+        next_at = self.triggers.claim(name, _t.time())
+        if next_at is not None:
+            raise RequestError(429, f"trigger {name!r} is rate-limited; next firing allowed at epoch "
+                                     f"{int(next_at)}")
+        # Re-use the playbook path; mint a nonce from the trigger name + now so a retry is idempotent.
+        nonce = f"trg-{name}-{int(_t.time())}"
+        return self.run_playbook({"name": trigger.playbook, "nonce": nonce})
 
     def favorite_toggle(self, body: object) -> dict:
         """Toggle `body['id']` in STATE/favorites.json; return the new state and the keys.
@@ -2292,6 +2317,25 @@ class OwnerHandler(_Handler):
         data, ctype, csp = self.console.item_chart(item, nonce)
         self._send_raw(200, data, ctype, csp)
 
+    def _fire_trigger(self, name: str) -> None:
+        """0.12.0: an external HTTP call fires a named trigger → runs its playbook. Bearer-token auth."""
+        if not isinstance(name, str) or not TR.NAME.match(name):
+            return self._send(400, {"error": "the trigger name is lowercase letters, digits, '_' or '-' "
+                                             "(1-64), with no path components"})
+        # Pull the token from Authorization: Bearer <...> or X-Console-Trigger-Token.
+        token = TR.token_from_header(self.headers.get("Authorization"),
+                                     self.headers.get("X-Console-Trigger-Token"))
+        # The body is read-and-discarded (not interpreted in MVP; MAX_BODY cap stays in effect).
+        try:
+            self._body()
+        except RequestError as e:
+            return self._send(e.code, {"error": str(e)})
+        try:
+            result = self.console.fire_trigger(name, token)
+        except RequestError as e:
+            return self._send(e.code, {"error": str(e)})
+        self._send(200, result)
+
     def _project_chart(self, query: dict[str, str]) -> None:
         """0.8.19: a Mermaid tree of every item, optionally narrowed to one state (plus ancestors)."""
         self._only(query, {"state"}, "/api/project-chart")
@@ -2331,6 +2375,11 @@ class OwnerHandler(_Handler):
     def do_POST(self) -> None:
         if not self._gate():
             return
+        # 0.12.0: external-webhook triggers. The path's suffix names the trigger; the bearer token is the
+        # per-trigger acceptor. Access service tokens handle the perimeter (configured on the Access app),
+        # so the regular Origin check is skipped — a cron.io or GitHub Worker call has no browser Origin.
+        if self.path.startswith("/api/trigger/"):
+            return self._fire_trigger(self.path[len("/api/trigger/"):])
         kind = OWNER_ROUTES.get(self.path)
         if kind is None and self.path not in ("/api/relock", "/api/lock-all", "/api/page-publish",
                                               "/api/refactor", OWNER_FAVORITE, OWNER_PLAYBOOK):

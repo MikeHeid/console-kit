@@ -1061,6 +1061,8 @@ def main(argv=None) -> int:
                    help="0.9.13: after a successful push, insert a <details data-ck-item=...> stub into PAGE "
                         "for every item not already there (idempotent, nested by parent). You still commit "
                         "and run page-snapshot yourself.")
+    sub.add_parser("trigger-token", description="0.12.0: mint a fresh bearer token and its sha256 for a "
+                   "trigger. Print the plaintext (for the sender) and the sha256 (for triggers.json).")
     s = sub.add_parser("sync-dashboard", description="0.9.13: insert a <details id=item-X data-ck-item=X> stub "
                        "into the dashboard page for every item not already there. Nested by parent via per-item "
                        "markers so re-runs preserve hand-edits inside each node.")
@@ -1208,6 +1210,18 @@ def _run(a, bell: Path) -> int:
         return _scaffold_dashboard(a)
     if a.cmd == "sync-dashboard":
         return _sync_dashboard(a)
+    if a.cmd == "trigger-token":
+        from console_kit import triggers as TR
+        token, sha = TR.mint()
+        print("Token (give to the sender — this is the plaintext):")
+        print(f"  {token}")
+        print()
+        print("Put this in .console-kit/triggers.json under the trigger's token_sha256:")
+        print(f"  {sha}")
+        print()
+        print("The sender calls POST /api/trigger/<name> with")
+        print(f"  Authorization: Bearer {token}")
+        return 0
     if a.cmd == "history-push":
         return _history_push(a)
     if a.cmd == "prs-push":
