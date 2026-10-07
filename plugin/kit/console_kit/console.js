@@ -1306,6 +1306,8 @@
       body.appendChild(renderItemTools(itemId));
       // 0.8.19: a status flowchart for the whole item, lazy-loaded on expand, re-rendered on live wake.
       if (qs.length > 0) body.appendChild(renderItemChart(itemId));
+      // 0.14.0: interactive impact graph (Cytoscape), collapsed by default.
+      if (qs.length > 0) body.appendChild(renderItemImpact(itemId));
 
       if (qs.length > 0) {
         body.appendChild(el('div', { className: 'ck-section-heading ck-questions-heading' }, ['Questions']));
@@ -2124,6 +2126,38 @@
       else { openCharts.delete(itemId); }
     });
     if (openCharts.has(itemId)) load();
+    return wrap;
+  }
+
+  // Impact graph (Cytoscape, 0.14.0): item + its ancestors + questions + cited files + mapped sections.
+  // Click a node to highlight downstream; click an item/question node again to navigate (postMessage).
+  const openImpact = new Set();
+  function renderItemImpact(itemId) {
+    const wrap = el('details', { className: 'ck-item-chart', dataItem: itemId });
+    if (openImpact.has(itemId)) wrap.setAttribute('open', '');
+    const sum = el('summary', { className: 'ck-item-chart-summary' }, [
+      el('span', { className: 'ck-item-chart-title' }, ['Impact graph']),
+      el('span', { className: 'ck-muted ck-item-chart-hint' }, [
+        ' — questions, cited files, sections (drag to rearrange, click to highlight downstream)'
+      ])
+    ]);
+    wrap.appendChild(sum);
+    const slot = el('div', { className: 'ck-item-chart-slot' });
+    wrap.appendChild(slot);
+    const load = () => {
+      if (slot.querySelector('iframe')) return;
+      const frame = document.createElement('iframe');
+      frame.setAttribute('sandbox', 'allow-scripts');
+      frame.setAttribute('referrerpolicy', 'no-referrer');
+      frame.setAttribute('title', 'Impact graph: ' + itemId);
+      frame.className = 'ck-visual-frame ck-visual-frame-mermaid ck-item-chart-frame';
+      frame.src = config.api + '/impact-graph?item=' + encodeURIComponent(itemId);
+      slot.appendChild(frame);
+    };
+    wrap.addEventListener('toggle', () => {
+      if (wrap.open) { openImpact.add(itemId); load(); } else { openImpact.delete(itemId); }
+    });
+    if (openImpact.has(itemId)) load();
     return wrap;
   }
 
