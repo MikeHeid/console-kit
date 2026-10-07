@@ -1670,3 +1670,43 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 .ck-trigger-log-err {
   margin-top: 4px; color: var(--c-blocked); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
+
+/* 0.19.0: Portfolio tab — one card per peer with state tallies, click to open the peer in a new tab. */
+.ck-portfolio { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
+.ck-portfolio-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+.ck-portfolio-notify, .ck-portfolio-dnd {
+  padding: 4px 10px; border-radius: 999px; border: 1px solid var(--c-border);
+  background: var(--c-surface); color: var(--c-fg); font-size: 12px; cursor: pointer;
+}
+.ck-portfolio-notify:hover, .ck-portfolio-dnd:hover,
+.ck-portfolio-notify:focus-visible, .ck-portfolio-dnd:focus-visible {
+  background: var(--c-surface-alt); outline: none;
+}
+.ck-portfolio-grid {
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+.ck-portfolio-card {
+  padding: 10px 12px; border: 1px solid var(--c-border); border-radius: var(--radius-sm);
+  background: var(--c-surface); display: flex; flex-direction: column; gap: 6px;
+  transition: border-color .1s ease, background .1s ease;
+}
+.ck-portfolio-card:hover:not(.ck-portfolio-self),
+.ck-portfolio-card:focus-visible { border-color: var(--c-accent); outline: none; }
+.ck-portfolio-self { background: var(--c-surface-alt); }
+.ck-portfolio-err-card { border-color: var(--c-blocked); }
+.ck-portfolio-head { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; }
+.ck-portfolio-name { font-weight: 600; font-size: 14px; }
+.ck-portfolio-tag {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .5px;
+  color: var(--c-fg-muted); background: var(--c-surface); border: 1px solid var(--c-border);
+  padding: 1px 6px; border-radius: 999px;
+}
+.ck-portfolio-tallies { display: flex; flex-wrap: wrap; gap: 6px 10px; font-size: 12px; }
+.ck-portfolio-tally { color: var(--c-fg-muted); font-variant-numeric: tabular-nums; }
+.ck-portfolio-tally[data-zero="false"] { color: var(--c-fg); }
+.ck-portfolio-tally[data-kind="awaiting-you"][data-zero="false"] b { color: var(--c-accent); }
+.ck-portfolio-tally[data-kind="stale"][data-zero="false"] b { color: var(--c-blocked); }
+.ck-portfolio-tally b { font-weight: 700; }
+.ck-portfolio-foot { font-size: 12px; color: var(--c-fg-muted); display: flex; gap: 4px; }
+.ck-portfolio-errline { color: var(--c-blocked); font-size: 12px; }

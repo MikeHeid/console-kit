@@ -1184,3 +1184,38 @@ on the project's machine can.
   not currently logged in the trigger log (that stays scoped to
   webhook + cron firings — slash-command dispatch is closer to a
   Delegate-bar click).
+
+## Browser Portfolio (0.19.0)
+
+For an owner across several projects, one browser tab now shows every
+console at a glance and alerts the OS when a sibling needs them.
+
+- **Portfolio tab** between **Favorite** and **Chat**: one card per
+  configured peer plus the local console, with the state tallies
+  (`?you ~unl !stale ○lock`, plus `◫vis` when a visual is waiting),
+  relative last-activity, and a click that opens that peer's console
+  in a new tab. Peers that are unreachable show the error on the card
+  rather than disappearing.
+- **Desktop notifications (opt-in)**: a bell button asks the browser
+  for Notification permission; thereafter a peer's `?you` or `!stale`
+  going up fires one OS notification per peer, deduped at 60 s, with
+  click-to-open. A Snooze button sets a 1-hour DND lid, so a push
+  during off-hours stays silent.
+- **Portfolio tab note**: `N ?you` sums the `awaiting_you` across all
+  peers plus self, so the roll-up is visible from any other tab.
+- **How peers talk to the home server**: `.console-kit/portfolio.json`
+  committed in the repo lists each peer's URL, Cloudflare Access
+  service-token `client_id`, and the **sha256** of its secret. The
+  plaintext secret lives in `STATE/portfolio-secrets/<peer>.json`
+  (0600, out of the repo). The home server reads it, hashes it,
+  compares, and uses the pair to call each peer's new
+  `GET /api/portfolio-slim` (owner-gated, Access-authed) through the
+  owner's own `GET /api/portfolio`, which the browser then renders. A
+  rotated secret whose sha drifts from the committed config fails
+  loudly rather than silently. Peer rows carry only counts and
+  timestamps; no owner view content leaves a peer.
+- **New CLI** `agent.py portfolio-token` prints the two-file layout
+  the owner fills in by hand.
+- **Caching + timeouts**: peer fetches are capped at 4 s and cached
+  in-process for 5 s, so one slow peer never blocks the aggregator;
+  the browser also polls softly (30 s) while the tab is open.

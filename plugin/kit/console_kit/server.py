@@ -87,6 +87,7 @@ from . import playbooks as PB
 from . import triggers as TR
 from . import prs as PR
 from . import names as N
+from . import peers as PE
 from . import projectcfg as PC
 from . import publish as P
 from . import refactor as RX
@@ -893,6 +894,7 @@ class Console:
         self._cron_stop = threading.Event()        # 0.15.0: minute-tick thread for scheduled triggers
         self._cron_thread = threading.Thread(target=self._cron_tick_loop, name="ck-cron", daemon=True)
         self._cron_thread.start()
+        self._portfolio = PE.Aggregator(cfg.state)  # 0.19.0: aggregates peer slim views for the Portfolio tab
         self._lock = threading.Lock()
         self._working_lock = threading.Lock()   # working.json is read, changed and replaced by several agents
         # The live console (0.7.0): every change a page could show bumps `_epoch`
@@ -1352,6 +1354,54 @@ class Console:
     def cytoscape_js(self) -> bytes:
         """0.14.0: the vendored Cytoscape library bytes."""
         return _cytoscape_js_bytes()
+
+    def portfolio_slim(self) -> dict:
+        """0.19.0: a small JSON summary of THIS console, for a home console's portfolio aggregator.
+
+        Never includes owner content — just counts + the last-activity timestamp.
+        """
+        payload = self.payload()
+        view = payload.get("view") or {}
+        items = payload.get("items") or {}
+        awaiting_you = unlocked = locked = stale = 0
+        last_ts: str | None = None
+        for q in (view.get("questions") or {}).values():
+            s = q.get("state") or "unlocked"
+            if s == "awaiting_you": awaiting_you += 1
+            elif s == "unlocked": unlocked += 1
+            elif s == "locked": locked += 1
+            elif s == "stale": stale += 1
+            ts = (q.get("question") or {}).get("ts")
+            if isinstance(ts, str) and (last_ts is None or ts > last_ts):
+                last_ts = ts
+        visuals_waiting = len((view.get("waiting_visuals") or []))
+        return {"project": self.cfg.project, "items": len(items),
+                "awaiting_you": awaiting_you, "unlocked": unlocked, "locked": locked, "stale": stale,
+                "visuals_waiting": visuals_waiting, "last_activity_at": last_ts}
+
+    def portfolio(self) -> dict:
+        """0.19.0: aggregate this console's slim view with every configured peer's.
+
+        Peers come from `.console-kit/portfolio.json`; secrets from STATE/portfolio-secrets/<peer>.json.
+        A peer that fails to load (bad config, bad secret) or fails to answer surfaces as an error row
+        — never breaks the aggregator for other peers. Cached per peer with a short TTL.
+        """
+        try:
+            peers = PE.load(self.cfg.root)
+        except PE.PeersError as e:
+            peers = {}
+            self_err = str(e)
+        else:
+            self_err = None
+        try:
+            mine: dict = {**self.portfolio_slim(), "ok": True}
+        except Exception as e:  # noqa: BLE001
+            mine = {"ok": False, "error": f"this console: {e}", "project": self.cfg.project}
+        peer_rows = [self._portfolio.fetch_slim(peer) for peer in peers.values()]
+        out: dict = {"self": mine, "peers": peer_rows}
+        if self_err:
+            out["config_error"] = self_err
+        return out
 
     def mermaid_js(self) -> bytes:
         """0.8.19: the vendored Mermaid library bytes; raises FileNotFoundError when it is not installed."""
@@ -2449,6 +2499,14 @@ class OwnerHandler(_Handler):
                 return self._send(503, {"error": "the vendored cytoscape.min.js is not installed"})
             return self._send_raw(200, data, "application/javascript; charset=utf-8",
                                   "default-src 'none'; frame-ancestors 'self'")
+        if self.path == "/api/portfolio-slim":   # 0.19.0: tiny summary emitted TO a home console's aggregator
+            return self._send(200, self.console.portfolio_slim())
+        if self.path == "/api/portfolio":        # 0.19.0: home-console aggregator across every peer
+            try:
+                return self._send(200, self.console.portfolio())
+            except Exception as e:  # noqa: BLE001 — the whole aggregator never faults the gate
+                sys.stderr.write(f"console portfolio: {type(e).__name__}: {e}\n")
+                return self._send(503, {"error": "the portfolio could not be assembled just now"})
         route, query = self._query()
         if route == "/api/project-chart" and query is not None:
             return self._project_chart(query)

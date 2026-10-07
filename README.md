@@ -290,6 +290,15 @@ server cannot check it.
   question a title or branch names. The steward pushes the list
   (`agent.py prs-push`), and the tab says when it last did.
 - The **Favorite** tab lists everything you starred, grouped by item.
+- The **Portfolio** tab lists every other console you have configured, with
+  its state tallies (`?you ~unl !stale ○lock`), last-activity and a click
+  that opens it in a new tab. A bell button opts in to desktop
+  notifications so a sibling's new `?you` or `!stale` reaches you even
+  when the tab is in the background; a Snooze button sets a 1-hour DND
+  lid. Peers are declared in `.console-kit/portfolio.json`; the Cloudflare
+  Access service-token secrets live in `STATE/portfolio-secrets/<peer>.json`
+  (`agent.py portfolio-token` prints the layout). The home server does the
+  cross-origin calls, so the browser never sees a peer's secret.
 - A **Back** control sits at the top of every item view, so **discuss** from
   the dashboard always has a one-tap way home.
 - **Direction stays visible.** Each item in the Inbox carries a collapsible

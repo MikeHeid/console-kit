@@ -1189,6 +1189,9 @@ def main(argv=None) -> int:
                         "and run page-snapshot yourself.")
     sub.add_parser("trigger-token", description="0.12.0: mint a fresh bearer token and its sha256 for a "
                    "trigger. Print the plaintext (for the sender) and the sha256 (for triggers.json).")
+    sub.add_parser("portfolio-token", description="0.19.0: print the layout the operator uses to wire a "
+                   "Cloudflare Access service token into .console-kit/portfolio.json + "
+                   "STATE/portfolio-secrets/<peer>.json so the home console can fetch a peer's slim view.")
     s = sub.add_parser("portfolio", description="0.13.0: list every project registered on this machine with "
                        "its open-question backlog read from each STATE directly. Read-only; no HTTP calls.")
     s.add_argument("--json", action="store_true", help="emit JSON instead of a table")
@@ -1347,6 +1350,21 @@ def _run(a, bell: Path) -> int:
         return _portfolio(a)
     if a.cmd == "playbook":
         return _playbook_run(a)
+    if a.cmd == "portfolio-token":
+        import hashlib as _h
+        print("Create a service token in Cloudflare Zero Trust → Access → Service Auth.")
+        print("Attach it to each PEER console's Access application (inbound ACL).")
+        print()
+        print("Then on the HOME console's machine, write STATE/portfolio-secrets/<peer>.json (0600):")
+        print('  {"client_secret": "<the-plaintext-secret-from-Cloudflare>"}')
+        print()
+        print("Compute sha256(client_secret) with:")
+        print("  sha256=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.read().strip().encode()).hexdigest())' < secret.txt)")
+        print()
+        print('Then paste into .console-kit/portfolio.json alongside the Cloudflare client_id:')
+        print('  "peers": {"<peer-name>": {"url": "https://peer-console.example.com",')
+        print('                             "client_id": "...access", "token_sha256": "..."}}')
+        return 0
     if a.cmd == "trigger-token":
         from console_kit import triggers as TR
         token, sha = TR.mint()
