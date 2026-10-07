@@ -947,3 +947,21 @@ the tag styling for every state the view emits.
   `dropLocksNotOnShow` are no-op stubs so the existing pagehide /
   visibilitychange listeners don't need changing. Server-side
   lock-processing is unchanged.
+
+## Auto-insert item sections into the dashboard tree (0.9.13)
+
+- **`agent.py sync-dashboard --page <path>`** inserts a
+  `<details id="item-X" data-ck-item="X"><summary>…</summary></details>`
+  stub into the dashboard page for every item not already there, nested
+  under its parent via per-item `<!-- ck:item X start/end -->` markers
+  with a `<!-- ck:children X -->` insertion point inside each parent's
+  `<details>`. Idempotent: re-runs only add new items, and hand-edits
+  inside each node survive.
+- **`agent.py items-push --sync-dashboard <path>`** chains the two
+  steps so new lanes/phases/waves land on the dashboard in the same
+  command as the push. The agent still commits + runs page-snapshot;
+  no server-side mutation of the project.
+- Items whose parent is not (yet) in the tree are inserted at the top
+  of the ck:items block. Smoke-tested: 5-item tree with grandchildren,
+  idempotent re-sync, add-child-under-existing-parent, hand-edit
+  preservation, and orphan placement.

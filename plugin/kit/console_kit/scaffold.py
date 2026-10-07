@@ -270,3 +270,80 @@ def _adapter_write(current: str) -> str | None:
         return None
     snippet = _BOARD_SNIPPET.format(mark=BOARD_MARK, end=BOARD_END, shape=BOARD_SHAPE)
     return current.rstrip() + "\n" + snippet
+
+
+# -- items tree sync -------------------------------------------------------------------
+# Insert a <details id="item-X" data-ck-item="X"> for every item not already on the page, nesting children
+# under their parent. Per-item markers (ck:item X start/end) let a re-sync preserve hand-edits inside each
+# node AND nest a late-arriving child under its existing parent.
+
+ITEMS_START = "<!-- ck:items start -->"
+ITEMS_END = "<!-- ck:items end -->"
+_ITEM_MARK = re.compile(r"<!--\s*ck:item\s+([A-Za-z0-9][A-Za-z0-9_.\-]{0,127})\s+start\s*-->")
+
+
+def sync_items_block(page_text: str, items: dict) -> tuple[str, list[str]]:
+    """Return (new page text, list of newly inserted item ids). Idempotent.
+
+    `items` is {item_id: {"title": str, "parent": id|None, ...}}. For items not already represented inside
+    the ck:items block, a `<details id="item-X" data-ck-item="X">` is inserted under its parent's details,
+    or at the top of the block when the parent is not (yet) in the tree. Existing items are left alone.
+    """
+    s, e = page_text.find(ITEMS_START), page_text.find(ITEMS_END)
+    if s == -1 or e == -1 or e < s:
+        page_text = _insert_items_block(page_text)
+        s, e = page_text.find(ITEMS_START), page_text.find(ITEMS_END)
+    present = set(_ITEM_MARK.findall(page_text[s:e]))
+    # Order: parents before children. Items with a missing-ancestor stay at top level.
+    missing = [k for k in items if k not in present]
+    missing.sort(key=lambda k: _depth(k, items))
+    added: list[str] = []
+    for item_id in missing:
+        page_text = _insert_item(page_text, item_id, items[item_id] or {}, items, present)
+        present.add(item_id)
+        added.append(item_id)
+    return page_text, added
+
+
+def _depth(item_id: str, items: dict, seen: tuple = ()) -> int:
+    if item_id in seen:
+        return 0
+    parent = (items.get(item_id) or {}).get("parent")
+    if not parent or parent not in items:
+        return 0
+    return 1 + _depth(parent, items, seen + (item_id,))
+
+
+def _node_html(item_id: str, data: dict) -> str:
+    title = (data.get("title") or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # The ck:children marker inside each parent's <details> body is where children's blocks get inserted,
+    # so a child really nests inside its parent's details element. Hand edits around it survive re-syncs.
+    return (
+        f"<!-- ck:item {item_id} start -->\n"
+        f'<details id="item-{item_id}" data-ck-item="{item_id}">\n'
+        f'  <summary><code>{item_id}</code> — {title}</summary>\n'
+        f"  <!-- ck:children {item_id} -->\n"
+        f"</details>\n"
+        f"<!-- ck:item {item_id} end -->\n"
+    )
+
+
+def _insert_item(page: str, item_id: str, data: dict, items: dict, present: set) -> str:
+    html = _node_html(item_id, data)
+    parent = data.get("parent")
+    if parent and parent in present:
+        hole = f"<!-- ck:children {parent} -->"
+        at = page.find(hole)
+        if at != -1:
+            # Insert immediately BEFORE the parent's children marker: nests inside its <details>.
+            return page[:at] + html + page[at:]
+    at = page.find(ITEMS_END)
+    return page[:at] + html + page[at:]
+
+
+def _insert_items_block(page: str) -> str:
+    block = f"\n{ITEMS_START}\n{ITEMS_END}\n"
+    at = page.find("</body>")
+    if at == -1:
+        return page.rstrip() + block
+    return page[:at] + block + page[at:]
