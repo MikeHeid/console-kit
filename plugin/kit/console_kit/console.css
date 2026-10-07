@@ -1621,3 +1621,31 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   background: var(--c-accent); color: var(--c-accent-fg); border-color: var(--c-accent);
   outline: none;
 }
+
+/* Delegate bar in the Inbox header area: a collapsed <details> that opens into a quick dispatch form. */
+.ck-delegate-bar {
+  margin: 8px 16px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+}
+.ck-delegate-summary {
+  padding: 8px 12px;
+  cursor: pointer; list-style: none;
+  font-size: 13px; font-weight: 600;
+}
+.ck-delegate-summary::-webkit-details-marker { display: none; }
+.ck-delegate-summary::before { content: '▸ '; display: inline-block; width: 1em; color: var(--c-fg-muted); }
+.ck-delegate-bar[open] .ck-delegate-summary::before { content: '▾ '; }
+.ck-delegate-summary:hover, .ck-delegate-summary:focus-visible {
+  background: var(--c-surface-alt); outline: none;
+}
+.ck-delegate-icon { color: var(--c-accent); }
+.ck-delegate-hint { font-weight: 400; }
+.ck-delegate-body { padding: 8px 12px 12px; display: grid; gap: 8px; }
+.ck-del-roundrow[hidden] { display: none; }
+.ck-delegate-status {
+  margin-left: 10px; font-size: 12px;
+  color: var(--c-blocked);
+}
+.ck-delegate-status[hidden] { display: none; }

@@ -985,3 +985,18 @@ the tag styling for every state the view emits.
   `UserPromptSubmit` (`name_session.py`) and `PreToolUse`
   (`ask_guard.py`). Replaced the stale "undo for five seconds" bullet
   to match 0.9.12's immediate lock.
+
+## Delegate — orchestrate from the Inbox (0.10.0)
+
+The owner can already start a round, request a visual, or send a chat
+from the item view. 0.10.0 makes the same primitives one click from
+the Inbox header, so orchestration doesn't require opening an item
+first. A collapsed **⚑ Delegate** bar above the tabs expands into a
+quick form: pick kind (round / visual / chat), target item, mode +
+focus (for rounds), and a free-text brief. Submits to the existing
+`/api/message` endpoint — no new server routes.
+
+This is step 1 of the "ultimate web orchestrator" arc. On deck:
+0.11 playbooks (codified multi-step delegations), 0.12 triggers
+(cron + webhooks that fire delegations), 0.13 cross-project overview,
+0.14 impact graph (Cytoscape).
