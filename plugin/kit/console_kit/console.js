@@ -2446,7 +2446,7 @@
     box.appendChild(cols);
     const go = el('button', { className: 'ck-btn ck-btn-primary ck-confirm-proposal', type: 'button',
       'aria-label': 'Confirm the proposed anchor for ' + qid }, ['Confirm this anchor']);
-    // 0.9.10: show the server's refusal (409 or other) inline below Confirm, so the owner sees why.
+    // Show the server's refusal (409 or other) inline below Confirm, so the owner sees why.
     // Before this, only announce() fired, which many viewers never see.
     const err = el('div', { className: 'ck-confirm-error', role: 'alert', hidden: 'hidden' });
     go.addEventListener('click', async () => {

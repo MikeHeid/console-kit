@@ -867,7 +867,7 @@ family as the Access-cookie trap: subresources silently fail to render.
 
 ## Fix: a re-anchor proposal could never be confirmed when a kept excerpt went non-unique (0.9.10)
 
-Reported from gradiance-console (AB-findanchors/Q1, lock `3f1e5e31…`): a
+Reported from a user project (AB-findanchors/Q1, lock `3f1e5e31…`): a
 ruling with two excerpts went stale because excerpt #1 was removed; the
 steward proposed a new anchor for #1; `propose_anchor` kept excerpt #2
 (still holds) in the proposal; Confirm 409'd forever because excerpt

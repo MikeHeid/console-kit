@@ -82,7 +82,7 @@ Without it, the live values are as fresh as the last manual `items-push`.
 
 ## What good looks like
 
-The sections in the scaffold match the gradiance-console shape (dashboard,
+The sections in the scaffold match a mature dashboard shape (dashboard,
 rollout, engine, spec) rather than the bare one a fresh install carries.
 A project with ten open items and a long rollout list should look useful
 on the first open; the user then only tunes copy and wires `board()`'s
