@@ -133,11 +133,89 @@ VISUAL_TEXT_CSP = "sandbox; default-src 'none'; frame-ancestors 'none'"
 # but NOT "allow-same-origin". The CSP here lets the vendored lib (same-origin) run and the init script with
 # a per-request nonce; it blocks every other source, inline style aside (mermaid writes SVG style attributes).
 VISUAL_RENDER_CSP_TMPL = (
-    "default-src 'none'; script-src 'self' 'nonce-{nonce}'; style-src 'unsafe-inline'; "
+    "default-src 'none'; "
+    "script-src 'self' 'nonce-{nonce}'; "
+    "style-src 'self' 'nonce-{nonce}' 'unsafe-inline'; "
     "img-src data: blob:; font-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
 )
 # The vendored mermaid.min.js is served from this path, same origin as /api/visual-render.
 MERMAID_JS = "vendor/mermaid.min.js"
+
+# 0.9.6: a shared stylesheet for every Mermaid wrapper iframe (visual, item chart, project map).
+# Served from /api/wrapper.css under the same per-request nonce so the sandboxed iframe can load it even
+# when Chrome refuses `script-src 'self'` matches. The styles match the console's own palette.
+WRAPPER_CSS = """
+:root {
+  --wrap-fg: #1a1d21;
+  --wrap-fg-muted: #5a5f66;
+  --wrap-bg: #ffffff;
+  --wrap-surface: #fafbfc;
+  --wrap-border: #dde0e4;
+  --wrap-accent: #1f4e8c;
+  --wrap-accent-soft: #e7eef7;
+  --wrap-err: #a00000;
+  --wrap-radius: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --wrap-fg: #e8ebef;
+    --wrap-fg-muted: #a0a5ad;
+    --wrap-bg: #1a1d21;
+    --wrap-surface: #22262b;
+    --wrap-border: #353a40;
+    --wrap-accent: #6ea0d9;
+    --wrap-accent-soft: #2a3850;
+    --wrap-err: #ff8f8f;
+  }
+}
+html, body {
+  margin: 0;
+  padding: 12px;
+  background: var(--wrap-bg);
+  color: var(--wrap-fg);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+.mermaid {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0;
+  min-height: 60px;
+}
+.mermaid .clickable { cursor: pointer; }
+.mermaid svg { max-width: 100%; height: auto; }
+.ck-wrapper-bar {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+}
+.ck-wrapper-save {
+  font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  padding: 5px 12px;
+  cursor: pointer;
+  border: 1px solid var(--wrap-border);
+  border-radius: var(--wrap-radius);
+  background: var(--wrap-surface);
+  color: var(--wrap-fg);
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.ck-wrapper-save:hover, .ck-wrapper-save:focus-visible {
+  border-color: var(--wrap-accent);
+  background: var(--wrap-accent-soft);
+  outline: none;
+}
+.err {
+  color: var(--wrap-err);
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  padding: 10px 12px;
+  border: 1px solid var(--wrap-err);
+  border-radius: var(--wrap-radius);
+  background: var(--wrap-surface);
+}
+"""
+WRAPPER_CSS_BYTES = WRAPPER_CSS.encode("utf-8")
 
 
 def _mermaid_wrapper(source: str, title: str, nonce: str, clickable: bool = False,
@@ -168,17 +246,13 @@ def _mermaid_wrapper(source: str, title: str, nonce: str, clickable: bool = Fals
     # match in script-src because the document's effective origin is opaque; the nonce path is honoured
     # whichever way the browser resolves 'self'. Belt-and-suspenders. The init call is also gated on the
     # lib's `load` event so a slow fetch does not race ahead of mermaid.initialize.
+    # 0.9.6: the wrapper's own CSS is served from /api/wrapper.css with the request's nonce, so the sandboxed
+    # iframe can load it even when Chrome refuses `style-src 'self'` matches. Styles match the console's
+    # palette and respect `prefers-color-scheme`.
     html = (
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         f"<title>{esc(title)}</title>"
-        "<style>html,body{margin:0;padding:12px;background:#fff;color:#111;font:14px system-ui,sans-serif}"
-        ".mermaid{display:flex;justify-content:center}"
-        ".mermaid .clickable{cursor:pointer}"
-        ".ck-wrapper-bar{display:flex;justify-content:flex-end;gap:6px;margin-bottom:6px}"
-        ".ck-wrapper-save{font:12px system-ui,sans-serif;padding:4px 10px;cursor:pointer;"
-        "border:1px solid #bbb;border-radius:4px;background:#fafafa;color:#111}"
-        ".ck-wrapper-save:hover{border-color:#555;background:#fff}"
-        ".err{color:#a00;font:12px/1.4 ui-monospace,monospace;white-space:pre-wrap}</style>"
+        f"<link rel=\"stylesheet\" href=\"/api/wrapper.css\" nonce=\"{esc(nonce)}\">"
         "</head><body>"
         "<div class=\"ck-wrapper-bar\"><button type=\"button\" class=\"ck-wrapper-save\" "
         "id=\"ck-save\" title=\"Download as SVG\">Save SVG</button></div>"
@@ -186,8 +260,12 @@ def _mermaid_wrapper(source: str, title: str, nonce: str, clickable: bool = Fals
         f"<script id=\"ck-mermaid-lib\" src=\"/api/mermaid.js\" nonce=\"{esc(nonce)}\"></script>"
         f"<script nonce=\"{esc(nonce)}\">"
         f"{click_glue}"
-        f"var ckInit=function(){{try{{mermaid.initialize({{startOnLoad:true,theme:'neutral',securityLevel:'{level}'}});}}"
-        "catch(e){document.body.innerHTML='<p class=\\'err\\'>Mermaid failed to load: '+(e&&e.message||e)+'</p>';}};"
+        "var ckShowErr=function(m){document.body.innerHTML='<p class=\\'err\\'>Mermaid failed to render: '+m+'</p>';};"
+        f"var ckInit=function(){{try{{"
+        f"mermaid.initialize({{startOnLoad:false,theme:'neutral',securityLevel:'{level}'}});"
+        "var r=mermaid.run();"
+        "if(r&&typeof r.catch==='function'){r.catch(function(e){ckShowErr((e&&e.message)||e);});}"
+        "}catch(e){ckShowErr((e&&e.message)||e);}};"
         "if(typeof mermaid!=='undefined'){ckInit();}else{"
         "var lib=document.getElementById('ck-mermaid-lib');"
         "if(lib){lib.addEventListener('load',ckInit);"
@@ -1868,6 +1946,9 @@ class OwnerHandler(_Handler):
                 return self._send(503, {"error": "the vendored mermaid.min.js is not installed; "
                                                  "re-install the plugin so plugin/kit/console_kit/vendor/ is present"})
             return self._send_raw(200, data, "application/javascript; charset=utf-8",
+                                  "default-src 'none'; frame-ancestors 'self'")
+        if self.path == "/api/wrapper.css":   # 0.9.6: shared stylesheet for every Mermaid wrapper iframe
+            return self._send_raw(200, WRAPPER_CSS_BYTES, "text/css; charset=utf-8",
                                   "default-src 'none'; frame-ancestors 'self'")
         route, query = self._query()
         if route == "/api/project-chart" and query is not None:

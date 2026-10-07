@@ -776,3 +776,23 @@ longer needs any of the workarounds they describe.
   ahead of `mermaid.initialize`, and the error UI now names the file to
   check (`plugin/kit/console_kit/vendor/mermaid.min.js`) rather than only
   the exception.
+
+## Fix Mermaid rendering as text, not SVG (0.9.6)
+
+- **The DOM scan is now explicit.** Mermaid v10's `startOnLoad: true`
+  only hooks `DOMContentLoaded`, which has already fired by the time our
+  `load`-gated init runs; `<pre class="mermaid">` then stayed as text
+  on the Project map, the item Status flowchart, and every rendered
+  Mermaid visual. The shared `_mermaid_wrapper` now passes
+  `startOnLoad: false` and calls `mermaid.run()` after `initialize`, so
+  the diagram renders whether the lib arrives before or after the DOM
+  is parsed. Any render error from `mermaid.run()`'s promise is caught
+  and surfaced in the same error UI.
+- **The wrapper iframes get a real stylesheet** served from
+  `/api/wrapper.css` (with the per-request nonce on the `<link>` tag,
+  so the sandboxed iframe can load it even when Chrome refuses
+  `style-src 'self'`). It matches the console's palette, honours
+  `prefers-color-scheme`, caps `.mermaid svg` width to the iframe, and
+  tightens the Save SVG button. One stylesheet backs all three
+  wrappers — visuals, item chart, project map — so editing it changes
+  every rendered diagram at once.
