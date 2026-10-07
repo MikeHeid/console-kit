@@ -888,3 +888,33 @@ had no path to re-anchor and had to use `advise --star keep`.
   refusal in an inline alert below itself, in addition to announcing it.
   Styled with the kit's blocked tokens so it stands out against the
   normal confirmation box.
+
+## Lane-board palette alignment and complete tag coverage (0.9.11)
+
+0.9.9 shipped fallback tokens so the console rendered on a host page that
+defined no `:root` custom properties. 0.9.11 brings the fallback values
+in line with a mature lane-board palette (GitHub Primer family), adds
+the tokens the lane board uses but the kit was missing, and completes
+the tag styling for every state the view emits.
+
+- **New / changed fallback tokens** (inside `@layer console-fallbacks`):
+  `--c-bg` surface warmed to `#f4f6f8`; `--c-accent` → `#0969da`;
+  `--c-open` → `#57606a` (muted gray, not accent blue — tags for an
+  item in "proposed/open" no longer compete with the accent).
+  **New**: `--c-deferred`, `--c-deferred-bg`, `--c-bar-bg`,
+  `--c-bar-fill`, `--tree-line`. `--radius-sm` → `6px`, `--radius-md`
+  → `10px`. Dark values follow the Primer dark theme. `color-scheme`
+  declared on `:root` so native scrollbars and form controls match.
+  A `:root[data-theme="dark"]` block honours an explicit toggle too.
+- **Status chips now cover every state the view emits.** Previously
+  only `awaiting_you / unlocked / locked / stale / agent_active /
+  visual` had colour; `awaiting_agent / withdrawn / superseded`
+  inherited the base chip look and were hard to tell apart.
+  `awaiting_agent` picks up the accent-tint; `withdrawn` and
+  `superseded` use the new `--c-deferred` pair.
+- **The Mermaid wrapper CSS** mirrors the same palette (`--wrap-*`
+  tokens), so an opened chart iframe looks consistent with the console
+  panel in both light and dark.
+- A host page's own `:root` still wins (unlayered rules beat layered),
+  so projects that already define Primer-aligned tokens see no change;
+  projects that define a different palette see their own values.
