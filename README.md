@@ -10,22 +10,73 @@ record.
 This README describes the kit as it is today. [CHANGELOG.md](CHANGELOG.md)
 says what each release added.
 
-## Download
+## Install
 
-Get **`console-kit-<version>.zip`** from
-[Releases](https://github.com/MikeHeid/console-kit/releases). Unzip it
-somewhere it can stay (it makes a `console-kit/` folder). Then, in Claude
-Desktop's **Code** tab or in `claude`:
+Two routes. Both end at `/console-kit:console-onboard`.
 
-    /plugin marketplace add ~/console-kit
-    /plugin install console-kit@console-kit-local
+### A. Straight from this repository (no download)
+
+In Claude Desktop's **Code** tab or in `claude`:
+
+    /plugin marketplace add MikeHeid/console-kit
+    /plugin install console-kit@console-kit
 
 Then, in your project:
 
     /console-kit:console-onboard
 
-It asks for the project name and your Cloudflare values, and tells you what
-to run next. `INSTALL.md` (also in the zip) has the whole guide.
+Updates land with:
+
+    /plugin marketplace update console-kit
+    /plugin update console-kit@console-kit
+
+### B. From a release zip
+
+Get **`console-kit-<version>.zip`** from
+[Releases](https://github.com/MikeHeid/console-kit/releases). Unzip it
+somewhere it can stay (it makes a `console-kit/` folder). Then:
+
+    /plugin marketplace add ~/console-kit
+    /plugin install console-kit@console-kit-local
+    /console-kit:console-onboard
+
+Updates: delete `~/console-kit/`, unzip the new release zip in its place,
+then:
+
+    /plugin marketplace update console-kit-local
+    /plugin update console-kit@console-kit-local
+
+A one-liner for scripts, including other Claude sessions:
+
+    rm -rf ~/console-kit && \
+      gh release download --repo MikeHeid/console-kit --pattern 'console-kit-*.zip' \
+        --dir /tmp --clobber && \
+      unzip -q /tmp/console-kit-*.zip -d ~ && rm /tmp/console-kit-*.zip
+
+Then run the two `/plugin` commands above and restart the session.
+
+### Upgrade the agent server on each onboarded project
+
+Updating the plugin only refreshes the files on disk; the running Python
+server does not pick them up until it restarts. For every project that was
+onboarded, run the installer with `--start` to copy the fresh kit to
+`~/.local/share/console-kit/kit/` and restart the systemd user units:
+
+    bash ~/console-kit/plugins/console-kit/kit/deploy/install.sh \
+      --project <path to project> --start
+
+(When using route A, the path is the plugin cache instead; the install
+script's path is printed by `onboard.py show` on the project.)
+
+After the restart, verify from the project's machine:
+
+    curl -s http://127.0.0.1:$(grep ^CONSOLE_PORT .console-kit/console.env | cut -d= -f2)/health
+    # → {"ok": true, "version": "<the version you just installed>", ...}
+
+The first Claude session in each project after the upgrade prints a short
+banner naming the new version and the commands most useful at that moment
+(`items-push`, `items-watch`, `scaffold-dashboard`, `sync-dashboard`,
+`page-snapshot`, `prs-push`, `inbox`).
 
 | Guide | For |
 |---|---|
