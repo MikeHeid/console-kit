@@ -796,3 +796,28 @@ longer needs any of the workarounds they describe.
   tightens the Save SVG button. One stylesheet backs all three
   wrappers — visuals, item chart, project map — so editing it changes
   every rendered diagram at once.
+
+## Fix: Access blocked Mermaid + CSS subresources (0.9.7)
+
+The chart iframes stayed as unrendered text and the new 0.9.6 styles did
+not apply. Root cause: an iframe sandboxed with `sandbox="allow-scripts"`
+but no `allow-same-origin` has an **opaque origin**, so its subresource
+requests (`/api/mermaid.js`, `/api/wrapper.css`) go out WITHOUT the
+parent's Cloudflare Access cookies. Access challenged every one of them,
+the iframe could not follow the login redirect, and both loads died
+silently. Hard refresh didn't help because the top-level wrapper HTML
+loaded fine — it was its own navigation and carried the cookie.
+
+- **The vendored `mermaid.min.js` and the wrapper CSS are now inlined**
+  into the wrapper HTML (nonce-protected). No subresource requests, so
+  no Access challenge. CSP tightens to `script-src 'nonce-...'` and
+  `style-src 'nonce-...' 'unsafe-inline'` (the `'self'` legs were only
+  useful for the subresource pattern that is gone).
+- The response is ~3.3 MB per iframe (the lib dominates). The parsed JS
+  is cached in-process (`_mermaid_js_bytes`), so disk is hit once per
+  server lifetime, not per request.
+- `/api/mermaid.js` and `/api/wrapper.css` endpoints stay for direct
+  debugging and for any caller same-origin to the console.
+- Defensive escape: `</script>` and `<!--` inside the inlined lib are
+  replaced with their JS-safe forms; the current lib has neither, but a
+  future bump might.
