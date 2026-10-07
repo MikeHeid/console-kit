@@ -162,29 +162,32 @@ def _mermaid_js_bytes() -> bytes:
 # Served from /api/wrapper.css under the same per-request nonce so the sandboxed iframe can load it even
 # when Chrome refuses `script-src 'self'` matches. The styles match the console's own palette.
 WRAPPER_CSS = """
+/* Primer-aligned, matching the lane-board palette. color-scheme signals the mode to native widgets. */
 :root {
-  --wrap-fg: #1a1d21;
-  --wrap-fg-muted: #5a5f66;
-  --wrap-bg: #ffffff;
-  --wrap-surface: #fafbfc;
-  --wrap-surface-alt: #eef1f5;
-  --wrap-border: #d7dade;
-  --wrap-accent: #1f4e8c;
-  --wrap-accent-soft: #e7eef7;
-  --wrap-err: #a00000;
+  color-scheme: light;
+  --wrap-fg: #1f2328;
+  --wrap-fg-muted: #656d76;
+  --wrap-bg: #f4f6f8;
+  --wrap-surface: #ffffff;
+  --wrap-surface-alt: #eaecef;
+  --wrap-border: #d0d7de;
+  --wrap-accent: #0969da;
+  --wrap-accent-soft: #ddf4ff;
+  --wrap-err: #cf222e;
   --wrap-radius: 6px;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --wrap-fg: #e8ebef;
-    --wrap-fg-muted: #a2a7af;
-    --wrap-bg: #0f1114;
-    --wrap-surface: #1a1d22;
-    --wrap-surface-alt: #262a30;
-    --wrap-border: #3a3f46;
-    --wrap-accent: #6ea0d9;
-    --wrap-accent-soft: #253349;
-    --wrap-err: #ff8f8f;
+    color-scheme: dark;
+    --wrap-fg: #e6edf3;
+    --wrap-fg-muted: #8b949e;
+    --wrap-bg: #0d1117;
+    --wrap-surface: #161b22;
+    --wrap-surface-alt: #21262d;
+    --wrap-border: #30363d;
+    --wrap-accent: #58a6ff;
+    --wrap-accent-soft: #1f2d44;
+    --wrap-err: #f85149;
   }
 }
 html, body {

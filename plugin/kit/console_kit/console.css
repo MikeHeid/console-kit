@@ -1,56 +1,96 @@
 /* Console Kit — owner console panel styles
    Reuses tokens from the lane board; WCAG 2.2 AA compliant */
 
-/* 0.9.9: fallback tokens so a dashboard that doesn't define these still renders the console.
+/* Fallback tokens, Primer-aligned, matching a mature lane-board palette.
    Inside @layer so the host page's own :root (unlayered) wins by cascade precedence; the fallbacks only
    apply when a token is missing. prefers-color-scheme: dark gets its own values so a dark OS does not
-   paint the console panel transparent-on-black. The light values match the console-kit palette. */
+   paint the console panel transparent-on-black. color-scheme signals light/dark to the browser so native
+   widgets (scrollbars, form controls) match. */
 @layer console-fallbacks {
   :root {
-    --c-fg: #1a1d21;
-    --c-fg-muted: #5a5f66;
-    --c-bg: #ffffff;
-    --c-surface: #fafbfc;
-    --c-surface-alt: #eef1f5;
-    --c-border: #d7dade;
-    --c-border-light: #e8ebee;
-    --c-accent: #1f4e8c;
+    color-scheme: light;
+    --c-bg: #f4f6f8;
+    --c-surface: #ffffff;
+    --c-surface-alt: #eaecef;
+    --c-fg: #1f2328;
+    --c-fg-muted: #656d76;
+    --c-border: #d0d7de;
+    --c-border-light: #e6eaef;
+    --c-accent: #0969da;
     --c-accent-fg: #ffffff;
-    --c-open: #1f4e8c;
-    --c-open-bg: #e7eef7;
-    --c-claimed: #8a6d1a;
-    --c-claimed-bg: #fff3cd;
-    --c-built: #0f5132;
-    --c-built-bg: #d1e7dd;
-    --c-blocked: #842029;
-    --c-blocked-bg: #f8d7da;
-    --radius-sm: 4px;
-    --radius-md: 8px;
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
-    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.10);
+    --c-open: #57606a;
+    --c-open-bg: #f6f8fa;
+    --c-claimed: #9a6700;
+    --c-claimed-bg: #fff8c5;
+    --c-built: #1a7f37;
+    --c-built-bg: #dafbe1;
+    --c-blocked: #cf222e;
+    --c-blocked-bg: #ffebe9;
+    --c-deferred: #6e7781;
+    --c-deferred-bg: #f6f8fa;
+    --c-bar-bg: #e6e9ec;
+    --c-bar-fill: #1a7f37;
+    --tree-line: #d0d7de;
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 3px 8px rgba(0, 0, 0, 0.08);
   }
   @media (prefers-color-scheme: dark) {
-    :root {
-      --c-fg: #e8ebef;
-      --c-fg-muted: #a2a7af;
-      --c-bg: #0f1114;
-      --c-surface: #1a1d22;
-      --c-surface-alt: #262a30;
-      --c-border: #3a3f46;
-      --c-border-light: #2a2e34;
-      --c-accent: #6ea0d9;
-      --c-accent-fg: #0f1114;
-      --c-open: #6ea0d9;
-      --c-open-bg: #253349;
-      --c-claimed: #e0b85a;
-      --c-claimed-bg: #3f3418;
-      --c-built: #6ec28e;
-      --c-built-bg: #1e3327;
-      --c-blocked: #e07f7f;
-      --c-blocked-bg: #3f1f23;
-      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
-      --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.55);
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --c-bg: #0d1117;
+      --c-surface: #161b22;
+      --c-surface-alt: #21262d;
+      --c-fg: #e6edf3;
+      --c-fg-muted: #8b949e;
+      --c-border: #30363d;
+      --c-border-light: #21262d;
+      --c-accent: #58a6ff;
+      --c-accent-fg: #0d1117;
+      --c-open: #8b949e;
+      --c-open-bg: #21262d;
+      --c-claimed: #d29922;
+      --c-claimed-bg: #3d2e00;
+      --c-built: #3fb950;
+      --c-built-bg: #1a3d2a;
+      --c-blocked: #f85149;
+      --c-blocked-bg: #4a1d1f;
+      --c-deferred: #6e7681;
+      --c-deferred-bg: #21262d;
+      --c-bar-bg: #30363d;
+      --c-bar-fill: #3fb950;
+      --tree-line: #30363d;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+      --shadow-md: 0 3px 8px rgba(0, 0, 0, 0.4);
     }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --c-bg: #0d1117;
+    --c-surface: #161b22;
+    --c-surface-alt: #21262d;
+    --c-fg: #e6edf3;
+    --c-fg-muted: #8b949e;
+    --c-border: #30363d;
+    --c-border-light: #21262d;
+    --c-accent: #58a6ff;
+    --c-accent-fg: #0d1117;
+    --c-open: #8b949e;
+    --c-open-bg: #21262d;
+    --c-claimed: #d29922;
+    --c-claimed-bg: #3d2e00;
+    --c-built: #3fb950;
+    --c-built-bg: #1a3d2a;
+    --c-blocked: #f85149;
+    --c-blocked-bg: #4a1d1f;
+    --c-deferred: #6e7681;
+    --c-deferred-bg: #21262d;
+    --c-bar-bg: #30363d;
+    --c-bar-fill: #3fb950;
+    --tree-line: #30363d;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 3px 8px rgba(0, 0, 0, 0.4);
   }
 }
 
@@ -268,6 +308,13 @@
 .ck-q-state[data-state="unlocked"] { background: var(--c-open-bg); color: var(--c-open); }
 .ck-q-state[data-state="locked"] { background: var(--c-built-bg); color: var(--c-built); }
 .ck-q-state[data-state="stale"] { background: var(--c-blocked-bg); color: var(--c-blocked); }
+.ck-q-state[data-state="awaiting_agent"] {
+  background: color-mix(in srgb, var(--c-accent) 14%, transparent); color: var(--c-accent);
+}
+.ck-q-state[data-state="withdrawn"],
+.ck-q-state[data-state="superseded"] {
+  background: var(--c-deferred-bg); color: var(--c-deferred);
+}
 /* An agent has marked this item as in hand (cursor.working): the accent, not the owner's colour. */
 .ck-q-state[data-state="agent_active"] {
   background: color-mix(in srgb, var(--c-accent) 14%, transparent); color: var(--c-accent);
