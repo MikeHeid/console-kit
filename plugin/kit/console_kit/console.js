@@ -828,6 +828,8 @@
     panelEl.setAttribute('data-open', 'false');
     dropLocksNotOnShow();
     applyDock();
+    // Default-open stays dismissed for the session once the owner closes it.
+    try { sessionStorage.setItem('ck-inbox-closed', '1'); } catch (e) { /* storage blocked */ }
     // Back to what opened it; when that was the strip, it is the strip again.
     if (lastFocused && lastFocused.focus && document.contains(lastFocused)) lastFocused.focus();
   }
@@ -4911,9 +4913,21 @@
     window.addEventListener('pagehide', () => dropAllLocks());
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') dropAllLocks(); });
     injectItemButtons();
-    // Initial fetch, then the live loop (0.7.0) keeps the page current
+    // Initial fetch, then the live loop (0.7.0) keeps the page current.
     bindPageProposal();   // before the board: a stale bar offers the dialog only once it is bound
-    fetchView().then(() => { if (config && config.api) liveLoop(); });
+    fetchView().then(() => {
+      if (config && config.api) liveLoop();
+      // Inbox default open: on a docked (wide) screen, open the Inbox after the first fetch so a landing
+      // owner sees waiting rows without clicking. Narrow screens stay collapsed (the panel is an overlay
+      // there and would hide the dashboard). Reading list.sessionStorage.ck-inbox-closed lets the owner
+      // close it once and have that stick for the session.
+      try {
+        const closedThisSession = sessionStorage.getItem('ck-inbox-closed') === '1';
+        if (isDocked() && !closedThisSession && panelEl.getAttribute('data-open') !== 'true') {
+          openPanel(null, 'inbox');
+        }
+      } catch (e) { /* storage blocked — fall through */ }
+    });
     startBoard();
     startUsage();
   }
