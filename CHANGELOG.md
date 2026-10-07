@@ -965,3 +965,23 @@ the tag styling for every state the view emits.
   of the ck:items block. Smoke-tested: 5-item tree with grandchildren,
   idempotent re-sync, add-child-under-existing-parent, hand-edit
   preservation, and orphan placement.
+
+## Zoom-in further, drag anywhere, inbox default open, README updates (0.9.14)
+
+- **Mermaid wrappers**: zoom clamp raised to 0.1x..20x so you can
+  browse into a dense diagram. Drag now works anywhere in the stage
+  (nodes included); a 5px click-vs-drag threshold means a tap on a
+  node still fires its handler, and a drag that reaches the threshold
+  swallows the next click so the pointer-up doesn't trigger a
+  navigation you didn't ask for.
+- **Inbox opens by default on docked (wide) screens** after the first
+  view loads. Closing the panel once sticks for the session
+  (`sessionStorage: ck-inbox-closed`).
+- **README additions**: a "Name the session, bootstrap the dashboard"
+  section with `/console-kit:as`, the full `scaffold-dashboard →
+  sync-dashboard → page-snapshot → items-watch` chain, and the CSS
+  custom-property surface for re-skinning. A new "Hooks the plugin
+  ships" section documents `SessionStart` (the doorbell),
+  `UserPromptSubmit` (`name_session.py`) and `PreToolUse`
+  (`ask_guard.py`). Replaced the stale "undo for five seconds" bullet
+  to match 0.9.12's immediate lock.

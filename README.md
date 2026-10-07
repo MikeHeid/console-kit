@@ -88,6 +88,82 @@ banner naming the new version and the commands most useful at that moment
 | [docs/DEPLOY.md](plugin/kit/docs/DEPLOY.md) | Installing, upgrading and rolling back the systemd services. |
 | [docs/RUNBOOK.md](plugin/kit/docs/RUNBOOK.md) | Symptoms, checks and fixes, starting with the loopback `/health` check. |
 
+## Name the session, bootstrap the dashboard
+
+**Set the agent id for a Claude session** — type this in Claude Code:
+
+    /console-kit:as my-agent-name
+
+The name is recorded against this session in `STATE/sessions.jsonl`. Every
+`agent.py` call the session makes signs with it, questions and messages are
+attributed to it, and the SessionStart banner knows which session is which.
+`CONSOLE_KIT_AGENT=my-agent-name` in the shell env is a machine-wide fallback;
+`/console-kit:as` wins for that session.
+
+**Bootstrap the dashboard** — in a terminal on the project's machine:
+
+    # Writes docs/console/page.html with Header / Items / Rollout / Engine / Spec
+    # sections and injects a matching board() into .console-kit/adapter.py.
+    agent.py --state <STATE> scaffold-dashboard --project .
+
+    # Insert a <details data-ck-item="X"> stub for every item not yet on the
+    # page, nested under its parent. Idempotent; hand-edits inside each node
+    # survive re-syncs.
+    agent.py --state <STATE> items-push --adapter .console-kit/adapter.py \
+      --sync-dashboard docs/console/page.html
+
+    # Commit, snapshot, press "Use this page" in the console.
+    git add -A && git commit -m "dashboard: scaffold + sync"
+    agent.py --state <STATE> page-snapshot --path docs/console/page.html
+
+    # Keep the live values fresh:
+    agent.py --state <STATE> items-watch --adapter .console-kit/adapter.py
+
+**Make it more beautiful.** The console inherits CSS custom properties from the
+host page's `:root`. Define any of these to re-skin the whole kit (an unlayered
+host `:root` beats the kit's `@layer console-fallbacks`):
+
+    :root {
+      --c-bg: #...;  --c-surface: #...;  --c-surface-alt: #...;
+      --c-fg: #...;  --c-fg-muted: #...;
+      --c-border: #...;  --c-border-light: #...;
+      --c-accent: #...;  --c-accent-fg: #...;
+      --c-open: #...;    --c-open-bg: #...;
+      --c-claimed: #...; --c-claimed-bg: #...;
+      --c-built: #...;   --c-built-bg: #...;
+      --c-blocked: #...; --c-blocked-bg: #...;
+      --c-deferred: #...; --c-deferred-bg: #...;
+      --radius-sm: 6px;  --radius-md: 10px;
+    }
+    @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { ... } }
+
+The 0.9.11 fallback palette is Primer-aligned (`#0969da` accent on light,
+`#58a6ff` on dark) and ships `color-scheme` so native scrollbars match. Then:
+
+- Add deep links from the item view to your dashboard by setting
+  `sections` in `.console-kit.json`:
+  `{"sections": {"AB-2": ["#features/rollout", "#features/timeline"]}}`.
+  The item view renders chips linking to each anchor.
+- Add in-place state badges by marking any `<section data-ck-item="X">`
+  on the dashboard. The console injects a `"X ◐ 2 ◑ 1 ◌ 3 ○ 4"` badge
+  in-place, updated on every live wake; clicking it opens the panel on X.
+
+## Hooks the plugin ships (doorbell + command guards)
+
+The plugin runs three hooks in every Claude session on your machine. All three
+act only in projects that `agent.py register` has entered in your user-level
+registry (`~/.config/console-kit/projects.json`); in any other project they
+print nothing and exit 0.
+
+| Hook event | File | What it does |
+|---|---|---|
+| `SessionStart` (startup/resume/clear/compact/fork) | `plugin/hooks/session_start.py` | Reads the doorbell for this project's console and prints what the owner sent while no session was watching: questions, process requests, chat replies, scan requests, visual requests, each with its seq and the command to handle it. On first run after an install or an upgrade, prints a banner naming the running kit version and the commands most useful at that moment. |
+| `UserPromptSubmit` | `plugin/hooks/name_session.py` | Picks up `/console-kit:as NAME` and records the mapping `session_id → agent name` in `STATE/sessions.jsonl` (atomic rewrite). The next `agent.py` call reads the name from this file. |
+| `PreToolUse` (matcher: `AskUserQuestion`) | `plugin/hooks/ask_guard.py` | On a non-steward session in a project that names a steward, refuses `AskUserQuestion` so the question goes to the owner through the console instead of a transient prompt. |
+
+All three are stdlib-only, read-only outside their known files, and never run
+anything from the repository. See the module docstrings for the trust model.
+
 ## What you can do
 
 ### Answer, lock, and ask for a round
@@ -98,10 +174,9 @@ banner naming the new version and the commands most useful at that moment
   Your own words on an answer travel with it. Locking turns an answer into a
   ruling. A round's questions open as one form: ←/→ to move, 1–9 to pick, then
   **Lock all & process**.
-- **Lock with one tap, undo for five seconds.** **Lock this answer** starts a
-  countdown with **Undo** focused. Nothing is sent until it ends. Undo, opening
-  another item, closing the panel or leaving the page cancels it, and nothing
-  is written.
+- **Lock with one tap.** **Lock this answer** sends the lock immediately
+  (0.9.12). If the server refuses it (e.g. a condition is no longer true),
+  the question card shows the reason and the Lock button comes back.
 - **A round moves on by itself.** Pick a single-choice option and, after a
   moment, the form moves to the next question still without a pick, and says
   so. It stays put for multiple choice, for a question you are writing words
