@@ -78,7 +78,7 @@ Cloudflare reached the tunnel but not the server, or not the tunnel at all.
    processed. `inbox --since <seq-1>` shows it again.
 4. Same state dir? The watch, the server and the registry must name the same
    `<state>`: compare the unit's `--state` with
-   `~/.config/console-kit/projects.json`.
+   `~/.config/overture/projects.json`.
 5. `... is not a regular file`: something replaced the doorbell or a state
    file with a FIFO or device. Remove it; the server recreates the doorbell
    on the next owner write.
@@ -128,9 +128,9 @@ request is sent.
 4. **429 "at most 6 chat messages a minute"** (or 60 an hour): wait and send
    again. What you typed stays in the box.
 
-## The server will not start: `.console-kit.json` (0.8.0)
+## The server will not start: `.overture.json` (0.8.0)
 
-The journal says `console: .console-kit.json: specs_dir ...` (or
+The journal says `console: .overture.json: specs_dir ...` (or
 `visuals_dir`, `next_step`). The server refuses a folder that is not a plain
 relative path at least one folder deep, one that climbs out or resolves
 outside the project through a symlink, a `visuals_dir` inside `specs_dir`, and
@@ -205,7 +205,7 @@ names the file to move.
   so no script runs, even if its URL is opened in its own tab.
 - **`agent.py visual-export` says "this project sets no visuals_dir"**: the
   visual is stored and shown; it only has nowhere to land. Add `visuals_dir`
-  to `.console-kit.json` (by pull request) and restart the server.
+  to `.overture.json` (by pull request) and restart the server.
 - **`visual-export` says "the directory the console server runs from"**: by
   design. Export into your own worktree on a branch
   (`git worktree add ../visuals -b visuals origin/main`), then open a PR.
@@ -237,7 +237,7 @@ names the file to move.
 
 - **Every reply says "agent", and you cannot tell the sessions apart**: give
   each session a name. It runs `agent.py --as agent-6 ...` (or sets
-  `CONSOLE_KIT_AGENT=agent-6`); the console-process skill says where. The
+  `OVERTURE_AGENT=agent-6`); the console-process skill says where. The
   name then shows on its questions ("asked by agent-6"), replies, chat
   messages, visuals, roar transcripts and Feed rows. A record written with no
   name shows as before.
@@ -272,29 +272,29 @@ of them its **steward** in your own registry; only it watches, syncs and folds.
 It is written to every project registered on `<state>`. Then name each
 session, in the session itself (0.8.4):
 
-    /console-kit:as agent-5      # typed in the steward's session
-    /console-kit:as agent-6      # typed in any other session
+    /overture:as agent-5      # typed in the steward's session
+    /overture:as agent-6      # typed in any other session
 
 The plugin records the session's id against the name in
 `<state>/sessions.jsonl`, and the SessionStart hook exports the id to the
-session's Bash as `CONSOLE_KIT_SESSION`, so the question hook knows the
+session's Bash as `OVERTURE_SESSION`, so the question hook knows the
 steward and every `agent.py` call is signed. The name lasts while the session
 id does: `--resume` and `--continue` keep it; `/clear` and `--fork-session`
 need the command again. Starting a session with its name in its environment
 still works, as the fallback:
 
-    cd <project> && CONSOLE_KIT_AGENT=agent-5 claude      # the steward
-    cd <worktree> && CONSOLE_KIT_AGENT=agent-6 claude     # any other session
+    cd <project> && OVERTURE_AGENT=agent-5 claude      # the steward
+    cd <worktree> && OVERTURE_AGENT=agent-6 claude     # any other session
 
 A name typed in the session wins over the variable. The repository's
-`.console-kit.json` cannot set or change the steward, and the sessions file
+`.overture.json` cannot set or change the steward, and the sessions file
 cannot either: it only says which name a session goes by.
 
 **What changes:**
 
 - **`agent.py watch` or `synced` exits 1 with "refused: `watch` belongs to
   this console's steward, agent-5"**: the session is not the steward (its
-  `--as`, else its `/console-kit:as` name, else `CONSOLE_KIT_AGENT`, is
+  `--as`, else its `/overture:as` name, else `OVERTURE_AGENT`, is
   another name, or none). Nothing moved:
   no heartbeat, no cursor. It should post with `ask`, `reply` and `working`,
   which stay open to everyone. `fold.py` (export and fold) refuses the same
@@ -309,9 +309,9 @@ cannot either: it only says which name a session goes by.
   `agent.py ask`, and replies on its item with your answer, so the record
   holds it and you can lock it.
 - **The steward itself is refused**: its name did not reach the command.
-  Type `/console-kit:as agent-5` in that session again (after `/clear` or a
+  Type `/overture:as agent-5` in that session again (after `/clear` or a
   fork it is a new session). If `agent.py` is still refused, run
-  `echo $CONSOLE_KIT_SESSION` there: empty means the SessionStart hook did not
+  `echo $OVERTURE_SESSION` there: empty means the SessionStart hook did not
   export it (restart or resume the session), or pass `--as agent-5` to every
   `agent.py` call.
 - **"the registry names more than one steward for the console at ..."**:
@@ -330,7 +330,7 @@ cannot either: it only says which name a session goes by.
   downgrading (`DEPLOY.md`, "Rollback", step 7).
 
 **What it is not:** a security boundary. Every session runs as you, on the
-same socket and files, and any session that sets `CONSOLE_KIT_AGENT=agent-5`
+same socket and files, and any session that sets `OVERTURE_AGENT=agent-5`
 is the steward. It keeps your own cooperating sessions from racing for the
 cursor, and nothing more.
 
@@ -352,9 +352,9 @@ truncated"**: the agent shortens its round summaries and sends it again.
 ## The suggested-next-step chips look wrong (0.8.0)
 
 The chips are rules, not judgement, and each says its reason (hover, or a
-screen reader reads it). `console_kit/tags.py` holds the exact rules.
+screen reader reads it). `overture/tags.py` holds the exact rules.
 
-- **No refine chip ever**: no `specs_dir` in `.console-kit.json`, or the locked
+- **No refine chip ever**: no `specs_dir` in `.overture.json`, or the locked
   question cites no file under it, or the spec's file time is after the lock.
   The served console reads no git (CONSOLE-kit/Q23), so it always compares the
   file's mtime, and the chip says "the last-commit time is unavailable (no git

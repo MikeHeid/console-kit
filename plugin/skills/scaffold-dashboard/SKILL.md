@@ -32,12 +32,12 @@ Confirm with the user:
 
 1. **The project's name** that should appear in the dashboard header (the
    directory name is the default).
-2. **The page path**. The onboarding default is `.console-kit/page.html`,
+2. **The page path**. The onboarding default is `.overture/page.html`,
    which 0.9.1 accepts (dotfile first segment). Many projects prefer
    `docs/console/page.html` so the page is kept with the other docs. Ask
    which they want; the default is `docs/console/page.html`.
 3. **The adapter path**. The onboarding default is
-   `.console-kit/adapter.py`. Only override when the user already moved
+   `.overture/adapter.py`. Only override when the user already moved
    the adapter.
 4. **Which sections**: all of Header / Items / Rollout / Engine / Spec /
    Footer by default. The user may ask to skip Engine or Spec; both are
@@ -48,7 +48,7 @@ Confirm with the user:
 Once the user has confirmed, run:
 
 ```bash
-python3 ~/.local/share/console-kit/kit/agent.py --state <STATE> scaffold-dashboard \
+python3 ~/.local/share/overture/kit/agent.py --state <STATE> scaffold-dashboard \
     --project <PROJECT_ROOT> --page <PAGE_PATH> --adapter <ADAPTER_PATH> --name <PROJECT_NAME>
 ```
 
@@ -74,7 +74,7 @@ Print the operator steps **the user runs themselves**:
    `agent.py --state <STATE> items-push --adapter <ADAPTER>`.
 5. **(Optional) keep it live.** Run `items-watch` in a terminal (or as a
    systemd user unit) to re-push whenever the adapter, `items.json` or
-   `.console-kit.json` changes:
+   `.overture.json` changes:
    `agent.py --state <STATE> items-watch --adapter <ADAPTER>`.
 
 Step 5 is what makes the dashboard "update itself as the project evolves".

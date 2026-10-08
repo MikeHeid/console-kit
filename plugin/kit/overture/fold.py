@@ -13,8 +13,8 @@ It runs in two steps, on purpose:
 every refusal is reported by name. A lock that was already folded is skipped,
 not refused, so re-running over the whole directory is safe.
 
-    python3 tools/console-kit/fold.py export --store PATH --out console/locked
-    python3 tools/console-kit/fold.py fold --locked console/locked --ledger console/folded.txt \
+    python3 tools/overture/fold.py export --store PATH --out console/locked
+    python3 tools/overture/fold.py fold --locked console/locked --ledger console/folded.txt \
         --adapter scripts/register/console_adapter.py [--dry-run]
 """
 
@@ -525,7 +525,7 @@ def load_adapter(path: Path) -> ProjectAdapter:
 def inside(root: Path, raw: str, what: str) -> Path:
     """A project-relative path that stays inside `root`, or FoldError naming why not (spec §7.7).
 
-    These paths reach the command line from the repository's `.console-kit.json`,
+    These paths reach the command line from the repository's `.overture.json`,
     and `--adapter` is imported and run, so the boundary is enforced here, in the
     code that acts on it, and not only in the skill that builds the command.
     """
@@ -566,7 +566,7 @@ def _steward_refusal(a) -> str | None:
         name = R.steward_for_state(state)
         if name is None:
             continue
-        me, where = SN.resolve(a.agent, state)   # 0.8.4: this session's /console-kit:as on THAT console
+        me, where = SN.resolve(a.agent, state)   # 0.8.4: this session's /overture:as on THAT console
         if me is not None and N.problem(me):
             return f"agent name from {where}: {N.problem(me)}"
         if me == name:
@@ -575,7 +575,7 @@ def _steward_refusal(a) -> str | None:
         return (f"refused: the fold belongs to this console's steward, {name}, and {who} is not it ({what} is "
                 f"on its console). Only the steward watches the doorbell, marks it synced and folds answers. "
                 f"Use `ask`, `reply` and `working` instead; the steward folds what the owner locks. (A session "
-                f"named {name} runs as it: --as {name}, /console-kit:as {name} typed in the session, or "
+                f"named {name} runs as it: --as {name}, /overture:as {name} typed in the session, or "
                 f"{N.ENV}={name}.)")
     return None
 
@@ -594,10 +594,10 @@ def main(argv: list[str] | None = None) -> int:
     fo.add_argument("--adapter", required=True)
     fo.add_argument("--dry-run", action="store_true")
     ap.add_argument("--as", dest="agent", metavar="NAME",
-                    help=f"this session's agent name (default: this session's /console-kit:as, then ${N.ENV}); "
+                    help=f"this session's agent name (default: this session's /overture:as, then ${N.ENV}); "
                          f"checked against the console's steward")
     a = ap.parse_args(argv)
-    # --as, else the environment; this session's /console-kit:as is looked up per console in _steward_refusal.
+    # --as, else the environment; this session's /overture:as is looked up per console in _steward_refusal.
     given = a.agent if a.agent is not None else (os.environ.get(N.ENV) or None)
     if given is not None and N.problem(given):
         print(f"fold: agent name: {N.problem(given)}; nothing was done", file=sys.stderr)

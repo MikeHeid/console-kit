@@ -1,11 +1,11 @@
 ---
 name: roar
-description: Run a three-perspective panel (architect, ux, and an advisor seat) on a question, decision or design - independent reads in parallel, a deliberation round where the panelists challenge each other, then a full implementation plan. Use when the user types /console-kit:roar followed by a question, decision or design under review. Inside an owner-console round (a fork with roles ["roar"]) the console-fork skill's section 7 governs, and the round ends in lockable questions, not a plan.
+description: Run a three-perspective panel (architect, ux, and an advisor seat) on a question, decision or design - independent reads in parallel, a deliberation round where the panelists challenge each other, then a full implementation plan. Use when the user types /overture:roar followed by a question, decision or design under review. Inside an owner-console round (a fork with roles ["roar"]) the console-fork skill's section 7 governs, and the round ends in lockable questions, not a plan.
 ---
 
 # Roar: three seats, one deliberation, one plan
 
-`/console-kit:roar <prompt>` runs a **three-round** panel that ends in a
+`/overture:roar <prompt>` runs a **three-round** panel that ends in a
 complete implementation plan. The user sees a short status block before each
 round.
 
@@ -42,9 +42,9 @@ install with nothing else in place:
 
 | Seat | Agent | Angle |
 |---|---|---|
-| advisor | `console-kit:other`, told to sit as **advisor** | strategy, scope, build or buy, what not to build |
-| architect | `console-kit:architect` | structure, data model, coupling, invariants, tech-debt risk |
-| ux | `console-kit:ux` | what the user or operator sees: discoverability, first run, errors, accessibility |
+| advisor | `overture:other`, told to sit as **advisor** | strategy, scope, build or buy, what not to build |
+| architect | `overture:architect` | structure, data model, coupling, invariants, tech-debt risk |
+| ux | `overture:ux` | what the user or operator sees: discoverability, first run, errors, accessibility |
 
 The committee agents expect a **bundle file** to read first. Standalone,
 write one yourself to a scratch file (never into the repository): the
@@ -88,7 +88,7 @@ Tailor each prompt to its seat. Reuse the same facts, but ask the advisor
 strategic questions, the architect system and data questions, and ux
 user-journey questions. Each prompt:
 
-- names the bundle file to read first, and for `console-kit:other` says
+- names the bundle file to read first, and for `overture:other` says
   "sit as advisor";
 - caps the answer at **about 300 words**;
 - asks for every claim to rest on a file and line where one exists, verified
@@ -205,7 +205,7 @@ the questions, then the one `Result:` reply.
 - **Never start implementing during a roar.** Standalone, the plan ends
   waiting for confirmation. In a console round, nothing is written before the
   owner locks.
-- **A prompt too vague to act on** (`/console-kit:roar thoughts?`): ask one
+- **A prompt too vague to act on** (`/overture:roar thoughts?`): ask one
   clarifying question before Round 1 rather than spend six agent runs on it.
 - **A seat that fails in Round 2**: continue with the two that answered, say
   so in the convergence paragraph ("architect did not re-weigh"), and mark it

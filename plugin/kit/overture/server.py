@@ -506,7 +506,7 @@ def _mermaid_wrapper(source: str, title: str, nonce: str, clickable: bool = Fals
     except (FileNotFoundError, OSError) as e:
         lib_block = (f"<script nonce=\"{esc(nonce)}\">"
                      f"document.body.innerHTML='<p class=\\'err\\'>Mermaid vendored lib missing: {esc(str(e))}. "
-                     f"Re-install the plugin so plugin/kit/console_kit/vendor/ is present.</p>';</script>")
+                     f"Re-install the plugin so plugin/kit/overture/vendor/ is present.</p>';</script>")
     html = (
         "<!doctype html><html><head><meta charset=\"utf-8\">"
         f"<title>{esc(title)}</title>"
@@ -884,7 +884,7 @@ class Console:
         self.adapter = adapter
         cfg.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(cfg.state, 0o700)  # mkdir's mode is ignored for a directory that already exists
-        # 0.8.0: specs_dir and visuals_dir from the project's .console-kit.json (data only;
+        # 0.8.0: specs_dir and visuals_dir from the project's .overture.json (data only;
         # a bad key raises ConfigError here, by name, so the server never starts half-configured).
         self.project = PC.load(cfg.root)
         self.store = Store(cfg.store)
@@ -1088,7 +1088,7 @@ class Console:
         books = PB.load(self.cfg.root)
         pb = books.get(body["name"])
         if pb is None:
-            raise RequestError(404, f"no playbook named {body['name']!r} under .console-kit/playbooks/")
+            raise RequestError(404, f"no playbook named {body['name']!r} under .overture/playbooks/")
         items = self.items()
         view = (self.payload() or {}).get("view") or {}
         records: list[dict] = []
@@ -1439,7 +1439,7 @@ class Console:
     def portfolio(self) -> dict:
         """0.19.0: aggregate this console's slim view with every configured peer's.
 
-        Peers come from `.console-kit/portfolio.json`; secrets from STATE/portfolio-secrets/<peer>.json.
+        Peers come from `.overture/portfolio.json`; secrets from STATE/portfolio-secrets/<peer>.json.
         A peer that fails to load (bad config, bad secret) or fails to answer surfaces as an error row
         — never breaks the aggregator for other peers. Cached per peer with a short TTL.
         """
@@ -1479,7 +1479,7 @@ class Console:
             raise RequestError(400, "visual-export takes exactly ids: a list of visual record ids (may be empty)")
         vdir = self.project.visuals_dir
         if not vdir:
-            raise RequestError(400, "this project sets no visuals_dir in .console-kit.json, so a visual has "
+            raise RequestError(400, "this project sets no visuals_dir in .overture.json, so a visual has "
                                     "nowhere to land in the repository; it stays viewable in the console")
         records = [r for r in self.store.records() if r["type"] == "visual"]
         by_id = {r["id"]: r for r in records}
@@ -2372,7 +2372,7 @@ class Console:
 
 class _Handler(BaseHTTPRequestHandler):
     console: Console
-    server_version = "console-kit"
+    server_version = "overture"
     sys_version = ""
     timeout = 30  # seconds per socket read, so a stalled client cannot hold a thread for ever
     max_body = MAX_BODY
@@ -2492,7 +2492,7 @@ class _Handler(BaseHTTPRequestHandler):
             raise RequestError(400, "the body is not JSON") from None
 
     def log_message(self, fmt: str, *args) -> None:  # the request line only: never a header, so never a token
-        sys.stderr.write(f"console {self.address_string()} {fmt % args}\n")
+        sys.stderr.write(f"overture {self.address_string()} {fmt % args}\n")
 
 
 class OwnerHandler(_Handler):
@@ -2543,7 +2543,7 @@ class OwnerHandler(_Handler):
                 data = self.console.mermaid_js()
             except FileNotFoundError:
                 return self._send(503, {"error": "the vendored mermaid.min.js is not installed; "
-                                                 "re-install the plugin so plugin/kit/console_kit/vendor/ is present"})
+                                                 "re-install the plugin so plugin/kit/overture/vendor/ is present"})
             return self._send_raw(200, data, "application/javascript; charset=utf-8",
                                   "default-src 'none'; frame-ancestors 'self'")
         if self.path == "/api/wrapper.css":   # 0.9.6: shared stylesheet for every Mermaid wrapper iframe

@@ -6,13 +6,13 @@ must come from the USER, never from the repository: a clone could otherwise
 ship its own `agent.py` and a fake doorbell and have a session run it. The
 user's registry is one file,
 
-    ${XDG_CONFIG_HOME:-~/.config}/console-kit/projects.json
+    ${XDG_CONFIG_HOME:-~/.config}/overture/projects.json
     {"projects": {"<absolute project root>": {"state": "<absolute dir>", "kit": "<absolute dir>",
                                               "steward": "<agent name, optional>"}}}
 
 written only by `agent.py register` and `agent.py steward`, which the user runs.
 A project that is not in it hears nothing from the plugin. The repository's
-`.console-kit.json` holds data only (fold paths, the audit seat), never a path
+`.overture.json` holds data only (fold paths, the audit seat), never a path
 anything executes from, and never the steward.
 
 **The steward (0.8.3).** Several sessions may share one console, but its
@@ -55,7 +55,7 @@ class RegistryError(ValueError):
 
 def location() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    return Path(base) / "console-kit" / FILE
+    return Path(base) / "overture" / FILE
 
 
 def read_regular(path: Path, cap: int, nofollow: bool = False) -> bytes | None:

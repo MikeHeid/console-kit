@@ -10,10 +10,10 @@ Placeholders used below:
 | Placeholder | Meaning |
 |---|---|
 | `<project>` | the project checkout the unit serves (its `WorkingDirectory`) |
-| `<vendored>` | the kit's copy inside it, e.g. `<project>/tools/console-kit` |
+| `<vendored>` | the kit's copy inside it, e.g. `<project>/tools/overture` |
 | `<name>` | the unit's name: `<name>-console.service` |
 | `<state>` | the server's `--state` directory (store, doorbell, agent socket) |
-| `<kit-clone>` | a local git clone of console-kit, with its tags fetched |
+| `<kit-clone>` | a local git clone of overture, with its tags fetched |
 | `<tag>` | the kit release the copy should be, e.g. `v0.6.0` |
 | `<port>` | the owner port (`--port`); `<hport>` an optional health port |
 
@@ -43,8 +43,8 @@ Read the live unit before changing anything:
        git -C <kit-clone> rev-parse <tag>
 
 2. On a branch of the project, copy the release in. The mapping is the table
-   in `kit/tools/verify_vendor.py` (`RULES`): `plugin/kit/console_kit/*` to
-   `console_kit/`; `plugin/kit/{agent,fold,publish,server}.py` and
+   in `kit/tools/verify_vendor.py` (`RULES`): `plugin/kit/overture/*` to
+   `overture/`; `plugin/kit/{agent,fold,publish,server}.py` and
    `requirements.txt` to the top; `plugin/hooks/`, `plugin/agents/`,
    `plugin/skills/<each skill you take>/` and
    `plugin/.claude-plugin/plugin.json` to the same paths under `plugin/`.
@@ -73,14 +73,14 @@ Read the live unit before changing anything:
    it (the console-process skill re-arms it) so chat reaches a session.
 
 From 0.8.0 the server reads `specs_dir`, `visuals_dir` and `next_step` from
-the project's `.console-kit.json` when it starts (`kit/docs/ADAPTER.md`). A
-bad value stops it with `console: .console-kit.json: <key> ...` in the
+the project's `.overture.json` when it starts (`kit/docs/ADAPTER.md`). A
+bad value stops it with `console: .overture.json: <key> ...` in the
 journal; fix the key and restart. Its `/api/visual` route is behind the same
 Access gate as every other owner route.
 
 **The server never writes into the project's working tree (0.8.1).** It
 stores visuals in `<state>/visuals/`, beside `store.jsonl`, and since
-CONSOLE-kit/Q23 it starts no git at all (`console_kit/gitseam.py` is closed
+CONSOLE-kit/Q23 it starts no git at all (`overture/gitseam.py` is closed
 at startup), so it never even reads `.git`; a git a repository's own config
 could make run a program is never started outside the agents' jails. The
 agent-side git calls run with `--no-optional-locks`. That is what lets the service checkout keep following
@@ -96,7 +96,7 @@ inside Cloudflare's 100 s response limit. The server holds at most 16 such
 polls at once and answers a 17th with 429, which the page backs off from.
 
 A kit installed by `deploy/install.sh` instead (copied to
-`~/.local/share/console-kit/kit`) is upgraded by re-running
+`~/.local/share/overture/kit`) is upgraded by re-running
 `install.sh --project <project> --start`, which copies the new kit and restarts.
 
 ## Rollback
@@ -158,7 +158,7 @@ A kit installed by `deploy/install.sh` instead (copied to
 7. Rolling 0.8.3 back to **0.8.2** needs no store check: 0.8.3 writes
    nothing new into the store or the state directory. It adds an optional
    `steward` key to entries of YOUR registry
-   (`~/.config/console-kit/projects.json`), and a 0.8.2 plugin reads an entry
+   (`~/.config/overture/projects.json`), and a 0.8.2 plugin reads an entry
    with that key as malformed: its SessionStart note says "not checked"
    instead of listing the owner's requests. So clear it first:
 

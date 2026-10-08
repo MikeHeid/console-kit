@@ -1,6 +1,6 @@
 ---
 name: drill
-description: Drill one level down into a segment or concept that has no spec yet - list the functions it must capture, ask the three to five questions that would change its spec (each with lettered options and a star), then write a short standalone spec. Use when the user types /console-kit:drill, or for an owner-console "Drill" fork (the console-kit:drill next_step).
+description: Drill one level down into a segment or concept that has no spec yet - list the functions it must capture, ask the three to five questions that would change its spec (each with lettered options and a star), then write a short standalone spec. Use when the user types /overture:drill, or for an owner-console "Drill" fork (the overture:drill next_step).
 ---
 
 # Drill: one segment, from functions to a spec
@@ -10,7 +10,7 @@ that already exists, use refine instead.)
 
 ## Where the project keeps its specs
 
-1. `.console-kit.json`'s `specs_dir`, if set, is where specs live.
+1. `.overture.json`'s `specs_dir`, if set, is where specs live.
 2. The project's `CLAUDE.md` or README, which usually names its spec folder
    and decision log.
 3. Otherwise the **App Architect convention**, if the project uses it: an

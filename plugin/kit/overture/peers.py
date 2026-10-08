@@ -2,7 +2,7 @@
 
 Configuration lives in two places:
 
-- `.console-kit/portfolio.json` — a committed list of peers, each with the URL, the service-token
+- `.overture/portfolio.json` — a committed list of peers, each with the URL, the service-token
   `client_id`, and the **sha256** of the service-token secret. The sha256 is a drift check; the plaintext
   is NEVER in the committed config.
 - `STATE/portfolio-secrets/<peer>.json` — 0600, out-of-repo, holds the plaintext secret:
@@ -35,7 +35,7 @@ from pathlib import Path
 from . import rootfs as RF
 from .registry import RegistryError, read_regular
 
-FILE = ".console-kit/portfolio.json"
+FILE = ".overture/portfolio.json"
 MAX_FILE = 32 * 1024
 MAX_PEERS = 32
 PEER_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}\Z")
@@ -66,7 +66,7 @@ class Peer:
 
 
 def load(root: Path) -> dict[str, Peer]:
-    """Parse `.console-kit/portfolio.json`; return {name: Peer}. Raises PeersError on any bad entry."""
+    """Parse `.overture/portfolio.json`; return {name: Peer}. Raises PeersError on any bad entry."""
     try:
         if RF.confined():
             raw = RF.read(Path(root), FILE, MAX_FILE)
@@ -136,7 +136,7 @@ def load_secret(state: Path, peer: Peer) -> str:
         raise PeersError(f'{path} must hold {{"client_secret": "..."}}')
     got = hashlib.sha256(secret.encode("utf-8")).hexdigest()
     if not hmac.compare_digest(got, peer.token_sha256):
-        raise PeersError(f"the secret in {path} does not match .console-kit/portfolio.json's token_sha256 "
+        raise PeersError(f"the secret in {path} does not match .overture/portfolio.json's token_sha256 "
                          f"for {peer.name!r}; rotate the pair or correct the config")
     return secret
 

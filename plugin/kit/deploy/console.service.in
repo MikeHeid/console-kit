@@ -7,11 +7,11 @@ After=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=@PROJECT@/.console-kit/console.env
+EnvironmentFile=@PROJECT@/.overture/console.env
 WorkingDirectory=@PROJECT@
 ExecStart=@PYTHON@ @KIT@/server.py \
   --root @PROJECT@ \
-  --state %h/.local/state/console-kit/@NAME@ \
+  --state %h/.local/state/overture/@NAME@ \
   --team-domain ${CONSOLE_TEAM_DOMAIN} \
   --aud ${CONSOLE_AUD} \
   --hostname ${CONSOLE_HOSTNAME} \

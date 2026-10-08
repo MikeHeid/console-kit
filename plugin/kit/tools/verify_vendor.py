@@ -40,10 +40,10 @@ class Rule:
     #                      "subdir" every kit file under each first-level folder the copy holds
 
 
-# How a project that vendors the kit flat, under tools/console-kit, lays it out. A
+# How a project that vendors the kit flat, under tools/overture, lays it out. A
 # project that vendors differently copies this script and edits this table, nothing else.
 RULES = (
-    Rule("console_kit/", "plugin/kit/console_kit/", "all"),
+    Rule("overture/", "plugin/kit/overture/", "all"),
     Rule("agent.py", "plugin/kit/agent.py"),
     Rule("fold.py", "plugin/kit/fold.py"),
     Rule("publish.py", "plugin/kit/publish.py"),
@@ -161,7 +161,7 @@ def verify(kit: Path, ref: str, vendored: Path, adapted: tuple[str, ...] = ()) -
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--kit", type=Path, required=True, help="a local git clone of console-kit")
+    ap.add_argument("--kit", type=Path, required=True, help="a local git clone of overture")
     ap.add_argument("--ref", required=True, help="the released tag (or commit) the copy should be")
     ap.add_argument("--vendored", type=Path, required=True, help="the project's vendored kit directory")
     ap.add_argument("--adapted", action="append", default=[], help="another project-edited path, not compared")

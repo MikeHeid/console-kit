@@ -5,7 +5,7 @@ in server.py renders it inside a sandboxed iframe with the vendored Cytoscape li
 Node kinds:
 - item: the focal item + its ancestors on the way to root.
 - question: every question on the focal item.
-- section: dashboard section anchors (from `.console-kit.json` `sections`).
+- section: dashboard section anchors (from `.overture.json` `sections`).
 - file: files cited by evidence rows on the focal item's questions, deduplicated.
 
 Edge kinds:

@@ -6,7 +6,7 @@
 Writes the new version to:
   VERSION
   plugin/.claude-plugin/plugin.json          (top-level `version`)
-  plugin/kit/console_kit/__init__.py         (`__version__`, which /health and the footer report)
+  plugin/kit/overture/__init__.py         (`__version__`, which /health and the footer report)
   .claude-plugin/marketplace.json            (plugins[0].version; what Claude Code reads from the GitHub route)
 
 Prints what changed and the next steps. Does not touch CHANGELOG.md, commit,
@@ -59,8 +59,8 @@ def set_version(version: str) -> list[str]:
     mj["plugins"][0]["version"] = version
     write(market_json, json.dumps(mj, indent=2) + "\n")
 
-    # console_kit/__init__.py — /health and the footer read this.
-    init_py = ROOT / "plugin" / "kit" / "console_kit" / "__init__.py"
+    # overture/__init__.py — /health and the footer read this.
+    init_py = ROOT / "plugin" / "kit" / "overture" / "__init__.py"
     text = init_py.read_text(encoding="utf-8")
     new = re.sub(r'(__version__\s*=\s*)"[^"]*"', lambda m: f'{m.group(1)}"{version}"', text, count=1)
     if '__version__' not in new or f'"{version}"' not in new:

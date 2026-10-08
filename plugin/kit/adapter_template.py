@@ -1,7 +1,7 @@
 """This project's adapter for the owner console: the one file that knows the project.
 
-onboard.py copied this starter to .console-kit/adapter.py. It works as it is and
-keeps everything inside .console-kit/, so you can start answering questions at
+onboard.py copied this starter to .overture/adapter.py. It works as it is and
+keeps everything inside .overture/, so you can start answering questions at
 once and move the pieces into your own records later. See docs/ADAPTER.md.
 
     items()           the work the console can ask about, as id -> {title, parent, status}
@@ -16,11 +16,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-# This file lives at <project>/.console-kit/adapter.py.
+# This file lives at <project>/.overture/adapter.py.
 ROOT = Path(__file__).resolve().parents[1]
-ITEMS = ROOT / ".console-kit/items.json"          # {"ID": {"title": "...", "parent": null, "status": "open"}}
-SEED_DIR = ROOT / ".console-kit/seed"             # *.json, each a question or a list of questions
-RULINGS = ROOT / ".console-kit/RULINGS.md"        # append-only; one section per lock
+ITEMS = ROOT / ".overture/items.json"          # {"ID": {"title": "...", "parent": null, "status": "open"}}
+SEED_DIR = ROOT / ".overture/seed"             # *.json, each a question or a list of questions
+RULINGS = ROOT / ".overture/RULINGS.md"        # append-only; one section per lock
 HEADER = (
     "# Owner console rulings\n\n"
     "Appended by the console's fold, one section per lock, oldest first. Do not hand-edit:\n"

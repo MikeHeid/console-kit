@@ -1,14 +1,14 @@
-"""UserPromptSubmit: `/console-kit:as NAME` names this Claude Code session as agent NAME (0.8.4).
+"""UserPromptSubmit: `/overture:as NAME` names this Claude Code session as agent NAME (0.8.4).
 
 Before 0.8.4 the user named a session only when starting it,
-`CONSOLE_KIT_AGENT=agent-5 claude`. Now they may type, in the session,
+`OVERTURE_AGENT=agent-5 claude`. Now they may type, in the session,
 
-    /console-kit:as agent-5
+    /overture:as agent-5
 
 Claude Code hands every UserPromptSubmit hook the prompt's text as typed (a
-slash command arrives literally, "/console-kit:as agent-5") and the session's
+slash command arrives literally, "/overture:as agent-5") and the session's
 id. When the prompt is exactly that command with a valid agent name (the kit's
-name rule, `console_kit/names.py`), this hook appends `session id -> name` to
+name rule, `overture/names.py`), this hook appends `session id -> name` to
 STATE/sessions.jsonl of the registered project the session works in, the
 state directory from the user's own registry, as the other hooks find it. The
 skill of the same name (`skills/as`) only tells the user what happened; it is
@@ -42,9 +42,9 @@ sys.dont_write_bytecode = True  # never leave a __pycache__ in the installed plu
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import session_start as SS  # noqa: E402  (this plugin's own hook module, never the project's)
 
-COMMAND = "/console-kit:as"
+COMMAND = "/overture:as"
 # The command, then whatever follows it on the line. The name is checked by the kit's rule, not here.
-PROMPT = re.compile(r"\A\s*/console-kit:as(?:[ \t]+(?P<arg>[^\n]*?))?[ \t]*\n?\s*\Z")
+PROMPT = re.compile(r"\A\s*/overture:as(?:[ \t]+(?P<arg>[^\n]*?))?[ \t]*\n?\s*\Z")
 
 
 def note_for(payload: object) -> str | None:
@@ -93,7 +93,7 @@ def main() -> int:
     try:
         note = note_for(SS.read_input())
     except Exception as e:  # noqa: BLE001 - a broken hook never costs the owner a prompt
-        note = f"Owner console: /console-kit:as failed ({type(e).__name__}); nothing may have been recorded."
+        note = f"Owner console: /overture:as failed ({type(e).__name__}); nothing may have been recorded."
     if note:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": note}}))
     return 0

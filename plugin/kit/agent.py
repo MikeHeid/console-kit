@@ -45,7 +45,7 @@
                                                 named), 1 when nothing was written, 2 when the server
                                                 cannot be reached
     agent.py --state DIR next-step refine|drill --project DIR
-                                                print the installed user skill .console-kit.json's
+                                                print the installed user skill .overture.json's
                                                 `next_step` names for that kind; exit 1 naming why when
                                                 it is unset, not installed, or resolves into the project
     agent.py --state DIR working ITEM [ITEM ...]
@@ -78,7 +78,7 @@
 they print nothing on stdout, name the narrower command on stderr and exit 4,
 since a cut read would look whole.
 
-`register` records, in your own registry (~/.config/console-kit/projects.json),
+`register` records, in your own registry (~/.config/overture/projects.json),
 the project, this state dir, and the kit this agent.py lives in. The plugin
 acts only in registered projects and takes the paths it runs from there, never
 from the repository (§7.7).
@@ -104,7 +104,7 @@ STATE/agent.sock, as before.
 
 **Agent names (0.8.2).** When several sessions share one console, each may
 say who it is: `agent.py --as agent-6 ...` (before the subcommand), or
-CONSOLE_KIT_AGENT=agent-6 in its environment; `--as` wins. The name is 1 to 32
+OVERTURE_AGENT=agent-6 in its environment; `--as` wins. The name is 1 to 32
 lowercase letters, digits and single hyphens, starting with a letter, and
 neither "agent" nor "owner"; anything else is refused by name (exit 2) and
 nothing is sent. The owner's console shows it on the questions, replies,
@@ -117,18 +117,18 @@ set of marks.
 sessions share a console, the user may name one of them its steward, in their
 own registry: `agent.py --state DIR steward agent-5` (or `register ...
 --steward agent-5`). Then `watch` and `synced` (and `fold.py`) refuse, exit 1,
-unless this session's name (`--as`, or CONSOLE_KIT_AGENT) is the steward's; the
+unless this session's name (`--as`, or OVERTURE_AGENT) is the steward's; the
 refusal names the steward and points at `ask`, `reply` and `working`, which
-stay open to every session, named or not. The repository's `.console-kit.json`
+stay open to every session, named or not. The repository's `.overture.json`
 cannot set it. With no steward, everything is as in 0.8.2. It is a guardrail
 between cooperating sessions of one user, not a security boundary: any process
 running as that user can edit the registry or the cursor.
 
 **Session names (0.8.4).** The user may name a Claude Code session by typing
-`/console-kit:as agent-5` in it; the plugin records that session's id against
+`/overture:as agent-5` in it; the plugin records that session's id against
 the name in DIR/sessions.jsonl and puts the id in the session's Bash
-environment as CONSOLE_KIT_SESSION. This session's name is then, in order:
-`--as`, the name recorded for CONSOLE_KIT_SESSION, CONSOLE_KIT_AGENT.
+environment as OVERTURE_SESSION. This session's name is then, in order:
+`--as`, the name recorded for OVERTURE_SESSION, OVERTURE_AGENT.
 """
 
 import argparse
@@ -141,14 +141,14 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from console_kit import bundle as B  # noqa: E402
-from console_kit import doorbell as D  # noqa: E402
-from console_kit import gitseam as G  # noqa: E402
-from console_kit import names as N  # noqa: E402
-from console_kit import registry as R  # noqa: E402
-from console_kit import sessions as SN  # noqa: E402
-from console_kit import view as V  # noqa: E402
-from console_kit.server import agent_request  # noqa: E402
+from overture import bundle as B  # noqa: E402
+from overture import doorbell as D  # noqa: E402
+from overture import gitseam as G  # noqa: E402
+from overture import names as N  # noqa: E402
+from overture import registry as R  # noqa: E402
+from overture import sessions as SN  # noqa: E402
+from overture import view as V  # noqa: E402
+from overture.server import agent_request  # noqa: E402
 
 
 class DoorRefused(Exception):
@@ -169,7 +169,7 @@ class _Door:
     def request(self, method: str, path: str, body=None, agent: str | None = None):
         if self.project is None:
             return agent_request(self.sock, method, path, body, agent=agent)
-        from console_kit import serverfile as SF
+        from overture import serverfile as SF
         try:
             tok = SF.read_token(self.project)
         except SF.ServerFileError as e:
@@ -205,8 +205,8 @@ def resolve_door(state: Path) -> _Door:
     --project flag. A console no server.json entry hosts keeps its own
     per-project socket, STATE/agent.sock, exactly as before the one server.
     """
-    from console_kit import serverfile as SF
-    from console_kit.multiserver import socket_path
+    from overture import serverfile as SF
+    from overture.multiserver import socket_path
     s = os.path.realpath(state)
     try:
         hosted = {os.path.realpath(e["state"]): n for n, e in SF.load()["projects"].items()
@@ -297,7 +297,7 @@ def _slim_view(state: Path, since: bool = False):
 
 
 def _kit_version() -> str:
-    from console_kit import __version__
+    from overture import __version__
     return __version__
 
 
@@ -478,8 +478,8 @@ def _visual_export(state: Path, project: Path, ids: list[str]) -> int:
     1 nothing written (refused, or every chosen visual refused); 2 the server
     cannot be reached.
     """
-    from console_kit import projectcfg as PC
-    from console_kit import visuals as VIS
+    from overture import projectcfg as PC
+    from overture import visuals as VIS
     dest = Path(project).resolve()
     top = _git_top(dest)
     if top is None:
@@ -530,7 +530,7 @@ def _visual_export(state: Path, project: Path, ids: list[str]) -> int:
 
 def _costs(a) -> int:
     """`costs collect` / `costs show --fork ID` (K2). Reads transcripts here, in the session; the server never does."""
-    from console_kit import costs as C
+    from overture import costs as C
     if a.action == "show" and not a.fork:
         print("costs show needs --fork RECORD_ID", file=sys.stderr)
         return 1
@@ -563,7 +563,7 @@ def _items_push(a) -> int:
     this project's token, or a console's own single server (STATE/agent.sock).
     Neither server ever runs the adapter itself.
     """
-    from console_kit import fold as FO
+    from overture import fold as FO
     state = os.path.realpath(a.state)
     door = _door(a.state)
     found = R.enclosing(a.project)
@@ -603,13 +603,13 @@ def _items_push(a) -> int:
 def _portfolio(a) -> int:
     """0.13.0: cross-project overview, read from each project's STATE directory, no HTTP.
 
-    Scans the registry (`~/.config/console-kit/projects.json`), opens each state's `store.jsonl` and
+    Scans the registry (`~/.config/overture/projects.json`), opens each state's `store.jsonl` and
     `items.json` directly, and tallies open-question backlog + last-locked-at per project. One line per
     project; `--json` emits a list of dicts for programmatic use.
     """
-    from console_kit.store import Store
-    from console_kit import items as IT
-    from console_kit import registry as R
+    from overture.store import Store
+    from overture import items as IT
+    from overture import registry as R
     import datetime as _dt
     import json as _json
 
@@ -707,7 +707,7 @@ def _portfolio(a) -> int:
 
 def _sync_dashboard(a) -> int:
     """0.9.13: insert a stub section into the dashboard page for every item not already there."""
-    from console_kit import fold as FO
+    from overture import fold as FO
     state = os.path.realpath(a.state)
     found = R.enclosing(a.project)
     if found is None or found[1].get("state") != state:
@@ -726,7 +726,7 @@ def _sync_dashboard(a) -> int:
 
 def _sync_dashboard_write(root: Path, page_rel: str, items: dict) -> int:
     """Shared write-step for `sync-dashboard` and `items-push --sync-dashboard`."""
-    from console_kit import scaffold as SC
+    from overture import scaffold as SC
     page = (Path(root) / page_rel).resolve()
     if Path(root).resolve() not in page.parents:
         print(f"refused: {page} is not inside {root}", file=sys.stderr)
@@ -787,7 +787,7 @@ def _scaffold_dashboard(a) -> int:
     Idempotent. The page is wrapped in `scaffold:<name> start/end` markers so re-running adds missing
     sections without clobbering hand edits; `board()` is only added when it is absent.
     """
-    from console_kit import scaffold as SC
+    from overture import scaffold as SC
     try:
         plan = SC.prepare(a.project, a.page, a.adapter, a.name or Path(a.project).resolve().name)
         touched = SC.apply(plan)
@@ -817,7 +817,7 @@ def _scaffold_dashboard(a) -> int:
 def _items_watch(a) -> int:
     """0.9.3: poll the project's items + adapter and re-run items-push whenever anything changes.
 
-    Watches `--adapter`, `.console-kit/items.json`, `.console-kit.json`, and any extra paths named by
+    Watches `--adapter`, `.overture/items.json`, `.overture.json`, and any extra paths named by
     `--watch` (comma-separated, project-relative). An initial push runs at startup; subsequent pushes
     fire when any file's (mtime, size) fingerprint changes. Ctrl+C exits cleanly. No file-watcher
     dependency: a plain stat loop at `--interval` seconds (default 5).
@@ -829,7 +829,7 @@ def _items_watch(a) -> int:
     adapter_abs = (root / a.adapter).resolve() if not Path(a.adapter).is_absolute() else Path(a.adapter)
 
     paths: list[Path] = [adapter_abs]
-    for rel in (".console-kit/items.json", ".console-kit.json"):
+    for rel in (".overture/items.json", ".overture.json"):
         paths.append((root / rel).resolve())
     for extra in (a.watch or "").split(","):
         extra = extra.strip()
@@ -898,8 +898,8 @@ def _page_snapshot(a) -> int:
     reaches it.
     """
     import base64
-    from console_kit import pagesnap as PS
-    from console_kit import serverfile as SF
+    from overture import pagesnap as PS
+    from overture import serverfile as SF
 
     def refuse(why: str, rc: int = 1) -> int:
         print(f"refused, nothing sent: {why}", file=sys.stderr)
@@ -969,7 +969,7 @@ def _page_snapshot(a) -> int:
 
 def _history_push(a) -> int:
     """`history-push` (Q23 part 2): git runs HERE; the server gets past versions and spec times as data."""
-    from console_kit import stewardgit as SG
+    from overture import stewardgit as SG
     state = os.path.realpath(a.state)
     found = R.enclosing(a.project)
     if found is None or found[1].get("state") != state:
@@ -1013,7 +1013,7 @@ def _prs_push(a) -> int:
     runs in. The server checks the same closed schema again; it never talks to
     GitHub and starts no process.
     """
-    from console_kit import prs as PR
+    from overture import prs as PR
 
     def refuse(why: str, rc: int = 1) -> int:
         print(f"refused, nothing sent: {why}", file=sys.stderr)
@@ -1075,7 +1075,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--state", type=Path, required=True)
     ap.add_argument("--as", dest="agent", metavar="NAME",
-                    help=f"this session's agent name, e.g. agent-6 (default: this session's /console-kit:as, "
+                    help=f"this session's agent name, e.g. agent-6 (default: this session's /overture:as, "
                          f"then ${N.ENV}; none: unnamed, as in 0.8.1)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("inbox")
@@ -1190,19 +1190,19 @@ def main(argv=None) -> int:
     sub.add_parser("trigger-token", description="0.12.0: mint a fresh bearer token and its sha256 for a "
                    "trigger. Print the plaintext (for the sender) and the sha256 (for triggers.json).")
     sub.add_parser("portfolio-token", description="0.19.0: print the layout the operator uses to wire a "
-                   "Cloudflare Access service token into .console-kit/portfolio.json + "
+                   "Cloudflare Access service token into .overture/portfolio.json + "
                    "STATE/portfolio-secrets/<peer>.json so the home console can fetch a peer's slim view.")
     s = sub.add_parser("portfolio", description="0.13.0: list every project registered on this machine with "
                        "its open-question backlog read from each STATE directly. Read-only; no HTTP calls.")
     s.add_argument("--json", action="store_true", help="emit JSON instead of a table")
-    s = sub.add_parser("playbook", description="0.18.0: run a named playbook (.console-kit/playbooks/<name>.json) "
+    s = sub.add_parser("playbook", description="0.18.0: run a named playbook (.overture/playbooks/<name>.json) "
                        "through this console's agent socket. Each step lands as an owner message write; the "
                        "steward's watch picks them up as it does any delegation.")
     s.add_argument("name", help="the playbook's slug (file basename without .json)")
     s = sub.add_parser("sync-dashboard", description="0.9.13: insert a <details id=item-X data-ck-item=X> stub "
                        "into the dashboard page for every item not already there. Nested by parent via per-item "
                        "markers so re-runs preserve hand-edits inside each node.")
-    s.add_argument("--adapter", default=".console-kit/adapter.py", help="the adapter, a path inside the project")
+    s.add_argument("--adapter", default=".overture/adapter.py", help="the adapter, a path inside the project")
     s.add_argument("--page", default="docs/console/page.html",
                    help="the dashboard page to update (project-relative)")
     s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
@@ -1213,12 +1213,12 @@ def main(argv=None) -> int:
     s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
     s.add_argument("--interval", type=float, default=5.0, help="poll seconds (default: 5; clamped to 1..300)")
     s.add_argument("--watch", default="", help="comma-separated project-relative paths to watch in addition to the "
-                   "adapter, .console-kit/items.json and .console-kit.json")
+                   "adapter, .overture/items.json and .overture.json")
     s = sub.add_parser("scaffold-dashboard", description="0.9.3: write a dashboard page with Items / Rollout / "
                        "Engine / Spec / Footer sections and inject a matching board() into the project's adapter. "
                        "Idempotent: re-run adds missing sections without clobbering hand edits.")
-    s.add_argument("--adapter", default=".console-kit/adapter.py",
-                   help="the adapter, a path inside the project (default: .console-kit/adapter.py)")
+    s.add_argument("--adapter", default=".overture/adapter.py",
+                   help="the adapter, a path inside the project (default: .overture/adapter.py)")
     s.add_argument("--page", default="docs/console/page.html",
                    help="where to write the dashboard page (default: docs/console/page.html)")
     s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
@@ -1267,7 +1267,7 @@ def main(argv=None) -> int:
     s.add_argument("token_cmd", choices=("rotate",))
     s.add_argument("project_name", metavar="NAME")
     a = ap.parse_args(argv)
-    # The agent name: --as, then this session's /console-kit:as (0.8.4), then CONSOLE_KIT_AGENT (0.8.2);
+    # The agent name: --as, then this session's /overture:as (0.8.4), then OVERTURE_AGENT (0.8.2);
     # an empty variable counts as unset.
     a.agent, where = SN.resolve(a.agent, a.state)
     if a.agent is not None:
@@ -1318,7 +1318,7 @@ def steward_refusal(state: Path, agent: str | None, what: str) -> str | None:
             f"watches the doorbell, marks it synced and folds answers. Use `ask`, `reply` and `working` instead, "
             f"signed with --as YOUR-NAME: the steward handles the owner's requests. (The steward is set in your "
             f"own registry, {R.location()}, with `agent.py steward`; a session named {name} runs as it: "
-            f"--as {name}, /console-kit:as {name} typed in the session, or {N.ENV}={name}.)")
+            f"--as {name}, /overture:as {name} typed in the session, or {N.ENV}={name}.)")
 
 
 def _run(a, bell: Path) -> int:
@@ -1361,17 +1361,17 @@ def _run(a, bell: Path) -> int:
         print("Compute sha256(client_secret) with:")
         print("  sha256=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.read().strip().encode()).hexdigest())' < secret.txt)")
         print()
-        print('Then paste into .console-kit/portfolio.json alongside the Cloudflare client_id:')
+        print('Then paste into .overture/portfolio.json alongside the Cloudflare client_id:')
         print('  "peers": {"<peer-name>": {"url": "https://peer-console.example.com",')
         print('                             "client_id": "...access", "token_sha256": "..."}}')
         return 0
     if a.cmd == "trigger-token":
-        from console_kit import triggers as TR
+        from overture import triggers as TR
         token, sha = TR.mint()
         print("Token (give to the sender — this is the plaintext):")
         print(f"  {token}")
         print()
-        print("Put this in .console-kit/triggers.json under the trigger's token_sha256:")
+        print("Put this in .overture/triggers.json under the trigger's token_sha256:")
         print(f"  {sha}")
         print()
         print("The sender calls POST /api/trigger/<name> with")
@@ -1384,7 +1384,7 @@ def _run(a, bell: Path) -> int:
     if a.cmd == "page-snapshot":
         return _page_snapshot(a)
     if a.cmd == "server" and a.server_cmd == "token":
-        from console_kit import serverfile as SF
+        from overture import serverfile as SF
         try:
             f = SF.rotate(a.project_name)
         except SF.ServerFileError as err:
@@ -1394,7 +1394,7 @@ def _run(a, bell: Path) -> int:
               f"the next request, and agent.py reads the new one on its next call")
         return 0
     if a.cmd == "server":
-        from console_kit import serverfile as SF
+        from overture import serverfile as SF
         try:   # the name is the user's word on this command line, never a key of the repository's config
             e = SF.add(a.project_name, a.state, a.hostname, a.aud, a.port, a.team_domain, root=a.root,
                        page=a.page, slugs=a.slugs)
@@ -1459,12 +1459,12 @@ def _run(a, bell: Path) -> int:
     if a.cmd == "working":
         return _call(a.state, "POST", "/working", {"items": a.items}, agent=a.agent)
     if a.cmd == "next-step":
-        from console_kit import projectcfg as PC
+        from overture import projectcfg as PC
         try:
             cfg = PC.load(a.project)
             name = cfg.next_step.get(a.kind)
             if not name:
-                raise PC.ConfigError(f".console-kit.json names no next_step skill for {a.kind!r}")
+                raise PC.ConfigError(f".overture.json names no next_step skill for {a.kind!r}")
             path = PC.resolve_skill(name, a.project)
         except PC.ConfigError as e:
             print(f"refused: {e}", file=sys.stderr)

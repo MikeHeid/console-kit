@@ -19,7 +19,7 @@ that fork's transcript in the store; the adapter prints it.
 `KIT` and `STATE` come from **the user's registry only**, set up as in the
 console-process skill; if this project is not registered there, stop.
 `fold.locked`, `fold.ledger` and `fold.adapter` come from the repository's
-`.console-kit.json`, and each must be a relative path of plain characters
+`.overture.json`, and each must be a relative path of plain characters
 (letters, digits, `_ . / -`) that stays inside the project: no leading `/`, no
 `..`, no `~`. Refuse any other value by name. The adapter is the project's own
 Python and the fold runs it, which is why the fold only ever happens in a
@@ -28,7 +28,7 @@ project the user registered.
 **Only the steward folds (0.8.3).** When the registry entry names a
 `steward`, `fold.py` (export and fold) refuses any session whose name
 (`--as NAME` before the subcommand, else the name the user gave this session
-with `/console-kit:as NAME` (0.8.4), else `CONSOLE_KIT_AGENT`) is not the
+with `/overture:as NAME` (0.8.4), else `OVERTURE_AGENT`) is not the
 steward's. If you are not the steward, stop: the steward folds.
 
 1. **Branch.** Work on a branch of its own, never the main branch.
@@ -41,8 +41,8 @@ steward's. If you are not the steward, stop: the steward folds.
 3. **Read** each new file. When the owner's own words (`own_text`) change what
    the picked option means, the ruling is the words.
 4. **Check the adapter before anything runs it.** Even the preview imports
-   it. Compare `<fold.adapter>` and `.console-kit.json` with the main branch
-   (`git diff <main> -- <fold.adapter> .console-kit.json`). If either differs,
+   it. Compare `<fold.adapter>` and `.overture.json` with the main branch
+   (`git diff <main> -- <fold.adapter> .overture.json`). If either differs,
    stop and tell the user what changed: the fold runs whatever adapter is
    checked out, and a branch you did not write could carry its own. Run every
    `fold.py` command from the project root; it refuses any path that leaves

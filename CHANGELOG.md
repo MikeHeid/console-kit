@@ -1,6 +1,6 @@
 # Changelog
 
-What each console-kit release added, oldest first. These sections moved
+What each overture release added, oldest first. These sections moved
 word for word from the README, where each was written as its release
 shipped. The README itself describes the kit as it is today.
 
@@ -38,7 +38,7 @@ shipped. The README itself describes the kit as it is today.
 - **"Next step ▾"** beside every locked answer and every round's answers
   offers three kinds of fork: **Follow up** (seats you pick, as before),
   **Refine** and **Drill**. Refine and drill run the project's own skill,
-  named in `.console-kit.json`'s `next_step`, on that answer or round. Neither
+  named in `.overture.json`'s `next_step`, on that answer or round. Neither
   writes into the project before you lock: what they find comes back as
   questions, specs land by pull request, and log entries at merge time.
 - **Roar** is a seat in the follow-up picker: a three-round panel
@@ -55,7 +55,7 @@ shipped. The README itself describes the kit as it is today.
   no spec and no item title mentions (or a proposed item has no spec),
   *deliberate* when an answer
   is stale or went against the ★. The server works them out by rule
-  (`console_kit/tags.py`); they start nothing.
+  (`overture/tags.py`); they start nothing.
 - **Request a visual** on an item: an agent answers with a Mermaid diagram
   (shown as its source text) or a static HTML mock (shown **only** inside
   `<iframe sandbox="">`, served under a `sandbox` Content-Security-Policy, so
@@ -72,7 +72,7 @@ shipped. The README itself describes the kit as it is today.
 ## Several agents, one console (0.8.2)
 
 - **Agent names.** A session may say who it is: `agent.py --as agent-6`, or
-  `CONSOLE_KIT_AGENT=agent-6`. The console shows the name wherever it shows
+  `OVERTURE_AGENT=agent-6`. The console shows the name wherever it shows
   an agent as the author: "asked by agent-6" on a question, on replies and
   chat messages, visuals, roar transcripts and Feed rows. `fold.py export`
   carries it as `asked_by_agent`, so a ruling can say which agent asked. A
@@ -104,12 +104,12 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   It is set on every project registered on that state (several checkouts of
   one project share one console, so they share its steward).
 - **Start the steward session with its name in the environment**:
-  `CONSOLE_KIT_AGENT=agent-5 claude`. Its `agent.py` calls then carry the
+  `OVERTURE_AGENT=agent-5 claude`. Its `agent.py` calls then carry the
   name, and the question hook recognises it. Start the others with names of
-  their own (`CONSOLE_KIT_AGENT=agent-6 claude`).
+  their own (`OVERTURE_AGENT=agent-6 claude`).
 - **The lock.** With a steward set, `agent.py watch`, `agent.py synced` and
   `fold.py` (export and fold) refuse, exit 1, any session whose name
-  (`--as`, else `CONSOLE_KIT_AGENT`) is not the steward's, and the refusal
+  (`--as`, else `OVERTURE_AGENT`) is not the steward's, and the refusal
   names the steward. `ask`, `reply` and `working` stay open to every
   session, named or not.
 - **The question hook.** In a registered project with a steward, the plugin
@@ -120,7 +120,7 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   hook fails open: if it cannot read your registry, the question goes
   through.
 - **A guardrail, not a lock against an attacker.** Every session runs as you,
-  on the same socket and files; one that sets `CONSOLE_KIT_AGENT` to the
+  on the same socket and files; one that sets `OVERTURE_AGENT` to the
   steward's name is the steward. It keeps your own cooperating sessions from
   racing for the cursor, and nothing more.
 - With no steward set, everything is exactly as in 0.8.2.
@@ -132,9 +132,9 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
 
 ## Name a session from inside it (0.8.4)
 
-- **`/console-kit:as NAME`.** Type it in a Claude Code session (e.g.
-  `/console-kit:as agent-5`) instead of starting the session as
-  `CONSOLE_KIT_AGENT=agent-5 claude`, which still works as the fallback. The
+- **`/overture:as NAME`.** Type it in a Claude Code session (e.g.
+  `/overture:as agent-5`) instead of starting the session as
+  `OVERTURE_AGENT=agent-5 claude`, which still works as the fallback. The
   plugin's UserPromptSubmit hook records the session's id against the name in
   `<state>/sessions.jsonl` (mode 0600, rewritten to its newest lines before it
   passes 64 KiB) for the registered project the session works in. The skill
@@ -146,14 +146,14 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
 - **Everything reads it the same way.** The question hook, the SessionStart
   note, `agent.py` and `fold.py` take this session's name as: `--as` (the two
   scripts), then the name recorded for this session, then
-  `CONSOLE_KIT_AGENT`. `agent.py` and `fold.py` find the session through
-  `CONSOLE_KIT_SESSION`, which the SessionStart hook exports into the
+  `OVERTURE_AGENT`. `agent.py` and `fold.py` find the session through
+  `OVERTURE_SESSION`, which the SessionStart hook exports into the
   session's Bash environment (`CLAUDE_ENV_FILE`).
 - **The file only names sessions; your registry still names the steward.** A
   stale or damaged line cannot make a session the steward the registry does
   not name, and never locks the steward out: the last well-formed line for a
   session wins, so typing the command again fixes it, and a file that cannot
-  be read gives no name (the hooks then fall back to `CONSOLE_KIT_AGENT`).
+  be read gives no name (the hooks then fall back to `OVERTURE_AGENT`).
 - **Still a guardrail.** Any prompt submitted in the session fires the hook:
   one you type, or one another plugin's SessionStart hook injects
   (`initialUserMessage`). Claude calling a tool does not.
@@ -266,7 +266,7 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
   why. Refine chips show a spec's file time in place of its last commit.
   These return once an agent-side step computes and supplies them.
 - **How it is held.** Among the modules the server runs,
-  `console_kit/gitseam.py` is the only place a process can be started, and
+  `overture/gitseam.py` is the only place a process can be started, and
   the server closes it before reading the project. (`agent.py` and `tools/`
   still run git, in the agent's or the operator's own process; the server
   never imports them.) A test runs the real server under an audit hook and
@@ -451,10 +451,10 @@ Owner decision, 2026-09-30: *"Lock + hook others ★"*.
 
 The plugin carries the skills the console's rounds lean on, so a fresh
 install needs nothing else: **`roar`** (a three-seat panel on the plugin's
-own `console-kit:architect`, `console-kit:ux` and `console-kit:other` sitting
+own `overture:architect`, `overture:ux` and `overture:other` sitting
 as advisor), **`refine`**, **`drill`** and **`deliberate`**. Run them as
-`/console-kit:roar` and so on. Onboarding now writes `next_step` as
-`{"refine": "console-kit:refine", "drill": "console-kit:drill"}` when a
+`/overture:roar` and so on. Onboarding now writes `next_step` as
+`{"refine": "overture:refine", "drill": "overture:drill"}` when a
 project names none; a project's own entry is kept. Inside a console round
 none of them writes into the project before the owner locks. The lookup's
 trust rules are unchanged: installed user or plugin skills only, never a
@@ -491,8 +491,8 @@ skill inside the repository.
 ## Footer version and the stale-board bar (0.8.14)
 
 - **The footer names the kit version** (owner, 2026-10-01: "version number
-  should be in footer"). It reads "console-kit 0.8.13", say, taken from the
-  page's config, which the server fills from `console_kit.__version__`: the
+  should be in footer"). It reads "overture 0.8.13", say, taken from the
+  page's config, which the server fills from `overture.__version__`: the
   same value `/health` reports, never typed into `console.js`. It shares the
   usage footer's bar, so the page keeps one bottom bar that already makes
   room for itself, and the bar now shows even when the usage footer is off or
@@ -693,7 +693,7 @@ longer needs any of the workarounds they describe.
   guarantee explicit, so a WSL copy from the plugin cache no longer needs
   the dos2unix dance.
 - **A dotfile page path is accepted.** `serverfile.PAGE` now allows a
-  single leading dot on the first path segment, so `.console-kit/page.html`
+  single leading dot on the first path segment, so `.overture/page.html`
   (the onboarding default) passes. `.`, `..`, `./foo` and empty components
   are still refused by `_page_problem`.
 - **`page-snapshot` reads origin's default branch.** `--from-ref` defaults
@@ -710,15 +710,15 @@ longer needs any of the workarounds they describe.
 
 ## Fix /health version drift and automate the bump (0.9.2)
 
-- **`console_kit.__version__` is in step with VERSION again.** Across 0.9.0
+- **`overture.__version__` is in step with VERSION again.** Across 0.9.0
   and 0.9.1 the package's `__version__` stayed at `0.8.18`, so `/health`,
-  the dashboard footer, and the `console-kit` block the server embeds all
+  the dashboard footer, and the `overture` block the server embeds all
   reported the wrong version. The code itself was 0.9.1; only the label
   lied. 0.9.2 brings every version-holding file into sync and reports
   `0.9.2`.
 - **`release.py <version>` bumps all four files in one shot.** `VERSION`,
   `plugin/.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`
-  and `plugin/kit/console_kit/__init__.py` are updated from one invocation,
+  and `plugin/kit/overture/__init__.py` are updated from one invocation,
   so the next release cannot drift. `test_build.py::LayoutTests` already
   asserts the four stay equal; the script just makes passing that test the
   default.
@@ -735,7 +735,7 @@ longer needs any of the workarounds they describe.
   mature console (dashboard, rollout, engine, spec) uses, so a fresh
   install does not look bare.
 - **`agent.py items-watch`** polls the project's adapter,
-  `.console-kit/items.json`, `.console-kit.json` and any extra `--watch`
+  `.overture/items.json`, `.overture.json` and any extra `--watch`
   paths and re-runs `items-push` whenever any changes. A plain stat loop
   (no file-watcher dependency); `--interval` clamps to 1..300 s. Pair
   with the scaffolded `board()` to keep the dashboard fresh "as the
@@ -752,9 +752,9 @@ longer needs any of the workarounds they describe.
   from `metadata.description` to top-level `description`, matching the
   shape `build_zip.py` has emitted for the zip-marketplace since 0.8.12.
   Users on the GitHub-source install (`/plugin marketplace add
-  MikeHeid/console-kit`) can now actually upgrade: Claude Code reads the
+  MikeHeid/overture`) can now actually upgrade: Claude Code reads the
   top-level `description` as the spec expects, so `/plugin marketplace
-  update console-kit` picks up the new version and Desktop ungrays Update.
+  update overture` picks up the new version and Desktop ungrays Update.
 - **A one-time install / upgrade notice**, printed by the SessionStart
   hook the first time a session runs in a registered project after a
   version change. A short banner followed by the commands most useful at
@@ -774,7 +774,7 @@ longer needs any of the workarounds they describe.
   path is honoured whichever way the browser resolves `'self'`.
 - **Init is gated on the lib's `load` event** so a slow fetch never races
   ahead of `mermaid.initialize`, and the error UI now names the file to
-  check (`plugin/kit/console_kit/vendor/mermaid.min.js`) rather than only
+  check (`plugin/kit/overture/vendor/mermaid.min.js`) rather than only
   the exception.
 
 ## Fix Mermaid rendering as text, not SVG (0.9.6)
@@ -921,7 +921,7 @@ the tag styling for every state the view emits.
 
 ## Dashboard section links, Direction strip, immediate lock (0.9.12)
 
-- **Dashboard section links.** `.console-kit.json` gains an optional
+- **Dashboard section links.** `.overture.json` gains an optional
   `sections` map: `{"AB-2": ["#features/rollout", "#features/timeline"]}`.
   Each item id maps to one or more `#anchor` fragments on the dashboard
   page. The item view renders them as "Dashboard: #features/rollout →"
@@ -978,7 +978,7 @@ the tag styling for every state the view emits.
   view loads. Closing the panel once sticks for the session
   (`sessionStorage: ck-inbox-closed`).
 - **README additions**: a "Name the session, bootstrap the dashboard"
-  section with `/console-kit:as`, the full `scaffold-dashboard →
+  section with `/overture:as`, the full `scaffold-dashboard →
   sync-dashboard → page-snapshot → items-watch` chain, and the CSS
   custom-property surface for re-skinning. A new "Hooks the plugin
   ships" section documents `SessionStart` (the doorbell),
@@ -1003,7 +1003,7 @@ This is step 1 of the "ultimate web orchestrator" arc. On deck:
 
 ## Playbooks — codified multi-step delegations (0.11.0)
 
-A playbook is `.console-kit/playbooks/<slug>.json` with a `description`
+A playbook is `.overture/playbooks/<slug>.json` with a `description`
 and an ordered list of `steps`. Each step is `{"kind": "round"|"visual"
 |"chat", "item": "...", "text": "...", mode/focus (round only)}`.
 Picked from the Delegate bar's "Run a playbook" option.
@@ -1026,7 +1026,7 @@ Picked from the Delegate bar's "Run a playbook" option.
 
 ## Webhook triggers — external events fire playbooks (0.12.0)
 
-Codify an external event → playbook mapping in `.console-kit/triggers.json`:
+Codify an external event → playbook mapping in `.overture/triggers.json`:
 
     {"triggers": {"pr-merged": {"playbook": "security-review",
                                 "token_sha256": "<sha256 of the bearer token, hex>"}}}
@@ -1061,7 +1061,7 @@ in-server cron if the webhook path proves solid.
 
 ## Portfolio — one view across every registered console (0.13.0)
 
-- **`agent.py portfolio`** reads `~/.config/console-kit/projects.json`
+- **`agent.py portfolio`** reads `~/.config/overture/projects.json`
   and, for each registered project, opens its `STATE/store.jsonl`
   directly. No HTTP calls, no running server required: it tallies
   open-questions-awaiting-you, unlocked, locked, waiting visuals, and
@@ -1164,12 +1164,12 @@ to the server. The hint ("drag · wheel to zoom · click to highlight
 downstream") moved to the bottom of the stage so the chip row has
 breathing room.
 
-## `/console-kit:playbook` — run a playbook from any Claude session (0.18.0)
+## `/overture:playbook` — run a playbook from any Claude session (0.18.0)
 
 The browser was the only way to run a playbook; now any Claude session
 on the project's machine can.
 
-- New plugin skill **`playbook`** (`/console-kit:playbook <slug>`): the
+- New plugin skill **`playbook`** (`/overture:playbook <slug>`): the
   agent reads `view.playbooks`, confirms the slug and the step count,
   dispatches, and reports `{records, skipped}` from the server.
 - New CLI **`agent.py playbook <name>`** POSTs through the console's
@@ -1203,7 +1203,7 @@ console at a glance and alerts the OS when a sibling needs them.
   during off-hours stays silent.
 - **Portfolio tab note**: `N ?you` sums the `awaiting_you` across all
   peers plus self, so the roll-up is visible from any other tab.
-- **How peers talk to the home server**: `.console-kit/portfolio.json`
+- **How peers talk to the home server**: `.overture/portfolio.json`
   committed in the repo lists each peer's URL, Cloudflare Access
   service-token `client_id`, and the **sha256** of its secret. The
   plaintext secret lives in `STATE/portfolio-secrets/<peer>.json`
@@ -1237,7 +1237,7 @@ firing:
   one of `awaiting_you`, `unlocked`, `locked`, `stale`.
 - `item_has_state` — the same, scoped to one item id.
 - `item_exists` — a specific item is in the register.
-- `has_section` — a `.console-kit.json` section is configured.
+- `has_section` — a `.overture.json` section is configured.
 - `not` — negates another predicate (nested up to three levels so a
   typo cannot build a loop).
 
@@ -1256,7 +1256,7 @@ heads-up when there is unanswered work:
     }
 
 A trigger (webhook or cron) and the Delegate bar and the
-`/console-kit:playbook` slash command all go through the same
+`/overture:playbook` slash command all go through the same
 `run_playbook`, so the `when` behaviour is the same wherever a
 playbook fires. The browser's Delegate bar shows which steps were
 skipped in the firing's result row, with the predicate reason.
@@ -1454,3 +1454,49 @@ Shape of the output:
   Esc / backdrop close.
 - Nothing is sent anywhere else — the generated Markdown stays in
   this browser until the owner pastes it.
+
+## Overture — the 1.0 rename (1.0.0)
+
+**console-kit is now Overture.** The product name, the GitHub repo,
+the plugin manifest, the Python package, the slash-command prefix,
+the service file, and the on-disk paths all rename at once.
+Semantically nothing else changes in 1.0 — every feature from 0.9.6
+through 0.28.0 keeps working as it did, under new names.
+
+- **GitHub:** `MikeHeid/console-kit` → `MikeHeid/overture`.
+- **Plugin manifest:** `name: overture` (slash commands now
+  `/overture:*`, e.g. `/overture:playbook`, `/overture:as`).
+- **Python package:** `console_kit` → `overture`.
+- **Env vars:** `CONSOLE_KIT_*` → `OVERTURE_*`.
+- **Config paths:** `.console-kit.json` → `.overture.json`;
+  `.console-kit/` → `.overture/` (playbooks, triggers,
+  portfolio.json live under there).
+- **State / share dirs:**
+  `~/.config/console-kit/`     → `~/.config/overture/`,
+  `~/.local/share/console-kit/`→ `~/.local/share/overture/`,
+  `~/.local/state/console-kit/`→ `~/.local/state/overture/`.
+- **Service / socket:** `console-kit.service` → `overture.service`;
+  `console-kit-agent.sock` → `overture-agent.sock`.
+
+**Register-after-upgrade reminder.** A new SessionStart hook,
+`install_notice.py`, prints an ASCII Overture banner and the
+agent-registration commands exactly once per installed version,
+then writes a per-version flag so it stays silent on later
+sessions. The flag path encodes the version, so the next upgrade
+fires it again. Linux/macOS/WSL users get the direct `agent.py
+register` + `systemctl --user start overture.service` pair;
+Windows users get the WSL-wrapped variants (`wsl -d Ubuntu-24.04
+-- …`), because the server itself only runs on POSIX.
+
+**Upgrading from console-kit 0.28.0 or earlier.** The 1.0
+rename is deliberate; it needs a fresh registration. After the
+upgrade, run (Linux/macOS/WSL):
+
+    python3 ~/.local/share/overture/kit/plugin/kit/agent.py register
+
+Then start the user service:
+
+    systemctl --user start overture.service
+
+The hook will remind you if you forget — once per installed
+version, and it goes quiet after.

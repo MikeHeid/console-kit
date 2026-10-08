@@ -204,7 +204,7 @@ class Heartbeat:
         except OSError as e:
             if not self._warned:
                 self._warned = True
-                self.warn(f"console-kit: cannot record the watch in {self.state / WATCH_FILE}: {e}; "
+                self.warn(f"overture: cannot record the watch in {self.state / WATCH_FILE}: {e}; "
                           "the owner will not see 'agent listening'")
 
     def __call__(self) -> None:

@@ -10,9 +10,9 @@ to the console.
 **Which session is the steward.** A hook learns nothing from Claude Code about
 who the session is beyond a session id (the input's `session_id`), which
 changes on /clear and --fork-session and is kept by --resume and --continue.
-So the user says it (0.8.4): typing `/console-kit:as agent-5` in the session
+So the user says it (0.8.4): typing `/overture:as agent-5` in the session
 records that session id as agent-5 in the console's STATE/sessions.jsonl
-(`name_session.py`). Starting the session as `CONSOLE_KIT_AGENT=agent-5 claude`
+(`name_session.py`). Starting the session as `OVERTURE_AGENT=agent-5 claude`
 still works, as the fallback when the session was given no name. The steward
 itself is named only in the user's registry (`agent.py steward NAME`), never by
 the repository, and never by the sessions file: that file only says which name
@@ -22,7 +22,7 @@ The decision, for a call to AskUserQuestion:
 
 - the session's directory (the input's `cwd`, then CLAUDE_PROJECT_DIR) is in
   no registered project, or its console has no steward: allowed, as in 0.8.2;
-- the session's name (its /console-kit:as, else CONSOLE_KIT_AGENT) is the
+- the session's name (its /overture:as, else OVERTURE_AGENT) is the
   steward's name: allowed;
 - otherwise: denied, with the full `agent.py ask` command (KIT and STATE from
   the registry) as the reason Claude reads.
@@ -34,7 +34,7 @@ costs the owner a session. It reads the registry as the SessionStart hook does
 executes nothing from the project.
 
 This is a guardrail between the owner's own cooperating sessions, not a
-security boundary: any session can set CONSOLE_KIT_AGENT to the steward's name,
+security boundary: any session can set OVERTURE_AGENT to the steward's name,
 and anything that runs code as the user can write the sessions file.
 """
 
@@ -76,7 +76,7 @@ def reason(payload: object) -> str | None:
             f"the owner live, mirrors each live answer to the console, so every question reaches the owner either "
             f"way. Then carry on with other work, or stop and say which question is waiting on the console."
             + ("" if me else f" (If this session is the steward, the user names it by typing "
-                             f"`/console-kit:as {steward}`; tell the user.)"))
+                             f"`/overture:as {steward}`; tell the user.)"))
 
 
 def main() -> int:

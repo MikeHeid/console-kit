@@ -1,6 +1,6 @@
-# console-kit user guide
+# overture user guide
 
-A practical walk-through for someone new to console-kit: what it is, how to
+A practical walk-through for someone new to overture: what it is, how to
 install and run it, and what a normal day looks like on each side, the owner's
 and the agents'. It links to the reference docs instead of repeating them:
 
@@ -14,7 +14,7 @@ and the agents'. It links to the reference docs instead of repeating them:
 ## What it is
 
 Your agents (Claude Code sessions working in a project) keep hitting decisions
-only you can make. console-kit turns each one into a **structured question**:
+only you can make. overture turns each one into a **structured question**:
 the options, a recommended pick (★), and what each costs. Those questions land
 in an **inbox on a web page** that you open from any browser, behind Cloudflare
 Access. You answer, in your own words if you like, and **lock** the answer.
@@ -31,7 +31,7 @@ It has three parts:
 | **Claude Code plugin** | in every Claude session you open | a SessionStart note of what you sent, the skills (`console-process`, `console-fork`, `console-fold`, `console-ask`, `console-visual`, `as`, `console-onboard`), the committee seat agents |
 
 The plugin acts **only in projects you registered** in your own registry
-(`~/.config/console-kit/projects.json`). A repository can never register
+(`~/.config/overture/projects.json`). A repository can never register
 itself.
 
 ## Install: one pinned copy per machine
@@ -42,10 +42,10 @@ ruling, CONSOLE-kit/Q13.)
 
 - **From the release zip or GitHub:** follow [INSTALL.md](../INSTALL.md) §1. The plugin
   carries the kit, and `deploy/install.sh` copies it to
-  `~/.local/share/console-kit/kit`, with its venv beside it. Every project you
+  `~/.local/share/overture/kit`, with its venv beside it. Every project you
   install from that plugin runs that one copy, at the plugin's version.
 - **From a git clone, pinned to a tag:** follow [MIGRATION.md](MIGRATION.md) §1. It
-  makes a detached worktree at the tag under `~/.local/share/console-kit/releases/`
+  makes a detached worktree at the tag under `~/.local/share/overture/releases/`
   and a `current` symlink to it. Use this if you develop the kit, or if a
   project used to vendor it.
 
@@ -55,7 +55,7 @@ branch never changes the kit.
 **Still to come (spec'd, not built):** one console **server** for all your
 projects. Each project's install will link into it through an API with a
 per-project token, and keep its own store. The design is in
-`console-kit-multiproject.md`. Until it ships, each project runs its own
+`overture-multiproject.md`. Until it ships, each project runs its own
 server process from the shared install.
 
 ## Register a project
@@ -65,7 +65,7 @@ You run this, never an agent:
     python3 <kit>/agent.py --state <state dir> register --project <project root>
 
 `<kit>` is the directory holding the `agent.py` you run (the pinned install's
-`plugin/kit`, or `~/.local/share/console-kit/kit`). `register` records that
+`plugin/kit`, or `~/.local/share/overture/kit`). `register` records that
 directory, so run the copy you want sessions to use. Add
 `--steward agent-5` to name the one session allowed to watch, sync and fold
 (see "Stewards", below).
@@ -74,7 +74,7 @@ directory, so run the copy you want sessions to use. Add
 
 In a Claude session in the project:
 
-    /console-kit:console-onboard
+    /overture:console-onboard
 
 It asks for five values (name, team domain, AUD tag, hostname, port). It writes
 the project's non-secret settings and a starter page and adapter, then
@@ -144,8 +144,8 @@ real items and folds land in your decision record:
 Most of this is driven by the plugin's skills. Knowing the shape helps you
 read what your sessions do.
 
-- **Sessions name themselves.** Type `/console-kit:as agent-5` in a session,
-  or start it as `CONSOLE_KIT_AGENT=agent-5 claude`. The console then shows
+- **Sessions name themselves.** Type `/overture:as agent-5` in a session,
+  or start it as `OVERTURE_AGENT=agent-5 claude`. The console then shows
   who asked, replied or drew what.
 - **Stewards.** The doorbell has one cursor, so with several sessions on one
   console, name one **steward** in your registry
@@ -170,7 +170,7 @@ read what your sessions do.
 ## Spending fewer tokens
 
 Console reads can be large. Measured on a live console with 461 store records
-(spec `console-kit-multiproject.md`, §8.1 and Appendix A):
+(spec `overture-multiproject.md`, §8.1 and Appendix A):
 
 - `agent.py view` printed **644,064 bytes** (≈161,000 tokens). Re-serialised
   compact JSON is still **459,082 bytes**. The fields `console-process`

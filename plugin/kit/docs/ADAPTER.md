@@ -2,8 +2,8 @@
 
 The kit knows nothing about any one project. One Python file, the **adapter**,
 is the whole seam between them. Onboarding writes a working starter to
-`.console-kit/adapter.py` (from `adapter_template.py`); `.console-kit.json`'s
-`fold.adapter` and `.console-kit/console.env`'s `CONSOLE_ADAPTER` both name it.
+`.overture/adapter.py` (from `adapter_template.py`); `.overture.json`'s
+`fold.adapter` and `.overture/console.env`'s `CONSOLE_ADAPTER` both name it.
 
 The server and the fold load it **by path**, so it must import on its own.
 
@@ -48,7 +48,7 @@ may print it the same way, and needs no change if it does not.
 
 ## The starter, and moving past it
 
-The starter keeps everything under `.console-kit/`:
+The starter keeps everything under `.overture/`:
 
 - `items.json` holds the work (`{"ID": {"title": ..., "parent": null, "status": "open"}}`);
 - `seed/*.json` holds prepared questions;
@@ -69,9 +69,9 @@ only when the question had evidence, and `fold` checks it with the store's
 rules. An adapter that ignores it loses nothing else; one that writes it should
 print `cite` and `command` inline and `result`/`text` as quoted blocks.
 
-## `.console-kit.json`: specs, visuals and next steps (0.8.0)
+## `.overture.json`: specs, visuals and next steps (0.8.0)
 
-Three optional keys in the project's `.console-kit.json`, beside `fold` and
+Three optional keys in the project's `.overture.json`, beside `fold` and
 `audit`. They are the repository's **data**: the server reads them when it
 starts, and nothing ever runs a path taken from them.
 
@@ -79,7 +79,7 @@ starts, and nothing ever runs a path taken from them.
 {
   "specs_dir": "architect/40-specs/",
   "visuals_dir": "architect/visuals/",
-  "next_step": {"refine": "console-kit:refine", "drill": "console-kit:drill"}
+  "next_step": {"refine": "overture:refine", "drill": "overture:drill"}
 }
 ```
 
@@ -98,7 +98,7 @@ starts, and nothing ever runs a path taken from them.
     stoplist of common sentence-start and function words ("The", "We", "If"),
     and less anything found, case-insensitively, in a spec's text or file name
     under `specs_dir` or in an item's title from `items()`. Also when an item's
-    status is `proposed` and no spec names its id. `console_kit/tags.py` has
+    status is `proposed` and no spec names its id. `overture/tags.py` has
     the exact rule, the stoplist, and its known false positives and negatives.
     Changes if: the owner finds they ignore the chip;
   - *deliberate* (needs no `specs_dir`) when the answer is stale, or its pick
@@ -136,7 +136,7 @@ starts, and nothing ever runs a path taken from them.
   resolves into the project; the session stops there.
 
   The plugin ships a `refine` and a `drill` skill of its own, and onboarding
-  writes `{"refine": "console-kit:refine", "drill": "console-kit:drill"}`
+  writes `{"refine": "overture:refine", "drill": "overture:drill"}`
   when the project names none, so Refine and Drill work on a fresh install.
   They follow the "App Architect" layout (`digest.md`, `30-segments.md`,
   `40-specs/`) where a project has it, and `specs_dir` and the project's
@@ -190,7 +190,7 @@ patterns cover almost every project:
    each change the owner cares about. Fine for a slow-moving register.
 2. **`items-watch`**: a long-running loop in a terminal (or a user-level
    systemd service) that re-pushes whenever the adapter,
-   `.console-kit/items.json` or `.console-kit.json` changes:
+   `.overture/items.json` or `.overture.json` changes:
        agent.py --state STATE items-watch --adapter ADAPTER
    `--interval SEC` controls the poll (default 5, clamped 1..300);
    `--watch extra/path,another` adds project-relative paths.
@@ -201,6 +201,6 @@ The scaffold's starter `board()` only populates `headline`, `status` and the
 timestamp honestly; the other slots are `"—"` placeholders the owner wires to
 counters the project already has (open issues from a tracker, open PRs from
 the steward's `prs-push`, the latest line in the fold log). The shape key
-(`console-kit/dashboard/1`) pins the adapter to the scaffold's layout, so a
+(`overture/dashboard/1`) pins the adapter to the scaffold's layout, so a
 page updated past that version can refuse an older adapter instead of
 rendering half-filled.

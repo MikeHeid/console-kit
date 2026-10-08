@@ -20,7 +20,7 @@ landed the same paths by PR, and a deploy that follows main with
 `git merge --ff-only` was refused, because git will not overwrite untracked
 files. The server must never write into the project's working tree.
 
-**How they land.** `visuals_dir` in `.console-kit.json` is now only a
+**How they land.** `visuals_dir` in `.overture.json` is now only a
 DESTINATION: the repo-relative folder a PR puts them in. `agent.py
 visual-export --project DIR` copies stored visuals into DIR/<visuals_dir>/
 (DIR being the agent's OWN worktree, never the server's directory) and
@@ -59,7 +59,7 @@ from . import schema as S
 
 STORE_DIR = "visuals"          # under STATE
 INDEX = "INDEX.md"
-MARK = "<!-- console-kit: generated from the console's store. Do not edit: the next visual rewrites it. -->"
+MARK = "<!-- overture: generated from the console's store. Do not edit: the next visual rewrites it. -->"
 MAX_DOC_BYTES = 256 * 1024     # a doc is a title, at most MAX_VISUAL_DOC characters and the owner's request
 MAX_INDEX_BYTES = 4 << 20
 NAME = re.compile(r"^([0-9a-f]{8})-([0-9a-f]{12})(\.mmd|\.html)\Z")

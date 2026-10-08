@@ -1,4 +1,4 @@
-"""The console server's reading of the project's `.console-kit.json` (0.8.0).
+"""The console server's reading of the project's `.overture.json` (0.8.0).
 
 The file is the repository's DATA, never a path anything executes from
 (`registry.py`). The server reads three optional keys from it:
@@ -39,7 +39,7 @@ from . import rootfs as RF
 from . import schema as S
 from .registry import RegistryError, read_regular
 
-FILE = ".console-kit.json"
+FILE = ".overture.json"
 MAX_FILE = 64 * 1024
 DIR = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-]*(/[A-Za-z0-9_][A-Za-z0-9_.\-]*)*/?\Z")
 SKILL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:\-]{0,79}\Z")

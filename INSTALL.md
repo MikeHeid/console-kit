@@ -1,10 +1,10 @@
-# Installing console-kit
+# Installing overture
 
-console-kit comes as one zip, `console-kit-<version>.zip`. It holds:
+overture comes as one zip, `overture-<version>.zip`. It holds:
 
 - a **Claude Code plugin**: a SessionStart note, skills to onboard a project and
   to process, fork and fold the owner's answers, and the committee agents;
-- the **server kit** the plugin sets up (in `plugins/console-kit/kit/`).
+- the **server kit** the plugin sets up (in `plugins/overture/kit/`).
 
 You need Python 3.11 or newer, `systemd --user` (Linux or WSL2) to keep the
 server running, and `cloudflared` with a Cloudflare account to reach it from
@@ -14,12 +14,12 @@ outside.
 
 Claude installs plugins from a **marketplace**, and the unzipped folder is one.
 
-1. Unzip it somewhere it can stay; it makes a `console-kit/` folder, e.g. `~/console-kit/`. Claude
+1. Unzip it somewhere it can stay; it makes a `overture/` folder, e.g. `~/overture/`. Claude
    reads the plugin from here, so do not delete the folder afterwards.
 2. In Claude Desktop's **Code** tab, or in `claude` in a terminal, run:
 
-       /plugin marketplace add ~/console-kit
-       /plugin install console-kit@console-kit-local
+       /plugin marketplace add ~/overture
+       /plugin install overture@overture-local
 
 3. Claude then asks for two **optional machine-wide defaults**. Both can be
    left empty and given per project later:
@@ -28,13 +28,13 @@ Claude installs plugins from a **marketplace**, and the unzipped folder is one.
      Onboarding then suggests `<project>-console.example.com`.
 
    Neither is a secret. If Claude does not ask, or to change them later, run
-   `/plugin configure console-kit@console-kit-local`.
+   `/plugin configure overture@overture-local`.
 4. Restart the session so the SessionStart hook loads.
 
 **Or straight from GitHub**, with no zip, if your git can reach the repository:
 
-    /plugin marketplace add MikeHeid/console-kit
-    /plugin install console-kit@console-kit
+    /plugin marketplace add MikeHeid/overture
+    /plugin install overture@overture
 
 Both routes install the same plugin folder, and the kit is inside it at
 `kit/`. Use this plugin in a **local** session: remote/cloud sessions do not
@@ -44,7 +44,7 @@ load plugins ("Plugins aren't available in this environment").
 
 Open a session in the project's folder and run:
 
-    /console-kit:console-onboard
+    /overture:console-onboard
 
 It asks for:
 
@@ -56,26 +56,26 @@ It asks for:
 | Hostname | `acme-console.example.com` | a name in a zone on your Cloudflare account |
 | Port | `4793` | any free port on 127.0.0.1 |
 
-It then writes the project's settings (`.console-kit/console.env` and
-`.console-kit.json`, none of them secret), plus a starter page and adapter.
+It then writes the project's settings (`.overture/console.env` and
+`.overture.json`, none of them secret), plus a starter page and adapter.
 Finally it prints the next commands. **You run those yourself**: they install
 services, tell your Claude sessions to trust this project, and put a hostname
 on the internet. The skill never runs them for you.
 
 The same steps without Claude:
 
-    python3 ~/console-kit/plugins/console-kit/kit/onboard.py write --project . \
+    python3 ~/overture/plugins/overture/kit/onboard.py write --project . \
         --name acme --team-domain acme.cloudflareaccess.com --aud <AUD> \
         --hostname acme-console.example.com
 
 ## 3. What the printed steps do
 
 1. `deploy/install.sh --project . --start` copies the kit to
-   `~/.local/share/console-kit/kit`, builds its venv (PyJWT, cryptography) and
+   `~/.local/share/overture/kit`, builds its venv (PyJWT, cryptography) and
    renders two `systemd --user` units, `<name>-console` and
    `<name>-console-tunnel`. It starts **only** the loopback server.
 2. `agent.py register` adds this project to
-   `~/.config/console-kit/projects.json`. The plugin's hook acts only in
+   `~/.config/overture/projects.json`. The plugin's hook acts only in
    projects listed there. **A repository cannot register itself.**
 3. You create the Access application in Cloudflare.
 4. You create the tunnel, render its config with `onboard.py tunnel --id`,
@@ -91,14 +91,14 @@ project's own task list. `kit/docs/DEPLOY.md` covers upgrades and rollback, and
 
 ## Updating
 
-Delete the old `~/console-kit/` folder, unzip the new zip in its place (same
+Delete the old `~/overture/` folder, unzip the new zip in its place (same
 path), then:
 
-    /plugin marketplace update console-kit-local
-    /plugin update console-kit@console-kit-local
+    /plugin marketplace update overture-local
+    /plugin update overture@overture-local
 
 Restart the session. Then, for each onboarded project, re-run
-`bash ~/console-kit/plugins/console-kit/kit/deploy/install.sh --project <dir> --start`.
+`bash ~/overture/plugins/overture/kit/deploy/install.sh --project <dir> --start`.
 It copies the new kit and restarts that project's server.
 
 **Upgrading to 0.5.0.** Answers locked before 0.5.0 still go stale whenever
@@ -130,7 +130,7 @@ written by the agent (`transcript`, a roar panel's transcript; `visual`, an
 agent-drawn Mermaid block or HTML mock), and three new message shapes (intent
 `visual`, the seat `roar`, and `step: refine|drill`). Add the optional
 `specs_dir`, `visuals_dir` and `next_step` keys to each project's
-`.console-kit.json` (`kit/docs/ADAPTER.md` explains them), then restart the
+`.overture.json` (`kit/docs/ADAPTER.md` explains them), then restart the
 server: it reads them at start, and refuses a bad one by name. A session's
 `agent.py watch` now also wakes on a visual request; update the plugin so its
 skills (console-fork's roar, refine and drill sections, and the new
@@ -150,7 +150,7 @@ server also runs every git command in the project with
 
 **Upgrading to 0.8.2.** Nothing to migrate: the store, its schema (1) and
 every record shape are unchanged. Sessions may now name themselves
-(`agent.py --as agent-6`, or `CONSOLE_KIT_AGENT=agent-6`), and the console
+(`agent.py --as agent-6`, or `OVERTURE_AGENT=agent-6`), and the console
 shows the name on what each writes; update the plugin so the console-process
 skill says how. Each session's "agent active" marks are now its own, so one
 session's `synced` no longer clears another's; a `working.json` a 0.8.1
@@ -163,7 +163,7 @@ beside it, in `<state>/names.jsonl`, and a 0.8.1 kit shows every agent as
 **Upgrading to 0.8.3.** Nothing to migrate, and nothing changes until you
 name a steward: `agent.py --state <state> steward agent-5` (CHANGELOG, "One
 steward, many sessions"). Then only the session started with
-`CONSOLE_KIT_AGENT=agent-5` may `watch`, `synced` or fold, and the plugin's
+`OVERTURE_AGENT=agent-5` may `watch`, `synced` or fold, and the plugin's
 new PreToolUse hook blocks `AskUserQuestion` in every other session of that
 project, pointing it at `agent.py ask`. Update the plugin for the hook and
 the skills. Every id-shaped field (item ids, qids, record ids, nonces,
@@ -186,10 +186,10 @@ SessionStart hook reads an entry with a `steward` key as malformed and says
 
 The plugin now ships `roar`, `refine`, `drill` and `deliberate`, so
 Refine and Drill no longer need a skill installed by hand. An existing
-project may switch its `.console-kit.json` to the plugin's names, by pull
+project may switch its `.overture.json` to the plugin's names, by pull
 request, then restart the server:
 
-    "next_step": {"refine": "console-kit:refine", "drill": "console-kit:drill"}
+    "next_step": {"refine": "overture:refine", "drill": "overture:drill"}
 
 A project that keeps `{"refine": "refine", "drill": "drill"}` keeps working
 for as long as those user-level skills are installed: the lookup and its
@@ -198,7 +198,7 @@ inside the repository). Re-running onboarding adds the plugin's names only
 for a kind the config does not already name. Before going back to an older
 kit, switch `next_step` back to user-level skills: an older plugin ships no
 `refine` or `drill`, so once the newer plugin is no longer in Claude's plugin
-cache, `console-kit:refine` resolves to nothing and Refine and Drill refuse,
+cache, `overture:refine` resolves to nothing and Refine and Drill refuse,
 naming the skill. While a newer copy is still cached they keep resolving to
 it.
 
@@ -228,7 +228,7 @@ means moving to 0.5.0 or later again, not to 0.4.0.
 ## Removing
 
     systemctl --user disable --now <name>-console <name>-console-tunnel
-    /plugin uninstall console-kit@console-kit-local
+    /plugin uninstall overture@overture-local
 
-Then delete the project's entry from `~/.config/console-kit/projects.json`.
+Then delete the project's entry from `~/.config/overture/projects.json`.
 Delete the tunnel and its DNS record in Cloudflare yourself.
