@@ -1337,3 +1337,27 @@ every tab.
   text is already the owner's view, so showing it here is the same
   trust boundary as the question itself. The home console still
   never sees locked answers or chat content.
+
+## Cross-project priority ribbon (0.24.0)
+
+The Inbox tab now opens with a ribbon of the oldest awaiting
+questions across every console (self + each portfolio peer). One
+glance says what to touch first.
+
+- Up to six rows, sorted by `ts` (oldest first = most urgent).
+- Each row: a traffic-light dot (yellow < 1 h, orange < 24 h, red
+  > 24 h), the project name, the qid, a 60-char slice of the
+  question text, and a relative time.
+- Click a row — if it's local, the item panel opens; if it's a
+  peer, that peer's console opens in a new tab.
+- The summary line names the total and the number of projects
+  spanned ("4 of 11 awaiting you across 3 projects"), so the
+  owner can tell at a glance whether a backlog is one project or
+  many.
+- The ribbon self-starts the portfolio fetch: an owner who never
+  opens the Portfolio tab still gets the cross-project view the
+  first time they open the Inbox. Peer data flows through the
+  same aggregator (5 s cache, 4 s timeout), so one slow peer
+  never slows the ribbon.
+- Nothing to show when every project is quiet; the ribbon
+  simply does not render.
