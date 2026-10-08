@@ -1950,3 +1950,43 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 .ck-theme-toggle:hover, .ck-theme-toggle:focus-visible {
   background: var(--c-surface-alt); color: var(--c-fg); outline: none;
 }
+
+/* Playbook preview modal (1.3.0): per-step would-run/would-skip with reason. */
+.ck-pb-preview {
+  position: fixed; inset: 0; z-index: 1003;
+  display: grid; align-content: center; justify-items: center;
+  background: rgba(0, 0, 0, .35); padding: 8vh 16px;
+}
+.ck-pb-preview > * { width: min(640px, 92vw); }
+.ck-pb-preview h2 {
+  margin: 0; padding: 10px 14px;
+  border: 1px solid var(--c-border); border-bottom: 0; border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: var(--c-surface); font-size: 14px;
+}
+.ck-pb-preview-body {
+  padding: 10px 14px; max-height: 60vh; overflow: auto;
+  border: 1px solid var(--c-border); background: var(--c-surface);
+}
+.ck-pb-plan { list-style: none; padding: 0; margin: 6px 0 0; display: flex; flex-direction: column; gap: 4px; }
+.ck-pb-plan-row {
+  padding: 4px 8px; border-left: 3px solid var(--c-border);
+  font-size: 13px; background: var(--c-surface);
+}
+.ck-pb-plan-row[data-run="yes"] { border-left-color: var(--c-built); }
+.ck-pb-plan-row[data-run="no"]  { border-left-color: var(--c-fg-muted); opacity: .7; }
+.ck-pb-plan-badge { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin-right: 6px; }
+.ck-pb-plan-kind {
+  display: inline-block; min-width: 50px;
+  font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--c-fg-muted);
+}
+.ck-pb-plan-item {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--c-accent); background: transparent; padding: 0 4px;
+}
+.ck-pb-plan-text { color: var(--c-fg); }
+.ck-pb-plan-reason { font-size: 11px; margin-top: 2px; margin-left: 60px; }
+.ck-pb-preview-foot {
+  display: flex; gap: 8px; justify-content: flex-end;
+  padding: 10px 12px; border: 1px solid var(--c-border); border-top: 0; border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  background: var(--c-surface);
+}

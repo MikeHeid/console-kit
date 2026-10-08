@@ -1205,6 +1205,39 @@ class Console:
             raise RequestError(500, err)
         return out
 
+    def playbook_plan(self, name: object) -> dict:
+        """1.3.0: dry-run preview of a playbook. Evaluates `when` predicates and item membership against
+        the current view + register, returning per-step {would_run, reason}; writes NOTHING.
+
+        Owner-only (route-gated). Safe to call repeatedly — nothing lands in the store.
+        """
+        if not isinstance(name, str) or not PB.NAME.match(name):
+            raise RequestError(400, "/api/playbook-plan takes ?name=<slug>")
+        books = PB.load(self.cfg.root)
+        pb = books.get(name)
+        if pb is None:
+            raise RequestError(404, f"no playbook named {name!r} under .overture/playbooks/")
+        items = self.items()
+        view = (self.payload() or {}).get("view") or {}
+        plan: list[dict] = []
+        for index, step in enumerate(pb.steps):
+            when = step.get("when")
+            if when is not None:
+                passes, reason = PB.evaluate_when(when, view, items)
+                if not passes:
+                    plan.append({"index": index, "kind": step["kind"], "item": step.get("item"),
+                                 "text": step.get("text") or "", "would_run": False,
+                                 "reason": f"when:{reason}"})
+                    continue
+            if step["item"] != S.CHAT_ITEM and step["item"] not in items:
+                plan.append({"index": index, "kind": step["kind"], "item": step.get("item"),
+                             "text": step.get("text") or "", "would_run": False,
+                             "reason": f"item {step['item']!r} is not in the project's item list"})
+                continue
+            plan.append({"index": index, "kind": step["kind"], "item": step.get("item"),
+                         "text": step.get("text") or "", "would_run": True, "reason": ""})
+        return {"name": pb.name, "description": pb.description, "steps": plan}
+
     def replay_trigger(self, body: object) -> dict:
         """0.27.0: fire a trigger from the owner's browser. Bypasses the webhook token + rate limit
         (the caller already proved they are the owner via the Access-authed owner door), logs the
@@ -2567,6 +2600,11 @@ class OwnerHandler(_Handler):
         route, query = self._query()
         if route == "/api/project-chart" and query is not None:
             return self._project_chart(query)
+        if route == "/api/playbook-plan" and query is not None:
+            try:
+                return self._send(200, self.console.playbook_plan(query.get("name", "")))
+            except RequestError as e:
+                return self._send(e.code, {"error": str(e)})
         live = {"/api/wait": self._wait, "/api/feed": self._feed, "/api/evidence": self._evidence,
                 "/api/visual": self._visual, "/api/visual-render": self._visual_render,
                 "/api/item-chart": self._item_chart, "/api/impact-graph": self._impact_graph}.get(route)

@@ -2451,7 +2451,22 @@
         announce(kind === 'playbook' ? 'Playbook ran.' : 'Delegated.');
       }
     });
-    body.appendChild(el('div', { className: 'ck-actions' }, [send, status]));
+    const previewBtn = el('button', { type: 'button', className: 'ck-btn ck-del-preview', hidden: 'hidden' },
+      ['Preview']);
+    previewBtn.addEventListener('click', () => {
+      const kind = body.querySelector('input[name="ck-del-kind"]:checked').value;
+      if (kind !== 'playbook' || !playbookSel.value) return;
+      openPlaybookPreview(playbookSel.value);
+    });
+    const _origUpdateVis = updateVisibility;
+    const updateVisWithPreview = () => {
+      _origUpdateVis();
+      const kind = body.querySelector('input[name="ck-del-kind"]:checked').value;
+      previewBtn.hidden = kind !== 'playbook';
+    };
+    body.querySelectorAll('input[name="ck-del-kind"]').forEach(r => r.addEventListener('change', updateVisWithPreview));
+    updateVisWithPreview();
+    body.appendChild(el('div', { className: 'ck-actions' }, [send, previewBtn, status]));
 
     wrap.appendChild(body);
     return wrap;
@@ -2518,6 +2533,10 @@
           el('span', { className: 'ck-muted' }, [t.kinds && t.kinds.length ? '  (' + t.kinds.join(' + ') + ')' : '']),
         ]);
         row.appendChild(renderTriggerReplayButton(t.name));
+        const prev = el('button', { type: 'button', className: 'ck-btn ck-trigger-replay',
+          title: 'Preview ' + t.playbook, 'aria-label': 'Preview playbook ' + t.playbook }, ['⌕']);
+        prev.addEventListener('click', e => { e.stopPropagation(); e.preventDefault(); openPlaybookPreview(t.playbook); });
+        row.appendChild(prev);
         configured.appendChild(row);
       }
       body.appendChild(configured);
@@ -2552,6 +2571,72 @@
 
     wrap.appendChild(body);
     return wrap;
+  }
+
+  // Opens the playbook preview modal for the given slug. Called from the Delegate bar's Preview
+  // button and from the Replay row (via a sibling Preview link).
+  async function openPlaybookPreview(slug) {
+    if (document.getElementById('ck-pb-preview')) return;
+    const dlg = el('div', { id: 'ck-pb-preview', className: 'ck-pb-preview', role: 'dialog',
+      'aria-modal': 'true', 'aria-label': 'Playbook preview' });
+    dlg.appendChild(el('h2', {}, ['Preview · ', el('code', {}, [slug])]));
+    const body = el('div', { className: 'ck-pb-preview-body' }, ['Loading…']);
+    const closeBtn = el('button', { type: 'button', className: 'ck-btn' }, ['Close']);
+    closeBtn.addEventListener('click', closePlaybookPreview);
+    const foot = el('div', { className: 'ck-pb-preview-foot' }, [closeBtn]);
+    dlg.appendChild(body);
+    dlg.appendChild(foot);
+    dlg.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closePlaybookPreview(); } });
+    dlg.addEventListener('click', e => { if (e.target === dlg) closePlaybookPreview(); });
+    document.body.appendChild(dlg);
+    requestAnimationFrame(() => closeBtn.focus());
+    try {
+      const resp = await fetch(config.api + '/playbook-plan?name=' + encodeURIComponent(slug),
+        { credentials: 'same-origin' });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'HTTP ' + resp.status);
+      body.textContent = '';
+      if (data.description) body.appendChild(el('p', { className: 'ck-muted' }, [data.description]));
+      const steps = Array.isArray(data.steps) ? data.steps : [];
+      const willRun = steps.filter(s => s.would_run).length;
+      body.appendChild(el('p', {}, [
+        'Would run ', el('b', {}, [String(willRun)]), ' of ',
+        el('b', {}, [String(steps.length)]), ' step' + (steps.length === 1 ? '' : 's') + '.']));
+      const ol = el('ol', { className: 'ck-pb-plan' });
+      for (const s of steps) {
+        const li = el('li', { className: 'ck-pb-plan-row', dataRun: s.would_run ? 'yes' : 'no' }, [
+          el('span', { className: 'ck-pb-plan-badge' }, [s.would_run ? '▶' : '▢']),
+          el('span', { className: 'ck-pb-plan-kind' }, [s.kind]),
+          el('code', { className: 'ck-pb-plan-item' }, [s.item || '@chat']),
+          s.text ? el('span', { className: 'ck-pb-plan-text' }, [' · ' + s.text.slice(0, 80)]) : null,
+          !s.would_run && s.reason ? el('div', { className: 'ck-pb-plan-reason ck-muted' }, [s.reason]) : null
+        ].filter(Boolean));
+        ol.appendChild(li);
+      }
+      body.appendChild(ol);
+      const runBtn = el('button', { type: 'button', className: 'ck-btn ck-btn-primary' }, ['Run now']);
+      runBtn.addEventListener('click', async () => {
+        runBtn.disabled = true;
+        try {
+          const r = await apiPost('/playbook', { name: slug }, 'preview-run-' + slug + '-' + Date.now());
+          if (r && r.error) announce('Not run: ' + r.error);
+          else if (r && Array.isArray(r.skipped) && r.skipped.length)
+            announce((r.records || []).length + ' step(s) ran; ' + r.skipped.length + ' skipped.');
+          else announce('Playbook ran.');
+          closePlaybookPreview();
+        } catch (e) {
+          announce('Error: ' + (e.message || 'network'));
+        }
+        runBtn.disabled = false;
+      });
+      foot.insertBefore(runBtn, closeBtn);
+    } catch (e) {
+      body.textContent = 'Could not load preview: ' + (e.message || 'network error');
+    }
+  }
+  function closePlaybookPreview() {
+    const dlg = document.getElementById('ck-pb-preview');
+    if (dlg) dlg.remove();
   }
 
   // One Replay button bound to a trigger name. POSTs /api/trigger-replay with a fresh nonce so

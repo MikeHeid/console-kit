@@ -1533,3 +1533,25 @@ applied by setting `document.documentElement.dataset.theme`, which
 the `console-fallbacks` layer keys off. A screen reader hears the
 new state (`announce` fires on cycle); the button's `title`
 tooltip names the current mode.
+
+## Playbook preview (1.3.0)
+
+Before firing a playbook, see exactly what will happen. A new
+**Preview** button in the Delegate bar (visible when the Delegate
+form is in `playbook` mode) and a **⌕** button next to each
+configured trigger's Replay open a modal that lists:
+
+- Every step with its kind, item, and the first 80 chars of its text.
+- Whether the step **would run** (▶ green) or **would skip** (▢
+  muted), with the exact reason — a failing `when` predicate, a
+  missing item id, etc.
+- A header line summarising "would run N of M steps".
+- A **Run now** button that fires through the same path as the
+  Delegate bar; **Close** / Esc / backdrop closes.
+
+A new owner-only route `GET /api/playbook-plan?name=<slug>`
+evaluates the predicates against the current view and item
+register and writes nothing. It never fires the playbook; a
+"Preview" is always safe to click. The route is route-gated like
+the owner door, so a Preview without authentication fails the
+same way as `/api/view`.

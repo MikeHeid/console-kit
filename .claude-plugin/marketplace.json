@@ -9,7 +9,7 @@
       "name": "overture",
       "source": "./plugin",
       "description": "Answer your agents' questions from a web page behind Cloudflare Access; onboarding, server kit and skills included.",
-      "version": "1.2.0"
+      "version": "1.3.0"
     }
   ]
 }
