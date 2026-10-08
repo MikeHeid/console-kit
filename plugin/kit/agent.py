@@ -789,7 +789,8 @@ def _scaffold_dashboard(a) -> int:
     """
     from overture import scaffold as SC
     try:
-        plan = SC.prepare(a.project, a.page, a.adapter, a.name or Path(a.project).resolve().name)
+        plan = SC.prepare(a.project, a.page, a.adapter,
+                          a.project_name_display or Path(a.project).resolve().name)
         touched = SC.apply(plan)
     except SC.ScaffoldError as e:
         print(f"refused, nothing written: {e}", file=sys.stderr)
@@ -1222,7 +1223,12 @@ def main(argv=None) -> int:
     s.add_argument("--page", default="docs/console/page.html",
                    help="where to write the dashboard page (default: docs/console/page.html)")
     s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
-    s.add_argument("--name", default=None, help="the project name shown in the header (default: the directory name)")
+    # The dest avoids the shared `a.name` validator in the main entry (which treats `name` as an
+    # agent name shape). The flag spelling stays `--project-name`; `--name` is kept as a hidden
+    # alias so older scripts still work, but a value with spaces or capitals no longer refuses.
+    s.add_argument("--project-name", "--name", dest="project_name_display", default=None,
+                   help="the project name shown in the header (default: the directory name). "
+                        "Any string you'd put in an <h1>; not an agent name.")
     s = sub.add_parser("page-snapshot", description="Read the console's page from a COMMIT here (git cat-file, "
                        "never the working tree) and send it to the console server, which serves only that "
                        "snapshot (CONSOLE-kit/Q28). Refuses a commit that is not in origin's default branch "

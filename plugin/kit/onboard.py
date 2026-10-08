@@ -208,7 +208,36 @@ def write(project: Path, answers: dict, force: bool = False, check_port: bool = 
             # can prove otherwise (a hostile file would carry the marker too): always say so.
             out.append(f"REVIEW    {target}: already here, so it was left as it is. The server runs it: "
                        "know what it holds before you run install.sh.")
+    # 1.6.1: ensure `.overture/console.env` is gitignored. The file holds the AUD tag + team domain —
+    # not secret by the kit's account, but shaped like credentials and Claude Code's safety check
+    # treats them that way, so a commit mid-onboarding gets blocked. Adding one line to .gitignore
+    # resolves that cleanly for the owner.
+    gi_line = ".overture/console.env"
+    out.append(_ensure_gitignore(project, gi_line))
     return out
+
+
+def _ensure_gitignore(project: Path, line: str) -> str:
+    """Append `line` to the project's root .gitignore if it is not already there. Idempotent.
+
+    Creates .gitignore when absent. Reports what happened as one output line. Any read/write OSError
+    is swallowed into a REVIEW line, so a missing or unwritable .gitignore does not fail onboarding.
+    """
+    path = project / ".gitignore"
+    try:
+        current = path.read_text(encoding="utf-8") if path.exists() else ""
+    except OSError as e:
+        return f"REVIEW    {path}: could not read ({e}); add `{line}` yourself if you track {line} content"
+    needle = line.strip()
+    for existing in current.splitlines():
+        if existing.strip() == needle:
+            return f"kept      {path}: already lists {line}"
+    sep = "" if (current == "" or current.endswith("\n")) else "\n"
+    try:
+        path.write_text(current + sep + line + "\n", encoding="utf-8")
+    except OSError as e:
+        return f"REVIEW    {path}: could not write ({e}); add `{line}` yourself"
+    return f"wrote     {path}: appended `{line}`"
 
 
 def next_steps(project: Path, a: dict) -> str:

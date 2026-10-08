@@ -1644,3 +1644,29 @@ button title `plan.md`.
 - Applied uniformly to every surface where agent text renders:
   Chat log, round messages, follow-up messages, locked-answer
   notes, and the sheet view.
+
+## Onboarding + docs cleanup (1.6.1)
+
+Three bug fixes and a doc pass surfaced from a Windows + WSL2
+install review:
+
+- **`agent.py scaffold-dashboard --name "Project Name With Spaces"`**
+  no longer refuses with "steward: agent name '…' is refused". The
+  argument now writes to `project_name_display` instead of `name`,
+  so the shared agent-name validator doesn't touch it. `--name` is
+  kept as a hidden alias — scripts that use the old flag still
+  work.
+- **Onboarding auto-adds `.overture/console.env` to `.gitignore`**
+  when it is not already listed. The file carries the AUD tag and
+  team domain — not secret by the kit's account, but shaped like
+  credentials, so Claude Code's safety check used to block the
+  commit mid-onboarding. Idempotent; swallows OSErrors into a
+  REVIEW line.
+- **`ADAPTER.md`** updated: the "The page" section now says the
+  server serves the `page-snapshot` from STATE, not
+  `CONSOLE_PAGE`; the legacy flag has been ignored since the Q28
+  ruling.
+- **`INSTALL.md`** gained a WSL2 note (`loginctl enable-linger
+  $USER`) and a one-liner about SessionStart hooks loading only in
+  a new session, so an owner who installs mid-session knows to
+  reopen Claude.
