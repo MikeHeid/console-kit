@@ -1710,3 +1710,24 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 .ck-portfolio-tally b { font-weight: 700; }
 .ck-portfolio-foot { font-size: 12px; color: var(--c-fg-muted); display: flex; gap: 4px; }
 .ck-portfolio-errline { color: var(--c-blocked); font-size: 12px; }
+
+/* Keyboard shortcut help overlay. Modal; sits above every tab panel. */
+.ck-shortcut-help {
+  position: fixed; inset: 0; margin: auto; z-index: 1000;
+  width: min(420px, 90vw); max-height: min(640px, 90vh); overflow: auto;
+  padding: 16px 20px; border: 1px solid var(--c-border); border-radius: var(--radius-sm);
+  background: var(--c-surface); color: var(--c-fg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+}
+.ck-shortcut-h { margin: 0 0 10px; font-size: 15px; }
+.ck-shortcut-list {
+  display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0 0 14px;
+  font-size: 13px;
+}
+.ck-shortcut-list dt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--c-fg); background: var(--c-surface-alt);
+  padding: 1px 6px; border-radius: 4px; border: 1px solid var(--c-border);
+}
+.ck-shortcut-list dd { margin: 0; color: var(--c-fg); }
+.ck-shortcut-close { padding: 4px 10px; }

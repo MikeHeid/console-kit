@@ -290,6 +290,11 @@ server cannot check it.
   question a title or branch names. The steward pushes the list
   (`agent.py prs-push`), and the tab says when it last did.
 - The **Favorite** tab lists everything you starred, grouped by item.
+- **Keyboard shortcuts.** Press `?` on any page for the full list.
+  `g i / f / p / s / o / c` hop to the Inbox / Feed / PRs / Favorite /
+  Portfolio / Chat tab, `g b` closes the panel, `.` focuses the
+  Delegate bar, `j / k` walk the rows, Enter / Space opens the focused
+  row. Shortcuts never fire in a text input.
 - The **Portfolio** tab lists every other console you have configured, with
   its state tallies (`?you ~unl !stale ○lock`), last-activity and a click
   that opens it in a new tab. A bell button opts in to desktop

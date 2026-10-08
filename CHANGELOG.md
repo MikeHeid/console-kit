@@ -1260,3 +1260,28 @@ A trigger (webhook or cron) and the Delegate bar and the
 `run_playbook`, so the `when` behaviour is the same wherever a
 playbook fires. The browser's Delegate bar shows which steps were
 skipped in the firing's result row, with the predicate reason.
+
+## Keyboard shortcuts (0.21.0)
+
+An owner across many consoles needs to move fast. Every page now
+carries a global keyboard layer; `?` prints the full list in a
+modal overlay:
+
+- **`g i / f / p / s / o / c`** — Inbox, Feed, PRs, Favorite, Portfolio, Chat.
+- **`g b`** — close the panel (back to the board).
+- **`.`** — focus the Delegate bar (opens it if collapsed).
+- **`j / k`** — next / previous focusable row inside the panel.
+- **Enter / Space** on a focused row — open it (same as click).
+- **`?`** — show the help overlay; **Esc** closes it.
+
+Rules the layer follows:
+
+- Never fires in a text input, textarea, select, or
+  `contenteditable` — so typing into a comment never hijacks a
+  letter.
+- `g` is a sticky prefix for 1500 ms; a second key completes the
+  pair, anything else cancels it.
+- Modifier keys (Ctrl / Meta / Alt) suppress every shortcut, so a
+  browser-level binding wins without conflict.
+
+No server changes; the whole layer is in `console.js` and `console.css`.

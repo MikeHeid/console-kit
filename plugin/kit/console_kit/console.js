@@ -768,6 +768,96 @@
       if (isDocked() && !panelEl.contains(document.activeElement)) return;
       closePanel();
     });
+
+    // Keyboard shortcuts: `g <letter>` tab-hop, `?` help, `.` Delegate bar focus, `j/k` row walk.
+    // Never fires in a text input; `g` is a sticky prefix for 1500ms.
+    document.addEventListener('keydown', handleShortcut);
+  }
+
+  let shortcutGpfx = 0;
+  function handleShortcut(e) {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const t = e.target;
+    const tag = t && t.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (t && t.isContentEditable)) return;
+    const now = Date.now();
+    if (now - shortcutGpfx < 1500) {
+      shortcutGpfx = 0;
+      const tab = ({ i: 'inbox', f: 'feed', p: 'prs', s: 'favorite', o: 'portfolio', c: 'chat' })[e.key];
+      if (tab) {
+        e.preventDefault();
+        if (panelEl.getAttribute('data-open') !== 'true') openPanel(null, 'inbox');
+        currentMode = 'inbox';
+        currentTab = tab;
+        renderPanel();
+        return;
+      }
+      if (e.key === 'b') { e.preventDefault(); if (panelEl.getAttribute('data-open') === 'true') closePanel(); return; }
+      return;
+    }
+    if (e.key === 'g') { shortcutGpfx = now; return; }
+    if (e.key === '?') { e.preventDefault(); openShortcutHelp(); return; }
+    if (e.key === '.') {
+      e.preventDefault();
+      if (panelEl.getAttribute('data-open') !== 'true') openPanel(null, 'inbox');
+      const bar = panelEl.querySelector('.ck-delegate-bar');
+      if (bar) {
+        if (!bar.open) bar.open = true;
+        const input = bar.querySelector('input, textarea, select');
+        if (input && input.focus) requestAnimationFrame(() => input.focus());
+      }
+      return;
+    }
+    if ((e.key === 'j' || e.key === 'k') && panelEl.getAttribute('data-open') === 'true') {
+      e.preventDefault();
+      walkFocus(e.key === 'j' ? 1 : -1);
+    }
+  }
+
+  function walkFocus(dir) {
+    const rows = Array.from(panelEl.querySelectorAll('[tabindex="0"]'))
+      .filter(n => n.getClientRects().length > 0);
+    if (!rows.length) return;
+    const cur = document.activeElement;
+    let i = rows.indexOf(cur);
+    if (i < 0) i = dir > 0 ? -1 : rows.length;
+    const next = rows[(i + dir + rows.length) % rows.length];
+    if (next && next.focus) next.focus();
+  }
+
+  function openShortcutHelp() {
+    if (document.getElementById('ck-shortcut-help')) return;
+    const dlg = el('div', { id: 'ck-shortcut-help', className: 'ck-shortcut-help',
+      role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Keyboard shortcuts' });
+    dlg.appendChild(el('h2', { className: 'ck-shortcut-h' }, ['Keyboard shortcuts']));
+    const rows = [
+      ['g i', 'Open Inbox tab'], ['g f', 'Open Feed tab'], ['g p', 'Open PRs tab'],
+      ['g s', 'Open Favorite tab'], ['g o', 'Open Portfolio tab'], ['g c', 'Open Chat tab'],
+      ['g b', 'Close panel (back to board)'],
+      ['.',   'Focus the Delegate bar'],
+      ['j / k', 'Next / previous row'],
+      ['Enter / Space', 'Open the focused row'],
+      ['?',   'Show this help'],
+      ['Esc', 'Close panel or this help']
+    ];
+    const dl = el('dl', { className: 'ck-shortcut-list' });
+    for (const [k, v] of rows) {
+      dl.appendChild(el('dt', {}, [k]));
+      dl.appendChild(el('dd', {}, [v]));
+    }
+    dlg.appendChild(dl);
+    const close = el('button', { className: 'ck-btn ck-shortcut-close', type: 'button' }, ['Close (Esc)']);
+    close.addEventListener('click', closeShortcutHelp);
+    dlg.appendChild(close);
+    dlg.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeShortcutHelp(); }
+    });
+    document.body.appendChild(dlg);
+    close.focus();
+  }
+  function closeShortcutHelp() {
+    const dlg = document.getElementById('ck-shortcut-help');
+    if (dlg) dlg.remove();
   }
 
   // Focus trapping inside panel
