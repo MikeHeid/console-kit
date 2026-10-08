@@ -1801,6 +1801,31 @@ patches the page's `<body>` tag so the live loop can find it.
   overwritten). Pages with no `<body>` tag are left alone (the
   scaffold is additive, not restorative).
 
+## Topic status rollup in `items_tree` (1.12.0)
+
+Each line of the `items_tree` live value now carries a
+rolled-up count tail:
+
+    1 Rollout
+      1.1 Rollout plan · ?2 !1
+      1.2 Deploy script · ~1
+    2 Audit
+      2.1 Security pass · ?1
+
+- Three states are counted: `?` = awaiting_you, `~` = unlocked,
+  `!` = stale.
+- Each item's tail is the **sum of its own open questions plus
+  every descendant's**, so a topic shows at a glance what sits
+  under it.
+- Zero segments are omitted; an item with no open work shows no
+  tail. Locked and withdrawn states are not counted (the tree
+  is a now-what view, not a history).
+- Browser-only consumers see the richer text via the same
+  `<pre data-live="items_tree">` block — no page change needed.
+- Projects that compute their own `items_tree` in `board()` are
+  still unaffected: the kit only writes when the project did
+  not.
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent

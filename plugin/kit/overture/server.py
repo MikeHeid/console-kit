@@ -154,6 +154,18 @@ _MERMAID_JS_CACHE: tuple[bytes, int] | None = None
 _CYTOSCAPE_JS_CACHE: tuple[bytes, int] | None = None
 
 
+def _format_count_tail(c: dict | None) -> str:
+    """Format rolled-up counts as ` · ?N ~M !K`, omitting zero segments; '' when all zero or None."""
+    if not c:
+        return ""
+    parts: list[str] = []
+    for sym, key in (("?", "awaiting_you"), ("~", "unlocked"), ("!", "stale")):
+        n = c.get(key) or 0
+        if n:
+            parts.append(f"{sym}{n}")
+    return (" · " + " ".join(parts)) if parts else ""
+
+
 def _iso_now() -> str:
     """UTC timestamp in the same ISO-8601-Z shape the store uses."""
     import datetime as _dt
@@ -1702,22 +1714,25 @@ class Console:
                 or not isinstance(values, dict)
                 or not all(isinstance(k, str) and isinstance(v, str) for k, v in values.items())):
             raise BoardError("the adapter's board() must return {shape: str, values: {str: str}}")
-        # 1.9.0: inject `items_tree` as a kit-computed live value — the project's board gets a plain
-        # text tree of {ref} {title} per item without having to render it in board() itself. A
-        # project that computes its own items_tree wins (not overwritten).
+        # 1.9.0 / 1.12.0: inject `items_tree` as a kit-computed live value — plain-text tree of
+        # <ref> <title>, with a per-item count tail (?awaiting_you ~unlocked !stale) rolled up
+        # from descendants. A project that already sets `items_tree` in its own board() wins.
         merged = dict(values)
         if "items_tree" not in merged:
-            tree = self._items_tree()
+            view = (self.payload() or {}).get("view") or {}
+            tree = self._items_tree(view=view)
             if tree is not None:
                 merged["items_tree"] = tree
         return {"shape": got["shape"], "values": merged}
 
-    def _items_tree(self) -> str | None:
-        """Plain-text tree of every item, nested by parent, in ref order (1.9.0).
+    def _items_tree(self, view: dict | None = None) -> str | None:
+        """Plain-text tree of every item, nested by parent, in ref order (1.9.0 + 1.12.0).
 
-        A line per item: `<ref> <title>`, indented 2 spaces per depth. Items without a ref sort
-        after refs; items whose parent is missing from the register appear at root. Returns None
-        when there are no items (so a page with no push shows an empty live value, not an error).
+        Each line is `<ref> <title>` indented 2 spaces per depth. When `view` is given, the line
+        gains a count tail (`· ?3 ~1 !1`) rolled up from the item's descendants — awaiting_you,
+        unlocked and stale question counts. Items without a ref sort after refs; items whose
+        parent is missing from the register appear at root. Returns None when the register is
+        empty.
         """
         items = self.items()
         if not items:
@@ -1735,6 +1750,7 @@ class Console:
             children.setdefault(parent, []).append(iid)
         for p in children:
             children[p].sort(key=lambda iid: (_k((items[iid] or {}).get("ref")), iid))
+        rolled = self._rollup_counts(view, items, children) if view is not None else {}
         lines: list[str] = []
         def walk(parent: str | None, depth: int) -> None:
             for iid in children.get(parent, []):
@@ -1742,10 +1758,37 @@ class Console:
                 ref = data.get("ref") or ""
                 title = data.get("title") or ""
                 prefix = ref + " " if ref else ""
-                lines.append("  " * depth + prefix + title)
+                tail = _format_count_tail(rolled.get(iid)) if rolled else ""
+                lines.append("  " * depth + prefix + title + tail)
                 walk(iid, depth + 1)
         walk(None, 0)
         return "\n".join(lines)
+
+    def _rollup_counts(self, view: dict, items: dict, children: dict) -> dict[str, dict[str, int]]:
+        """Per-item counts of awaiting_you / unlocked / stale, rolled up from descendants.
+
+        Each entry is `{"awaiting_you": int, "unlocked": int, "stale": int}`; zero rows are kept
+        so callers can distinguish "no questions" from "no counts computed".
+        """
+        own: dict[str, dict[str, int]] = {iid: {"awaiting_you": 0, "unlocked": 0, "stale": 0}
+                                          for iid in items}
+        for q in (view.get("questions") or {}).values():
+            state = (q or {}).get("state") or ""
+            if state not in ("awaiting_you", "unlocked", "stale"):
+                continue
+            iid = ((q or {}).get("question") or {}).get("item")
+            if iid in own:
+                own[iid][state] += 1
+        # Post-order walk: child totals first, then add to parent.
+        rolled: dict[str, dict[str, int]] = {iid: dict(c) for iid, c in own.items()}
+        def walk(parent: str | None) -> None:
+            for iid in children.get(parent, []):
+                walk(iid)
+                for grand in children.get(iid, []):
+                    for k in ("awaiting_you", "unlocked", "stale"):
+                        rolled[iid][k] += rolled[grand][k]
+        walk(None)
+        return rolled
 
     def page(self) -> str:
         """The page the owner published from STATE, any proposal, and the console (Q28, Q29); never a project file.
