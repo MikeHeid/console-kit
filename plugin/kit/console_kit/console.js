@@ -1204,6 +1204,11 @@
       body.appendChild(el('p', { className: 'ck-items-note', role: 'status',
         style: 'color: var(--c-fg-muted); padding: 12px 20px;' }, [view.items_note]));
     }
+    // Priority ribbon: the oldest awaiting-you questions across self + every peer. Lazy — the
+    // portfolio fetch is kicked off here, so the ribbon fills on the next redraw if a peer is
+    // configured. Nothing to show when there's no awaiting work anywhere.
+    const ribbon = renderPriorityRibbon();
+    if (ribbon) body.appendChild(ribbon);
     // 0.8.19: a map of every item (collapsible, lazy). Clicking a node opens that item.
     if (items && Object.keys(items).length > 1) body.appendChild(renderProjectMap());
     // 0.8.19: items whose visuals arrived since the last look, so a drawn flowchart is impossible to miss.
@@ -4895,6 +4900,83 @@
       card.style.cursor = 'pointer';
     }
     return card;
+  }
+
+  // Collect this console's awaiting-you questions as a {project, qid, item, text, ts, isSelf, url}
+  // list; combined with peer peeks it feeds the cross-project priority ribbon.
+  function selfAwaitingRows() {
+    const rows = [];
+    const qs = (view && view.questions) || {};
+    for (const qid of Object.keys(qs)) {
+      const q = qs[qid];
+      if (!q || q.state !== 'awaiting_you') continue;
+      const qr = q.question || {};
+      let text = qr.text || '';
+      if (text.length > 80) text = text.slice(0, 80).trimEnd() + '…';
+      rows.push({ project: (config && config.project) || 'this', qid, item: qr.item || '',
+                  text, ts: qr.ts || '', isSelf: true, url: '' });
+    }
+    return rows;
+  }
+
+  function renderPriorityRibbon() {
+    const self = selfAwaitingRows();
+    const peerRows = [];
+    const peers = (portfolioState.data && Array.isArray(portfolioState.data.peers)) ? portfolioState.data.peers : [];
+    for (const p of peers) {
+      if (!p || p.ok === false || !Array.isArray(p.peek)) continue;
+      for (const q of p.peek) {
+        if (!q || !q.qid) continue;
+        peerRows.push({ project: p.project || p.name, qid: q.qid, item: q.item || '',
+                        text: q.text || '', ts: q.ts || '', isSelf: false, url: p.url || '' });
+      }
+    }
+    // Kick off the first portfolio fetch so the ribbon fills with peer peeks on next redraw.
+    // Covered by the Portfolio tab too, but the owner may never visit it; this makes the
+    // ribbon self-starting.
+    if (!portfolioState.data && !portfolioState.loading && !portfolioState.error) {
+      try { loadPortfolio(null); } catch (e) { /* ignore */ }
+    }
+    const all = self.concat(peerRows).filter(r => r.ts);
+    if (!all.length) return null;
+    all.sort((a, b) => a.ts.localeCompare(b.ts));   // oldest-first = most urgent
+    const top = all.slice(0, 6);
+    const projCount = new Set(all.map(r => r.project)).size;
+    const wrap = el('details', { className: 'ck-priority-ribbon', open: 'open' });
+    const sum = el('summary', { className: 'ck-priority-summary' }, [
+      el('span', { className: 'ck-priority-title' }, ['Priority']),
+      el('span', { className: 'ck-muted ck-priority-count' },
+        [' · ' + top.length + ' of ' + all.length + ' awaiting you across ' + projCount
+         + ' project' + (projCount === 1 ? '' : 's')])
+    ]);
+    wrap.appendChild(sum);
+    const list = el('ol', { className: 'ck-priority-list' });
+    for (const r of top) {
+      const hrs = r.ts ? (Date.now() - Date.parse(r.ts)) / 3_600_000 : 0;
+      const health = Number.isNaN(hrs) ? 'warn' : (hrs < 1 ? 'warn' : hrs < 24 ? 'late' : 'overdue');
+      const li = el('li', { className: 'ck-priority-row', dataHealth: health, tabindex: '0',
+        'aria-label': r.project + ' · ' + r.qid + ' · ' + relTime(r.ts) }, [
+        el('span', { className: 'ck-priority-dot', dataHealth: health }, []),
+        el('span', { className: 'ck-priority-project' }, [r.project]),
+        el('span', { className: 'ck-priority-qid' }, [' · ' + r.qid]),
+        r.text ? el('span', { className: 'ck-priority-text' }, [' · ' + r.text]) : null,
+        el('span', { className: 'ck-priority-when ck-muted' }, [' · ' + relTime(r.ts)])
+      ].filter(Boolean));
+      const activate = () => {
+        if (r.isSelf) {
+          if (r.item && items && items[r.item]) openPanel(r.item, 'item');
+        } else if (r.url) {
+          try { window.open(r.url, '_blank', 'noopener'); } catch (e) {}
+        }
+      };
+      li.addEventListener('click', activate);
+      li.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); }
+      });
+      list.appendChild(li);
+    }
+    wrap.appendChild(list);
+    return wrap;
   }
 
   // The traffic-light dot per peer. green: no awaiting; yellow: oldest within 1h; orange: within 24h;

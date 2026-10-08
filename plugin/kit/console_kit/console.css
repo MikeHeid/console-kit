@@ -1799,3 +1799,47 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 }
 .ck-portfolio-peek-text { color: var(--c-fg); }
 .ck-portfolio-peek-when { font-size: 11px; }
+
+/* Cross-project priority ribbon at the top of the Inbox tab (0.24.0). */
+.ck-priority-ribbon {
+  margin: 8px 16px; border: 1px solid var(--c-border); border-radius: var(--radius-sm);
+  background: var(--c-surface-alt);
+}
+.ck-priority-summary {
+  padding: 8px 12px; cursor: pointer; list-style: none;
+  font-size: 13px; font-weight: 600;
+}
+.ck-priority-summary::-webkit-details-marker { display: none; }
+.ck-priority-summary::before { content: '▸ '; display: inline-block; width: 1em; color: var(--c-fg-muted); }
+.ck-priority-ribbon[open] .ck-priority-summary::before { content: '▾ '; }
+.ck-priority-title { color: var(--c-fg); }
+.ck-priority-count { font-weight: 400; }
+.ck-priority-list {
+  list-style: none; counter-reset: ck-pri; padding: 0 0 6px; margin: 0;
+}
+.ck-priority-row {
+  display: flex; align-items: center; gap: 2px; padding: 4px 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  cursor: pointer; font-size: 13px;
+  border-left: 3px solid transparent;
+}
+.ck-priority-row:hover, .ck-priority-row:focus-visible {
+  background: var(--c-surface); outline: none;
+}
+.ck-priority-row[data-health="warn"]    { border-left-color: #d29922; }
+.ck-priority-row[data-health="late"]    { border-left-color: #db6d28; }
+.ck-priority-row[data-health="overdue"] { border-left-color: #f85149; }
+.ck-priority-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 6px; background: var(--c-border); flex-shrink: 0;
+}
+.ck-priority-dot[data-health="warn"]    { background: #d29922; }
+.ck-priority-dot[data-health="late"]    { background: #db6d28; }
+.ck-priority-dot[data-health="overdue"] { background: #f85149; }
+.ck-priority-project { font-weight: 600; }
+.ck-priority-qid {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--c-accent); font-size: 12px;
+}
+.ck-priority-text { color: var(--c-fg); }
+.ck-priority-when { font-size: 12px; }

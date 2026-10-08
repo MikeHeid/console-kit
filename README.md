@@ -290,6 +290,11 @@ server cannot check it.
   question a title or branch names. The steward pushes the list
   (`agent.py prs-push`), and the tab says when it last did.
 - The **Favorite** tab lists everything you starred, grouped by item.
+- **Cross-project priority ribbon.** The Inbox opens with up to six of the
+  oldest awaiting questions across every console (self + each portfolio
+  peer), each with a traffic-light dot (yellow < 1h, orange < 24h,
+  red > 24h). Click a row to jump — local items open their panel; peer
+  rows open the peer in a new tab.
 - **Command palette.** Press **Ctrl+K** / **Cmd+K** on any page to open a
   search box over items, questions, playbooks, peers, tabs and actions.
   Type a few characters, press Enter: jumps to an item, runs a playbook,

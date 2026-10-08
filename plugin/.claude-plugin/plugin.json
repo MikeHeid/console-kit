@@ -1,6 +1,6 @@
 {
   "name": "console-kit",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "description": "The owner console: answer your agents' questions from a web page behind Cloudflare Access. This plugin carries the agent half (a SessionStart note of what the owner sent; skills to onboard a project, process answers, run deliberation rounds and fold locked answers) and the server kit that /console-kit:console-onboard installs.",
   "author": {
     "name": "MikeHeid"
