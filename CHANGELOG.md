@@ -1589,3 +1589,33 @@ The dashboard scaffold ships enough markup for a project's own
 CSS to style sections however it likes; data attributes
 (`data-ck-section`) make the tree selectable without parsing the
 slug.
+
+## `/overture:add-skill` — scaffold a new skill (1.5.0)
+
+A new slash command: **`/overture:add-skill <skill-name> [category]`**
+walks you through creating a Claude Code skill end-to-end.
+
+The flow:
+
+1. **Name** — the first argument is the slug (`[a-z0-9][a-z0-9._-]*`,
+   up to 64 chars). A missing or malformed slug is refused; a slug
+   that already exists is refused rather than overwritten.
+2. **Category** — if the second argument is absent or not one of the
+   four known values, the skill prompts with `AskUserQuestion`:
+   - **agent-review** — reviewer-style skill (code / design / security).
+   - **visualizer** — Mermaid or HTML-mock skill.
+   - **documentation** — doc-writing skill.
+   - **other** — generic skill.
+3. **Target** — picks `plugin/skills/<slug>/SKILL.md` when the CWD is
+   the Overture plugin repo itself (there is a `plugin/skills/` next
+   door); otherwise `.claude/skills/<slug>/SKILL.md` under the
+   project.
+4. **Scaffold** — writes a `SKILL.md` with the category-appropriate
+   template: frontmatter (name, description, argument-hint,
+   disable-model-invocation) plus a body stub for the chosen kind.
+5. **Confirm** — tells you the path, the category, and that the
+   file is a starting point.
+
+The skill touches nothing else — no git, no install, no plugin
+reload. A fresh skill becomes available next session (or on next
+plugin install when the file landed under `plugin/skills/`).
