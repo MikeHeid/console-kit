@@ -106,6 +106,7 @@ OWNER_ROUTES = {"/api/message": "message", "/api/answer": "answer", "/api/lock":
 # 0.8.19: starred visuals and items. A side-route (not a store kind): toggles are owner-only, idempotent, cheap.
 OWNER_FAVORITE = "/api/favorite"
 OWNER_PLAYBOOK = "/api/playbook"
+OWNER_TRIGGER_REPLAY = "/api/trigger-replay"
 # The live console (0.7.0). A long poll: the page asks "has anything changed
 # since seq S?" and the server answers the moment something does, or after at
 # most WAIT_MAX seconds with "no". Well inside Cloudflare's 100 s response
@@ -1199,6 +1200,33 @@ class Console:
             err = str(e)
             out = {"records": [], "skipped": []}
         self.triggers.log(name, "webhook", _iso_now(), len(out.get("records", [])),
+                          len(out.get("skipped", [])), err)
+        if err:
+            raise RequestError(500, err)
+        return out
+
+    def replay_trigger(self, body: object) -> dict:
+        """0.27.0: fire a trigger from the owner's browser. Bypasses the webhook token + rate limit
+        (the caller already proved they are the owner via the Access-authed owner door), logs the
+        firing with source="replay" so the trigger log carries an audit entry alongside the webhook
+        and cron firings. Nonce is minted fresh so a replay is NOT idempotent with the original
+        firing — it runs again.
+        """
+        if (not isinstance(body, dict)
+                or set(body) - {"name", "nonce"}
+                or not isinstance(body.get("name"), str)
+                or not isinstance(body.get("nonce"), str)):
+            raise RequestError(400, '/api/trigger-replay takes {"name": "<trigger>", "nonce": "<nonce>"}')
+        trigger = self.triggers.get(body["name"])
+        if trigger is None:
+            raise RequestError(404, f"no trigger named {body['name']!r}")
+        err: str | None = None
+        try:
+            out = self.run_playbook({"name": trigger.playbook, "nonce": f"replay-{body['nonce']}"})
+        except RequestError as e:
+            err = str(e)
+            out = {"records": [], "skipped": []}
+        self.triggers.log(trigger.name, "replay", _iso_now(), len(out.get("records", [])),
                           len(out.get("skipped", [])), err)
         if err:
             raise RequestError(500, err)
@@ -2726,7 +2754,8 @@ class OwnerHandler(_Handler):
             return self._fire_trigger(self.path[len("/api/trigger/"):])
         kind = OWNER_ROUTES.get(self.path)
         if kind is None and self.path not in ("/api/relock", "/api/lock-all", "/api/page-publish",
-                                              "/api/refactor", OWNER_FAVORITE, OWNER_PLAYBOOK):
+                                              "/api/refactor", OWNER_FAVORITE, OWNER_PLAYBOOK,
+                                              OWNER_TRIGGER_REPLAY):
             return self._send(404, {"error": "not found"})
         # Browsers send Origin on every POST, same-origin included, so a missing one is refused too:
         # an absent header must not read as "trusted".
@@ -2745,6 +2774,8 @@ class OwnerHandler(_Handler):
                 return self._send(200, self.console.favorite_toggle(self._body()))
             if self.path == OWNER_PLAYBOOK:   # 0.11.0: fan out a named playbook's steps
                 return self._send(200, self.console.run_playbook(self._body()))
+            if self.path == OWNER_TRIGGER_REPLAY:   # 0.27.0: re-fire a trigger from the Inbox log
+                return self._send(200, self.console.replay_trigger(self._body()))
             self._send(200, {"record": self.console.write(kind, self._body(), "owner")})
         except RequestError as e:
             self._send(e.code, {**e.extra, "error": str(e)})

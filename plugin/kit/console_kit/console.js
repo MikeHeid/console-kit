@@ -2507,12 +2507,14 @@
       body.appendChild(el('div', { className: 'ck-section-heading' }, ['Configured']));
       const configured = el('div', { className: 'ck-trigger-configured' });
       for (const t of triggers) {
-        configured.appendChild(el('div', { className: 'ck-trigger-row' }, [
+        const row = el('div', { className: 'ck-trigger-row' }, [
           el('code', {}, [t.name]),
           el('span', { className: 'ck-muted' }, [' → playbook ']),
           el('code', {}, [t.playbook]),
           el('span', { className: 'ck-muted' }, [t.kinds && t.kinds.length ? '  (' + t.kinds.join(' + ') + ')' : '']),
-        ]));
+        ]);
+        row.appendChild(renderTriggerReplayButton(t.name));
+        configured.appendChild(row);
       }
       body.appendChild(configured);
     }
@@ -2520,6 +2522,7 @@
     if (log.length) {
       body.appendChild(el('div', { className: 'ck-section-heading' }, ['Recent firings']));
       const list = el('ol', { className: 'ck-trigger-log', 'aria-label': 'Recent trigger firings, newest first' });
+      const liveNames = new Set((triggers || []).map(t => t.name));
       for (const row of log) {
         const li = el('li', { className: 'ck-trigger-log-row' });
         li.appendChild(el('span', { className: 'ck-trigger-log-time' }, [relTime(row.ts) || row.ts || '?']));
@@ -2532,6 +2535,9 @@
         if (row.error) {
           li.appendChild(el('div', { className: 'ck-trigger-log-err' }, ['error: ' + row.error]));
         }
+        if (row.name && liveNames.has(row.name)) {
+          li.appendChild(renderTriggerReplayButton(row.name));
+        }
         list.appendChild(li);
       }
       body.appendChild(list);
@@ -2542,6 +2548,28 @@
 
     wrap.appendChild(body);
     return wrap;
+  }
+
+  // One Replay button bound to a trigger name. POSTs /api/trigger-replay with a fresh nonce so
+  // the server runs the trigger's playbook again (and logs the firing under source "replay").
+  function renderTriggerReplayButton(name) {
+    const btn = el('button', { type: 'button', className: 'ck-btn ck-trigger-replay',
+      title: 'Fire ' + name + ' now', 'aria-label': 'Replay trigger ' + name }, ['↻ Replay']);
+    btn.addEventListener('click', async e => {
+      e.stopPropagation(); e.preventDefault();
+      btn.disabled = true;
+      try {
+        const r = await apiPost('/trigger-replay', { name }, 'replay-' + name + '-' + Date.now());
+        if (r && r.error) announce('Replay refused: ' + r.error);
+        else if (r && Array.isArray(r.skipped) && r.skipped.length)
+          announce('Replayed ' + name + '; ' + (r.records || []).length + ' ran, ' + r.skipped.length + ' skipped.');
+        else announce('Replayed ' + name + '.');
+      } catch (err) {
+        announce('Replay error: ' + (err.message || 'network'));
+      }
+      btn.disabled = false;
+    });
+    return btn;
   }
 
   // Impact graph (Cytoscape, 0.14.0): item + its ancestors + questions + cited files + mapped sections.
