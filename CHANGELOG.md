@@ -1361,3 +1361,28 @@ glance says what to touch first.
   never slows the ribbon.
 - Nothing to show when every project is quiet; the ribbon
   simply does not render.
+
+## Deep links + Copy link (0.25.0)
+
+The URL hash now activates one view on load, and the hash
+updates as the owner navigates:
+
+- `#inbox | #feed | #prs | #favorite | #portfolio | #chat` — open
+  the panel on that tab.
+- `#item=<id>` — open the item panel.
+- `#qid=<id>/Q<n>` — open the owning item.
+
+A deep-link in the URL beats the "open the Inbox by default"
+rule, so a shared bookmark lands the receiver exactly where the
+sender was. `history.replaceState` is used (not pushState) so a
+tab-hop isn't a navigation entry; `hashchange` keeps the view in
+sync when the owner edits the bar or hits Back.
+
+The command palette gained **Alt+Enter** on any row: copies a
+shareable link to the clipboard — a `#item=…` or `#qid=…`
+fragment for local rows, a `#<tab>` for tabs, or the peer's URL
+for a portfolio row. The shortcut-help overlay lists this.
+
+Nothing crosses to another browser or another owner — the hash is
+only interpreted inside the same console. Peers still require
+their own Access login, same as before.
