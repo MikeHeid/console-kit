@@ -1619,3 +1619,28 @@ The flow:
 The skill touches nothing else — no git, no install, no plugin
 reload. A fresh skill becomes available next session (or on next
 plugin install when the file landed under `plugin/skills/`).
+
+## Fragment buttons + viewer modal (1.6.0)
+
+When an agent's reply (chat, answer note, fork message, round
+message, or message card) contains a **fenced code block**, the
+block renders as a compact **📄 button** instead of inline
+walls-of-code; clicking opens a monospace viewer modal with
+**Copy** + **Close**.
+
+Any language works: `md`, `txt`, `py`, `go`, `rs`, `js`, `ts`,
+`json`, `yaml`, `html`, `css`, `sh`, `sql`, … — the button icon
+picks a per-language glyph; the lang defaults to `text` when none
+is given. A fence may name a file: `` ```md:plan.md `` makes the
+button title `plan.md`.
+
+- A **named fence** (`` ```lang:name.ext ``) is always a
+  fragment, regardless of length.
+- An **anonymous fence** must be ≥ 40 characters so a 10-char
+  inline snippet does not turn into a button.
+- The viewer modal shows the raw content preformatted (no
+  rendering); Copy writes to the clipboard with a
+  select-fallback. Esc / backdrop closes.
+- Applied uniformly to every surface where agent text renders:
+  Chat log, round messages, follow-up messages, locked-answer
+  notes, and the sheet view.

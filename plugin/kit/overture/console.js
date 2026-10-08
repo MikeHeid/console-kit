@@ -281,6 +281,114 @@
     return text.substring(0, maxLen - 1) + '…';
   }
 
+  // Fragment detection in agent text. A fenced code block (```lang[:name]\n…\n```) becomes a
+  // button; the surrounding prose becomes text nodes. The language can be anything (md, txt, py,
+  // json, yaml, go, …); the viewer modal shows raw content preformatted + Copy + Close.
+  const FRAG_FENCE = /```([A-Za-z0-9_.+-]*)(?::([A-Za-z0-9_./+-]+))?\n([\s\S]*?)```/g;
+  const FRAG_MIN_CHARS = 40;         // under this is just inline code, not a "fragment"
+  const FRAG_LANG_ICON = { md: '📝', markdown: '📝', txt: '📝', text: '📝',
+    json: '{}', yaml: '📄', yml: '📄', toml: '📄', html: '🖹', css: '🎨',
+    js: '🟨', ts: '🟦', py: '🐍', go: '🐹', rs: '🦀', java: '☕', sh: '$',
+    bash: '$', zsh: '$', ps1: '$', sql: '🗄', xml: '🖹', csv: '📊',
+    dockerfile: '🐳', makefile: '🛠' };
+
+  function renderAgentText(target, text) {
+    target.textContent = '';
+    if (!text) return;
+    const parts = extractFragments(String(text));
+    if (parts.length === 1 && parts[0].kind === 'text') {
+      target.textContent = parts[0].body;
+      return;
+    }
+    for (const p of parts) {
+      if (p.kind === 'text') {
+        if (p.body) target.appendChild(document.createTextNode(p.body));
+      } else {
+        target.appendChild(renderFragmentButton(p));
+      }
+    }
+  }
+
+  function extractFragments(text) {
+    const out = [];
+    let last = 0;
+    FRAG_FENCE.lastIndex = 0;
+    let m;
+    while ((m = FRAG_FENCE.exec(text)) !== null) {
+      const body = m[3];
+      const hasName = !!m[2];
+      // A named fence (```md:plan.md …) is always a fragment; an anonymous one must be ≥ 40 chars so an
+      // inline 10-char code snippet does not turn into a button.
+      if (!hasName && body.length < FRAG_MIN_CHARS) continue;
+      if (m.index > last) out.push({ kind: 'text', body: text.slice(last, m.index) });
+      out.push({
+        kind: 'fragment',
+        lang: (m[1] || '').toLowerCase() || 'text',
+        name: m[2] || '',
+        body: body
+      });
+      last = FRAG_FENCE.lastIndex;
+    }
+    if (!out.length) return [{ kind: 'text', body: text }];
+    if (last < text.length) out.push({ kind: 'text', body: text.slice(last) });
+    return out;
+  }
+
+  function renderFragmentButton(frag) {
+    const icon = FRAG_LANG_ICON[frag.lang] || '📄';
+    const lines = frag.body.split('\n').length;
+    const title = frag.name || frag.lang;
+    const btn = el('button', { className: 'ck-frag-btn', type: 'button',
+      title: 'Open the fragment in a viewer',
+      'aria-label': 'Open fragment ' + title }, [
+      el('span', { className: 'ck-frag-icon', 'aria-hidden': 'true' }, [icon]),
+      el('span', { className: 'ck-frag-title' }, [title]),
+      el('span', { className: 'ck-frag-meta ck-muted' }, [' · ' + lines + ' line' + (lines === 1 ? '' : 's')])
+    ]);
+    btn.addEventListener('click', e => { e.stopPropagation(); openFragmentViewer(frag); });
+    return btn;
+  }
+
+  function openFragmentViewer(frag) {
+    if (document.getElementById('ck-frag-view')) return;
+    const dlg = el('div', { id: 'ck-frag-view', className: 'ck-frag-view', role: 'dialog',
+      'aria-modal': 'true', 'aria-label': 'Fragment viewer' });
+    const h = el('h2', {}, [
+      el('span', { 'aria-hidden': 'true' }, [FRAG_LANG_ICON[frag.lang] || '📄', ' ']),
+      el('code', {}, [frag.name || frag.lang])
+    ]);
+    const pre = el('pre', { className: 'ck-frag-body', dataLang: frag.lang,
+      tabindex: '0' });
+    pre.textContent = frag.body;
+    const copyBtn = el('button', { type: 'button', className: 'ck-btn ck-btn-primary' }, ['Copy']);
+    const closeBtn = el('button', { type: 'button', className: 'ck-btn' }, ['Close']);
+    copyBtn.addEventListener('click', () => {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(frag.body)
+            .then(() => announce('Copied ' + frag.body.length + ' chars.'),
+                  () => announce('Could not copy; selecting instead.'));
+          return;
+        }
+      } catch (e) { /* fall through */ }
+      const r = document.createRange(); r.selectNodeContents(pre);
+      const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      announce('Selected — press Ctrl+C to copy.');
+    });
+    closeBtn.addEventListener('click', closeFragmentViewer);
+    dlg.appendChild(h);
+    dlg.appendChild(pre);
+    dlg.appendChild(el('div', { className: 'ck-frag-actions' }, [copyBtn, closeBtn]));
+    dlg.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closeFragmentViewer(); } });
+    dlg.addEventListener('click', e => { if (e.target === dlg) closeFragmentViewer(); });
+    document.body.appendChild(dlg);
+    requestAnimationFrame(() => closeBtn.focus());
+  }
+  function closeFragmentViewer() {
+    const dlg = document.getElementById('ck-frag-view');
+    if (dlg) dlg.remove();
+  }
+
   // Format relative time
   function relTime(ts) {
     if (!ts) return 'never';
@@ -2764,7 +2872,7 @@
       const card = el('div', { className: 'ck-fork ck-visual-request', dataRequest: m.id });
       card.appendChild(el('div', { className: 'ck-fork-head' }, ['◫ Visual requested · ' + relTime(m.ts)]));
       const t = el('div', { className: 'ck-message-text' });
-      t.textContent = m.text;
+      renderAgentText(t, m.text);
       card.appendChild(t);
       const mine = drawn.filter(v => v.request === m.id);
       if (!mine.length) card.appendChild(el('p', { className: 'ck-muted' }, ['Waiting for an agent to draw it.']));
@@ -3380,7 +3488,7 @@
         msg.appendChild(byEl);
         const content = el('div', { className: 'ck-message-content' });
         const textEl = el('div', { className: 'ck-message-text' });
-        textEl.textContent = m.text;
+        renderAgentText(textEl, m.text);
         content.appendChild(textEl);
         const timeEl = el('div', { className: 'ck-message-time' });
         timeEl.textContent = m.ts ? relTime(m.ts) : '';
@@ -3571,7 +3679,7 @@
     ]));
     const inner = el('div', { className: 'ck-sheet-body' });
     const text = el('div', { className: 'ck-q-text' });
-    text.textContent = r.text;
+    renderAgentText(text, r.text);
     inner.appendChild(text);
     if (!items[r.item]) inner.appendChild(el('p', { className: 'ck-muted' }, ['This item is no longer in the register.']));
     if (r.star) inner.appendChild(el('div', {}, ['★ ' + (r.star_by ? r.star_by + "'s" : 'recommended') + ': ' + (labels[r.star] || r.star)]));
@@ -4044,7 +4152,7 @@
       const chips = tagChips(forkTags(m.id));
       if (chips) card.appendChild(chips);
       const t = el('div', { className: 'ck-message-text' });
-      t.textContent = m.text;
+      renderAgentText(t, m.text);
       card.appendChild(t);
       const tr = transcriptBlock(m.id);
       if (tr) card.appendChild(tr);
@@ -5639,7 +5747,7 @@
         m.by === 'owner' ? 'You' : agentLabel(m, 'Agent'), ' · ',
         el('span', { title: new Date(m.ts).toLocaleString() }, [relTime(m.ts)])]));
       const t = el('div', { className: 'ck-chat-text' });
-      t.textContent = m.text;
+      renderAgentText(t, m.text);
       b.appendChild(t);
       log.appendChild(b);
     }
