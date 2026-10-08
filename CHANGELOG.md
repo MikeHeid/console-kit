@@ -1670,3 +1670,58 @@ install review:
   $USER`) and a one-liner about SessionStart hooks loading only in
   a new session, so an owner who installs mid-session knows to
   reopen Claude.
+
+## Numbered item refs — phase 1 (1.7.0)
+
+Items can now carry a **dotted-number ref** like `1`, `1.2`,
+`1.2.1`. The owner uses these in chat, on calls and in notes to
+point at specific work. The kit owns their assignment, so
+numbers do not drift or collide across pushes.
+
+### Fields
+
+- **`ref`** — optional in `items.json`. Dotted non-zero segments,
+  `^[1-9][0-9]*(\.[1-9][0-9]*)*$`. The ref must sit exactly one
+  segment under its parent's ref (`1.2` under `1`); a top-level
+  item has a single-segment ref.
+- **`kind`** — `"topic"` | `"item"` (default `"item"`). A topic may
+  have no parent even when `require_parent` is on.
+
+### `.overture.json` options
+
+    "items": {
+      "auto_ref": true,          // default true — assign missing refs on items-push
+      "require_parent": false    // default false — refuse an item with no parent and no "topic"
+    }
+
+### Behaviour
+
+- **Store owns the numbers.** `STATE/refs.json` carries
+  `{"assignments": {id: ref}, "retired": {ref: last-id}}`. On every
+  `items-push`:
+  - Items with a stored ref keep it; a push that disagrees refuses
+    the whole snapshot with the stored value in the message.
+  - Items with no stored ref AND `auto_ref` on get the next free
+    number under their parent (walking parents-first so each
+    child sees its parent's ref).
+  - Items that have left the register move to `retired`;
+    retired numbers are **never reused**.
+- **Returned to the caller.** `/api/items-push` adds a `refs`
+  object to its 200 so the pushing agent sees every assigned ref.
+- **Everywhere in the view.** Each item in the live payload
+  carries its ref in `items[id].ref`, so a UI update can show
+  `1.1 · <title>` beside the id without touching the view
+  pipeline.
+- **No cycle checks, no `item-move` yet.** Those come in 1.8.0
+  along with the browser surfaces (ref beside each title in the
+  Inbox, Priority ribbon and command palette).
+
+### Trust
+
+- The store is append-only in spirit: assignments are permanent
+  per id; retired numbers block their own number from being
+  given out again.
+- `assign_refs` checks shape, parent prefix, and uniqueness
+  before writing anything; a conflict leaves the file untouched.
+- `STATE/refs.json` is written whole, dir-relative, O_NOFOLLOW —
+  same path as `items.json`.

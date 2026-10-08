@@ -1038,6 +1038,33 @@ class Console:
         why = IT.snapshot_problem(body)
         if why:
             raise RequestError(400, why)
+        # 1.7.0: optionally refuse an item with no parent that isn't `kind: "topic"`. One line
+        # from `.overture.json` ("items": {"require_parent": true}) switches it on; the default
+        # is off so an upgrade from an older project does not refuse the first push.
+        if self.project.items_require_parent:
+            for item_id, data in body["items"].items():
+                if not isinstance(data, dict):
+                    continue
+                if data.get("parent"):
+                    continue
+                if data.get("kind") == "topic":
+                    continue
+                raise RequestError(400, f"items.{item_id}: has no parent and is not a topic; "
+                                        f"the project requires every item to sit under a topic. "
+                                        f"Add `parent` or set `kind: 'topic'`.")
+        # 1.7.0: reconcile refs BEFORE committing items.json. A ref conflict refuses the whole push
+        # so items.json never drifts past refs.json. `items.auto_ref` in `.overture.json` (default
+        # on) decides whether missing refs get auto-assigned.
+        from . import refs as RF
+        try:
+            assigned = RF.assign_refs(self.cfg.state, body["items"], auto=self.project.items_auto_ref)
+        except RF.RefError as e:
+            raise RequestError(400, str(e)) from None
+        # Fold the assigned refs back into each item so the view carries them. Items the caller
+        # already named a ref for are unchanged; items that got a new ref now show it.
+        for item_id, ref in assigned.items():
+            if item_id in body["items"] and body["items"][item_id].get("ref") != ref:
+                body["items"][item_id] = {**body["items"][item_id], "ref": ref}
         try:
             IT.store_snapshot(self.cfg.state, body)
         except ValueError as e:   # over MAX_ITEMS: nothing was written
@@ -1047,7 +1074,8 @@ class Console:
         except StoreError as e:   # a pushed seed the store refuses: the items stand, the seed is named
             raise RequestError(400, f"items kept; a seed question was refused: {e}") from None
         self._bump()
-        return {"items": len(body["items"]), "seeds_added": added}
+        return {"items": len(body["items"]), "seeds_added": added,
+                "refs": {k: v for k, v in assigned.items() if k in body["items"]}}
 
     def push_prs(self, body: object, agent: str | None) -> dict:
         """`prs-push`: the project's pull requests, read by the steward's gh in ITS process, as data.

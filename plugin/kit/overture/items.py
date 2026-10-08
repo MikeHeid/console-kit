@@ -31,9 +31,16 @@ ITEM_FIELDS = {"title": (str,), "parent": (str, type(None)), "status": (str, typ
                # 1.4.0: orchestration grouping — a slash-separated hierarchical slug like
                # "wave-1/phase-2/lane-ui". The scaffold materialises each path segment as a nested
                # <details> on the dashboard, so a new item lands under its already-visible section.
-               "section": (str, type(None))}
+               "section": (str, type(None)),
+               # 1.7.0: a dotted-number reference like "1", "1.2". Optional; the server auto-
+               # assigns under each parent when absent. Lives in STATE/refs.json too — see refs.py.
+               "ref": (str, type(None)),
+               # 1.7.0: "topic" | "item" (default "item"). A topic may have no parent even when
+               # require_parent is on. The console treats a topic as a lane header.
+               "kind": (str, type(None))}
 SECTION_SEG = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 MAX_SECTION_DEPTH = 5
+KINDS = ("topic", "item")
 STATE_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC   # STATE itself is the server's own configured folder
 
 # What the board says before the steward's first push: never fake items, never a silent blank (F63).
@@ -79,6 +86,8 @@ def snapshot_problem(doc: object) -> str | None:
                 if not SECTION_SEG.match(seg):
                     return (f"items.{k}.section segment {seg!r} must be a slug "
                             f"(a-z, 0-9, dot, dash, underscore; starts alnum; up to 64 chars)")
+        if isinstance(v.get("kind"), str) and v["kind"] not in KINDS:
+            return f"items.{k}.kind must be one of {', '.join(KINDS)}"
     if seeds is None:
         seeds = []
     if not isinstance(seeds, list) or not all(isinstance(q, dict) for q in seeds):
