@@ -290,6 +290,10 @@ server cannot check it.
   question a title or branch names. The steward pushes the list
   (`agent.py prs-push`), and the tab says when it last did.
 - The **Favorite** tab lists everything you starred, grouped by item.
+- **Command palette.** Press **Ctrl+K** / **Cmd+K** on any page to open a
+  search box over items, questions, playbooks, peers, tabs and actions.
+  Type a few characters, press Enter: jumps to an item, runs a playbook,
+  opens a peer in a new tab, or hops a tab.
 - **Keyboard shortcuts.** Press `?` on any page for the full list.
   `g i / f / p / s / o / c` hop to the Inbox / Feed / PRs / Favorite /
   Portfolio / Chat tab, `g b` closes the panel, `.` focuses the
