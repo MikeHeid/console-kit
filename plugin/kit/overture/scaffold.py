@@ -155,10 +155,9 @@ def _new_page(project_name: str, sections: tuple[str, ...]) -> str:
         "  .scaf-card h3 { margin: 0 0 2px; font-size: 13px; color: var(--muted); font-weight: 600; }\n"
         "  .scaf-value { font-size: 20px; font-weight: 600; }\n"
         "  .scaf-muted { color: var(--muted); font-size: 13px; }\n"
-        "  table.scaf-items { width: 100%; border-collapse: collapse; margin: 8px 0; }\n"
-        "  .scaf-items th, .scaf-items td { text-align: left; padding: 6px 8px;\n"
-        "    border-bottom: 1px solid var(--border); font-size: 13px; }\n"
-        "  .scaf-items th { color: var(--muted); font-weight: 600; }\n"
+        "  .scaf-items-tree { background: #f6f8fa; padding: 10px 12px; border-radius: 6px;\n"
+        "    font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n"
+        "    white-space: pre; overflow: auto; max-height: 420px; }\n"
         "  footer { color: var(--muted); font-size: 12px; margin-top: 28px; }\n"
         "</style>\n"
         "</head>\n"
@@ -211,15 +210,15 @@ def _section_inner(name: str, project_name: str) -> str:
             'Links to the spec documents the agents read. Point at files under `specs_dir`.</li></ul>'
         )
     if name == "items":
+        # 1.9.0: `items_tree` is a kit-computed live value — one <pre> is enough. The old
+        # `items_rows` HTML table (and the second `data-live-shape` under it) relied on inner-HTML
+        # replacement that `data-live` cannot do; the plain-text tree works everywhere.
         return (
             '<h2>Items</h2>\n'
-            '<table class="scaf-items">\n'
-            '  <thead><tr><th>ID</th><th>Title</th><th>Status</th></tr></thead>\n'
-            '  <tbody data-live="items_rows" data-live-shape="' + BOARD_SHAPE + '/items">\n'
-            '    <tr><td colspan="3" class="scaf-muted">The items table fills in after the first '
-            '<code>items-push</code>.</td></tr>\n'
-            '  </tbody>\n'
-            '</table>'
+            '<p class="scaf-muted">Numbered, nested by parent. Overture keeps it current '
+            'on every <code>items-push</code>.</p>\n'
+            '<pre class="scaf-items-tree" data-live="items_tree">The items tree fills in '
+            'after the first <code>items-push</code>.</pre>'
         )
     if name == "footer":
         return (
