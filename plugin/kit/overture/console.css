@@ -1922,3 +1922,21 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   padding: 10px 12px; border: 1px solid var(--c-border); border-top: 0; border-radius: 0 0 var(--radius-sm) var(--radius-sm);
   background: var(--c-surface);
 }
+
+/* Inbox filter chips (1.1.0): per-state toggles over this project's localStorage. */
+.ck-inbox-filters {
+  margin: 10px 16px 4px; display: flex; gap: 6px; flex-wrap: wrap;
+}
+.ck-inbox-chip {
+  padding: 2px 10px; border: 1px solid var(--c-border); border-radius: 999px;
+  background: var(--c-surface); color: var(--c-fg-muted); cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px; letter-spacing: .02em;
+}
+.ck-inbox-chip:hover, .ck-inbox-chip:focus-visible { background: var(--c-surface-alt); outline: none; }
+.ck-inbox-chip[aria-pressed="true"] {
+  background: var(--c-accent-soft, var(--c-surface-alt));
+  border-color: var(--c-accent); color: var(--c-fg);
+}
+.ck-inbox-chip[data-state="awaiting_you"][aria-pressed="true"] { color: var(--c-accent); }
+.ck-inbox-chip[data-state="stale"][aria-pressed="true"]        { color: var(--c-blocked); border-color: var(--c-blocked); }
