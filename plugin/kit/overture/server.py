@@ -1702,7 +1702,50 @@ class Console:
                 or not isinstance(values, dict)
                 or not all(isinstance(k, str) and isinstance(v, str) for k, v in values.items())):
             raise BoardError("the adapter's board() must return {shape: str, values: {str: str}}")
-        return {"shape": got["shape"], "values": values}
+        # 1.9.0: inject `items_tree` as a kit-computed live value — the project's board gets a plain
+        # text tree of {ref} {title} per item without having to render it in board() itself. A
+        # project that computes its own items_tree wins (not overwritten).
+        merged = dict(values)
+        if "items_tree" not in merged:
+            tree = self._items_tree()
+            if tree is not None:
+                merged["items_tree"] = tree
+        return {"shape": got["shape"], "values": merged}
+
+    def _items_tree(self) -> str | None:
+        """Plain-text tree of every item, nested by parent, in ref order (1.9.0).
+
+        A line per item: `<ref> <title>`, indented 2 spaces per depth. Items without a ref sort
+        after refs; items whose parent is missing from the register appear at root. Returns None
+        when there are no items (so a page with no push shows an empty live value, not an error).
+        """
+        items = self.items()
+        if not items:
+            return None
+        # ref sort key: parse dotted numbers so "1.10" sorts after "1.2". Items without a ref sort last.
+        def _k(ref: str | None) -> tuple:
+            if not isinstance(ref, str) or not ref:
+                return (1,)
+            return (0,) + tuple(int(seg) for seg in ref.split("."))
+        children: dict[str | None, list[str]] = {}
+        for iid, data in items.items():
+            parent = (data or {}).get("parent") if isinstance(data, dict) else None
+            if parent not in items:
+                parent = None
+            children.setdefault(parent, []).append(iid)
+        for p in children:
+            children[p].sort(key=lambda iid: (_k((items[iid] or {}).get("ref")), iid))
+        lines: list[str] = []
+        def walk(parent: str | None, depth: int) -> None:
+            for iid in children.get(parent, []):
+                data = items[iid] or {}
+                ref = data.get("ref") or ""
+                title = data.get("title") or ""
+                prefix = ref + " " if ref else ""
+                lines.append("  " * depth + prefix + title)
+                walk(iid, depth + 1)
+        walk(None, 0)
+        return "\n".join(lines)
 
     def page(self) -> str:
         """The page the owner published from STATE, any proposal, and the console (Q28, Q29); never a project file.

@@ -1735,6 +1735,31 @@ Browser surfaces for the refs that 1.7.0 taught the kit to assign.
   carries. `item-move` (the move-vs-alias open question) stays
   deferred.
 
+## Items tree as a live value (1.9.0)
+
+The scaffold page gets a kit-computed, always-current tree of
+every item — no `board()` code needed.
+
+- **Server-side.** `Console.board()` now injects an
+  `items_tree` key into whatever the project's adapter pushed as
+  `values`, unless the project already set that key. The tree is
+  plain text, one item per line (`<ref> <title>`), indented two
+  spaces per depth, sorted by ref (`1.10` after `1.2`, items
+  without a ref last). Orphans whose parent left the register
+  show at root.
+- **Page.** New scaffolds get a single `<pre
+  class="scaf-items-tree" data-live="items_tree">` block in
+  place of the old `items_rows` HTML table (which never worked —
+  `data-live` sets `textContent`, not inner HTML; brief 1 #17
+  closed).
+- **Backward compat.** Existing scaffolded pages keep whatever
+  markup they have; the `items_tree` value is only applied where
+  `data-live="items_tree"` exists. A project that already pushes
+  `items_tree` in its own `board()` is untouched.
+- **No new routes, no new fields.** The tree is derived at
+  render time from `items.json`'s existing shape; no snapshot
+  change needed.
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent
