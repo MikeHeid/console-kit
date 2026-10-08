@@ -1555,3 +1555,37 @@ register and writes nothing. It never fires the playbook; a
 "Preview" is always safe to click. The route is route-gated like
 the owner door, so a Preview without authentication fails the
 same way as `/api/view`.
+
+## Orchestration tree: section field on items (1.4.0)
+
+An item in `items.json` can now carry an optional **`section`**
+field — a slash-separated hierarchical slug like
+`wave-1/phase-2/lane-ui`. The scaffold materialises every path
+segment as a nested `<details data-ck-section="…">` on the
+dashboard, and a new item drops into its already-visible
+wave/phase/lane node without the owner editing the page.
+
+- **Schema:** `section` is validated at push time:
+  up to 5 slash-separated slug segments, each 1–64 chars from
+  `[a-z0-9][a-z0-9._-]*`. A bad shape refuses the push with the
+  offending segment named.
+- **Scaffold:** `sync_items_block` creates missing section nodes
+  in order (shallowest first) so each new item sees its full
+  parent chain. Hand-edits inside each `<details data-ck-section>`
+  are preserved across re-syncs — only the content inside
+  `<!-- ck:section-children slug -->` markers is written.
+- **Parent still wins:** an item with a `parent` already on the
+  page nests under the parent; otherwise it drops into its
+  section. Items with neither fall to the top of the items block,
+  so no item ever disappears.
+- **Order:** parents before children, roots sorted by section
+  depth, so a push of 40 items at once produces the right tree in
+  one pass.
+- **Adapter note:** `plugin/kit/docs/ADAPTER.md` documents the
+  new optional field; existing adapters keep working — `section`
+  defaults to absent.
+
+The dashboard scaffold ships enough markup for a project's own
+CSS to style sections however it likes; data attributes
+(`data-ck-section`) make the tree selectable without parsing the
+slug.

@@ -280,29 +280,86 @@ def _adapter_write(current: str) -> str | None:
 ITEMS_START = "<!-- ck:items start -->"
 ITEMS_END = "<!-- ck:items end -->"
 _ITEM_MARK = re.compile(r"<!--\s*ck:item\s+([A-Za-z0-9][A-Za-z0-9_.\-]{0,127})\s+start\s*-->")
+_SECTION_MARK = re.compile(r'<!--\s*ck:section\s+([A-Za-z0-9][A-Za-z0-9/._-]{0,255})\s+start\s*-->')
 
 
 def sync_items_block(page_text: str, items: dict) -> tuple[str, list[str]]:
     """Return (new page text, list of newly inserted item ids). Idempotent.
 
-    `items` is {item_id: {"title": str, "parent": id|None, ...}}. For items not already represented inside
-    the ck:items block, a `<details id="item-X" data-ck-item="X">` is inserted under its parent's details,
-    or at the top of the block when the parent is not (yet) in the tree. Existing items are left alone.
+    `items` is {item_id: {"title": str, "parent": id|None, "section": "wave/phase/lane"|None, ...}}.
+
+    An item with a `section` is nested under a chain of `<details data-ck-section="…">` blocks: one per
+    path segment, created in order so the full "wave-1 → phase-2 → lane-ui" tree is visible on the page
+    as items arrive. Missing segments are created the first time any item below them lands; later items
+    in the same section slot straight into the existing node.
+
+    An item with a `parent` (and no section, or a section matching its parent's) still nests under its
+    parent's `<details>`. Items with neither land at the top of the ck:items block.
     """
     s, e = page_text.find(ITEMS_START), page_text.find(ITEMS_END)
     if s == -1 or e == -1 or e < s:
         page_text = _insert_items_block(page_text)
         s, e = page_text.find(ITEMS_START), page_text.find(ITEMS_END)
-    present = set(_ITEM_MARK.findall(page_text[s:e]))
-    # Order: parents before children. Items with a missing-ancestor stay at top level.
-    missing = [k for k in items if k not in present]
-    missing.sort(key=lambda k: _depth(k, items))
+    present_items = set(_ITEM_MARK.findall(page_text[s:e]))
+    present_sections = set(_SECTION_MARK.findall(page_text[s:e]))
+    # Order: parents before children; among roots, shallower-section before deeper-section. Each insert
+    # then sees its parent/section already materialised.
+    missing = [k for k in items if k not in present_items]
+    missing.sort(key=lambda k: (
+        _depth(k, items),
+        _section_depth(items[k] or {}),
+    ))
     added: list[str] = []
     for item_id in missing:
-        page_text = _insert_item(page_text, item_id, items[item_id] or {}, items, present)
-        present.add(item_id)
+        data = items[item_id] or {}
+        page_text = _ensure_section_path(page_text, data.get("section"), present_sections)
+        page_text = _insert_item(page_text, item_id, data, items, present_items, present_sections)
+        present_items.add(item_id)
         added.append(item_id)
     return page_text, added
+
+
+def _section_depth(data: dict) -> int:
+    sec = data.get("section")
+    return len(sec.split("/")) if isinstance(sec, str) and sec else 0
+
+
+def _ensure_section_path(page: str, section: str | None, present_sections: set) -> str:
+    """Materialise every path segment of `section` as nested <details>, if not already there."""
+    if not section:
+        return page
+    segs = section.split("/")
+    for i in range(1, len(segs) + 1):
+        slug = "/".join(segs[:i])
+        if slug in present_sections:
+            continue
+        page = _insert_section(page, slug, "/".join(segs[: i - 1]) or None, present_sections)
+        present_sections.add(slug)
+    return page
+
+
+def _section_html(slug: str) -> str:
+    label = slug.split("/")[-1].replace("-", " ").replace("_", " ")
+    return (
+        f"<!-- ck:section {slug} start -->\n"
+        f'<details class="ck-section" data-ck-section="{slug}" open>\n'
+        f'  <summary><span class="ck-section-label">{label}</span>'
+        f'  <code class="ck-section-slug">{slug}</code></summary>\n'
+        f"  <!-- ck:section-children {slug} -->\n"
+        f"</details>\n"
+        f"<!-- ck:section {slug} end -->\n"
+    )
+
+
+def _insert_section(page: str, slug: str, parent_slug: str | None, present_sections: set) -> str:
+    html = _section_html(slug)
+    if parent_slug and parent_slug in present_sections:
+        hole = f"<!-- ck:section-children {parent_slug} -->"
+        at = page.find(hole)
+        if at != -1:
+            return page[:at] + html + page[at:]
+    at = page.find(ITEMS_END)
+    return page[:at] + html + page[at:]
 
 
 def _depth(item_id: str, items: dict, seen: tuple = ()) -> int:
@@ -328,14 +385,22 @@ def _node_html(item_id: str, data: dict) -> str:
     )
 
 
-def _insert_item(page: str, item_id: str, data: dict, items: dict, present: set) -> str:
+def _insert_item(page: str, item_id: str, data: dict, items: dict,
+                 present_items: set, present_sections: set) -> str:
     html = _node_html(item_id, data)
+    # 1.4.0: parent still wins when the parent is already on the page. Otherwise, drop into the deepest
+    # existing section slot. Fall back to the top of the items block.
     parent = data.get("parent")
-    if parent and parent in present:
+    if parent and parent in present_items:
         hole = f"<!-- ck:children {parent} -->"
         at = page.find(hole)
         if at != -1:
-            # Insert immediately BEFORE the parent's children marker: nests inside its <details>.
+            return page[:at] + html + page[at:]
+    section = data.get("section")
+    if section and section in present_sections:
+        hole = f"<!-- ck:section-children {section} -->"
+        at = page.find(hole)
+        if at != -1:
             return page[:at] + html + page[at:]
     at = page.find(ITEMS_END)
     return page[:at] + html + page[at:]

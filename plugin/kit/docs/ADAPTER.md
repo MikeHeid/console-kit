@@ -12,8 +12,12 @@ The server and the fold load it **by path**, so it must import on its own.
 ```python
 def items() -> dict[str, dict]:
     """Every piece of work the console can ask about:
-    id -> {"title": str, "parent": id | None, "status": str}.
-    Parents make a tree; a question on a child counts toward its parents."""
+    id -> {"title": str, "parent": id | None, "status": str, "section": str | None}.
+    Parents make a tree; a question on a child counts toward its parents.
+    `section` is an optional orchestration slug like "wave-1/phase-2/lane-ui"
+    (up to 5 slash-separated segments). Overture's scaffold materialises
+    each path segment as a nested <details data-ck-section="…"> on the
+    dashboard, so a new item lands under its already-visible wave/phase/lane."""
 
 def record(entries: list[dict], dry_run: bool) -> list[str]:
     """Write each folded, locked answer into the project's own record.
@@ -50,7 +54,7 @@ may print it the same way, and needs no change if it does not.
 
 The starter keeps everything under `.overture/`:
 
-- `items.json` holds the work (`{"ID": {"title": ..., "parent": null, "status": "open"}}`);
+- `items.json` holds the work (`{"ID": {"title": ..., "parent": null, "section": "wave-1/phase-2/lane-ui", "status": "open"}}`);
 - `seed/*.json` holds prepared questions;
 - `RULINGS.md` is where locked answers are written, one section per lock.
 

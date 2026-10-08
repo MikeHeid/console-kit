@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 from pathlib import Path
@@ -26,7 +27,13 @@ from .store import StoreError
 ITEMS = "items.json"
 MAX_ITEMS = 4 << 20
 MAX_ITEM_COUNT = 10_000
-ITEM_FIELDS = {"title": (str,), "parent": (str, type(None)), "status": (str, type(None))}
+ITEM_FIELDS = {"title": (str,), "parent": (str, type(None)), "status": (str, type(None)),
+               # 1.4.0: orchestration grouping — a slash-separated hierarchical slug like
+               # "wave-1/phase-2/lane-ui". The scaffold materialises each path segment as a nested
+               # <details> on the dashboard, so a new item lands under its already-visible section.
+               "section": (str, type(None))}
+SECTION_SEG = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+MAX_SECTION_DEPTH = 5
 STATE_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC   # STATE itself is the server's own configured folder
 
 # What the board says before the steward's first push: never fake items, never a silent blank (F63).
@@ -64,6 +71,14 @@ def snapshot_problem(doc: object) -> str | None:
             if f in v and not isinstance(v[f], types):
                 want = " or ".join("null" if t is type(None) else t.__name__ for t in types)
                 return f"items.{k}.{f} must be {want}, not {type(v[f]).__name__}"
+        if isinstance(v.get("section"), str) and v["section"]:
+            segs = v["section"].split("/")
+            if len(segs) > MAX_SECTION_DEPTH:
+                return f"items.{k}.section has {len(segs)} segments; at most {MAX_SECTION_DEPTH}"
+            for seg in segs:
+                if not SECTION_SEG.match(seg):
+                    return (f"items.{k}.section segment {seg!r} must be a slug "
+                            f"(a-z, 0-9, dot, dash, underscore; starts alnum; up to 64 chars)")
     if seeds is None:
         seeds = []
     if not isinstance(seeds, list) or not all(isinstance(q, dict) for q in seeds):
