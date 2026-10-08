@@ -1406,3 +1406,22 @@ Snoozes live in this browser's `localStorage` keyed by
 another and a private window may refuse it — the UX works
 without storage. Expired entries are pruned on read; no server
 work is involved.
+
+## Trigger replay (0.27.0)
+
+The Triggers section of the Inbox now carries a **↻ Replay**
+button on every configured trigger and on every past firing in
+the log (as long as the trigger still exists).
+
+- One click POSTs `/api/trigger-replay` with a fresh nonce; the
+  server runs the trigger's playbook via the same path
+  `fire_cron` and `fire_trigger` already use.
+- The firing is appended to the trigger log with
+  `kind: "replay"`, so an audit shows manual replays alongside
+  webhook and cron firings.
+- Replay is owner-only (gated by the Access-authed owner door)
+  and bypasses the webhook token + rate limit — the owner
+  already proved themselves.
+- A playbook step that no longer passes its `when` predicate is
+  skipped as usual; the Delegate-bar-style surface shows ran vs.
+  skipped counts, with the first skip's reason.
