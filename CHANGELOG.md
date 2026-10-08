@@ -1783,6 +1783,24 @@ opens that item.
   fragment viewer, so every surface that already shows agent
   text picks this up automatically.
 
+## Scaffold append sets `data-live-shape` (1.11.0)
+
+A scaffold run that appends sections to an existing page now
+patches the page's `<body>` tag so the live loop can find it.
+
+- Before: `_page_write` only wrote `<body data-live-shape="…">`
+  on a brand-new page. Appending sections to a hand-made page
+  left the attribute off, so none of the `data-live="…"`
+  elements updated. (Brief 1 #16.)
+- Now: `_needs_body_shape` / `_add_body_shape` detect a `<body>`
+  without the attribute and inject it next to the existing
+  attributes. Idempotent (a page that already has the attr is
+  untouched). Case-insensitive — `<BODY class="x">` works too.
+- Pages that already carry a different `data-live-shape` are
+  left alone (so a project with its own shape is not
+  overwritten). Pages with no `<body>` tag are left alone (the
+  scaffold is additive, not restorative).
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent
