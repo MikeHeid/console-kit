@@ -1089,9 +1089,16 @@ class Console:
         if pb is None:
             raise RequestError(404, f"no playbook named {body['name']!r} under .console-kit/playbooks/")
         items = self.items()
+        view = (self.payload() or {}).get("view") or {}
         records: list[dict] = []
         skipped: list[dict] = []
         for index, step in enumerate(pb.steps):
+            when = step.get("when")
+            if when is not None:
+                passes, reason = PB.evaluate_when(when, view, items)
+                if not passes:
+                    skipped.append({"index": index, "why": f"when:{reason}"})
+                    continue
             if step["item"] != S.CHAT_ITEM and step["item"] not in items:
                 skipped.append({"index": index, "why": f"item {step['item']!r} is not in the project's item list"})
                 continue

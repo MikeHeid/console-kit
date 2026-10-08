@@ -12,6 +12,22 @@ that lists steps the owner wants fired as one:
 - `visual` — ask the agent to draw a diagram or mock.
 - `chat` — a free-text message in the chat thread.
 
+A step may also carry an optional **`when`** predicate (0.20.0) that
+gates it at run time. The server evaluates `when` against the current
+view + item register before firing; a step whose `when` is false is
+skipped with `{index, why: "when:<reason>"}` and the rest still run.
+The predicate kinds are closed-set:
+
+- `{"kind": "project_has_state", "state": "awaiting_you|unlocked|locked|stale", "min": N}`
+- `{"kind": "item_has_state", "item": "<id>", "state": "...", "min": N}`
+- `{"kind": "item_exists", "item": "<id>"}`
+- `{"kind": "has_section", "name": "<slug>"}`
+- `{"kind": "not", "of": {<predicate>}}`
+
+A playbook with a bad `when` (unknown kind, wrong field, out-of-range
+`min`) is refused at load time, so a firing never surfaces a schema
+error.
+
 The console serves `view.playbooks` with every playbook's name, one-line
 description, and the number of steps. This skill reads that list, asks
 the user which one to run, and dispatches it through
