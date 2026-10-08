@@ -63,6 +63,12 @@ class ProjectConfig:
     # dashboard page's sections (0.9.12). Validated here only; the server does not resolve them against the
     # page (it never reads the page's HTML).
     sections: dict = field(default_factory=dict)
+    # 1.7.0: refs options under `.overture.json`'s "items" key.
+    # - auto_ref: assign a dotted number to a pushed item that has none. Default True.
+    # - require_parent: refuse an item that has no parent and no `kind: "topic"`. Default False
+    #   (so an existing project upgrading does not refuse its first push).
+    items_auto_ref: bool = True
+    items_require_parent: bool = False
 
 
 def _dir(root: Path, v: object, key: str) -> str:
@@ -113,7 +119,15 @@ def load(root: Path) -> ProjectConfig:
         raise ConfigError(f"{FILE}: visuals_dir {visuals!r} is inside specs_dir {specs!r}; keep them apart, "
                           f"or every visual would read as a spec")
     sections = _sections(doc.get("sections"))
-    return ProjectConfig(specs_dir=specs, visuals_dir=visuals, next_step=dict(steps), sections=sections)
+    items_opts = doc.get("items") or {}
+    if not isinstance(items_opts, dict) or set(items_opts) - {"auto_ref", "require_parent"}:
+        raise ConfigError(f"{FILE}: items takes only {{auto_ref: bool, require_parent: bool}}")
+    for k in ("auto_ref", "require_parent"):
+        if k in items_opts and not isinstance(items_opts[k], bool):
+            raise ConfigError(f"{FILE}: items.{k} must be true or false")
+    return ProjectConfig(specs_dir=specs, visuals_dir=visuals, next_step=dict(steps), sections=sections,
+                         items_auto_ref=items_opts.get("auto_ref", True),
+                         items_require_parent=items_opts.get("require_parent", False))
 
 
 def _sections(v: object) -> dict:
