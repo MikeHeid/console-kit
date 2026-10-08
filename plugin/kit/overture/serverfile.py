@@ -1,6 +1,6 @@
 """The one console server's file: which projects it hosts, and where (K3, spec §3.4, §3.5).
 
-    ${XDG_CONFIG_HOME:-~/.config}/console-kit/server.json
+    ${XDG_CONFIG_HOME:-~/.config}/overture/server.json
     {"team_domain": "team.example.cloudflareaccess.com",
      "projects": {"<name>": {"state": "<abs dir>", "root": "<abs dir>", "page": "<path under root>",
                              "hostname": "<bare DNS name>", "aud": "<Access AUD>", "port": N,
@@ -15,7 +15,7 @@ SessionStart hook still reads them. This module reads `projects.json` and
 never writes it.
 
 A project's name is the user's word, given on the command line: it is never
-read from the repository's `.console-kit.json`, whatever keys that file holds.
+read from the repository's `.overture.json`, whatever keys that file holds.
 
 The cost collector (K2) reads `slugs` from here too, through `slugs_for_state`:
 this is the one reader of the file. Keys it does not know are ignored, so an
@@ -57,7 +57,7 @@ SLUG = re.compile(r"^[A-Za-z0-9-]{1,255}\Z")   # one directory name: never "/", 
 HOSTNAME = re.compile(r"^(?=.{1,253}\Z)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+\Z")
 AUD = re.compile(r"^[A-Za-z0-9_-]{1,256}\Z")
 TEAM = HOSTNAME
-# 0.9.1: a single leading dot is allowed on the first path segment, so `.console-kit/page.html` validates
+# 0.9.1: a single leading dot is allowed on the first path segment, so `.overture/page.html` validates
 # (the onboarding default). "." and ".." as full segments are still refused by `_page_problem`'s split check.
 PAGE = re.compile(r"^\.?[A-Za-z0-9_][A-Za-z0-9_./-]{0,511}\Z")
 TOKENS = "tokens"

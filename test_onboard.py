@@ -51,8 +51,8 @@ class CheckTests(Base):
         self.assertEqual(a["name"], "acme")
         self.assertEqual(a["hostname"], "acme-console.example.com")
         self.assertEqual(a["tunnel"], "acme-console")        # the default tunnel name
-        self.assertEqual(a["page"], ".console-kit/page.html")
-        self.assertEqual(a["adapter"], ".console-kit/adapter.py")
+        self.assertEqual(a["page"], ".overture/page.html")
+        self.assertEqual(a["adapter"], ".overture/adapter.py")
 
     def test_each_bad_answer_is_refused_by_its_own_name(self):
         cases = {
@@ -80,22 +80,22 @@ class CheckTests(Base):
 class WriteTests(Base):
     def test_writes_env_config_adapter_and_page(self):
         out = self.write()
-        env = (self.project / ".console-kit/console.env").read_text()
+        env = (self.project / ".overture/console.env").read_text()
         self.assertTrue(env.startswith(O.MARK))
         for line in ("CONSOLE_NAME=acme", f"CONSOLE_AUD={AUD}", "CONSOLE_HOSTNAME=acme-console.example.com",
                      "CONSOLE_PORT=4793", "CONSOLE_TUNNEL=acme-console"):
             self.assertIn(line + "\n", env)
-        cfg = json.loads((self.project / ".console-kit.json").read_text())
-        self.assertEqual(cfg["fold"]["adapter"], ".console-kit/adapter.py")
-        self.assertTrue((self.project / ".console-kit/adapter.py").is_file())
-        self.assertIn(O.MARK.lstrip("# "), (self.project / ".console-kit/page.html").read_text())
+        cfg = json.loads((self.project / ".overture.json").read_text())
+        self.assertEqual(cfg["fold"]["adapter"], ".overture/adapter.py")
+        self.assertTrue((self.project / ".overture/adapter.py").is_file())
+        self.assertIn(O.MARK.lstrip("# "), (self.project / ".overture/page.html").read_text())
         self.assertEqual(len(out), 4, out)
 
     def test_a_rerun_with_the_same_answers_changes_nothing(self):
         self.write()
         before = {p: p.read_bytes() for p in self.project.rglob("*") if p.is_file()}
         out = self.write()
-        self.assertEqual(out[0], f"unchanged {self.project.resolve() / '.console-kit/console.env'}")
+        self.assertEqual(out[0], f"unchanged {self.project.resolve() / '.overture/console.env'}")
         # The starters exist now, so a rerun names them for review rather than trusting a marker.
         self.assertEqual([line.split()[1].rsplit("/", 1)[1].rstrip(":") for line in out[1:]], ["adapter.py", "page.html"])
         self.assertTrue(all(line.startswith("REVIEW") for line in out[1:]), out)
@@ -104,10 +104,10 @@ class WriteTests(Base):
     def test_a_rerun_with_new_answers_rewrites_its_own_file(self):
         self.write()
         self.write(hostname="other.example.com")
-        self.assertIn("CONSOLE_HOSTNAME=other.example.com\n", (self.project / ".console-kit/console.env").read_text())
+        self.assertIn("CONSOLE_HOSTNAME=other.example.com\n", (self.project / ".overture/console.env").read_text())
 
     def test_a_file_it_did_not_write_is_refused_unless_forced(self):
-        env = self.project / ".console-kit/console.env"
+        env = self.project / ".overture/console.env"
         env.parent.mkdir()
         env.write_text("CONSOLE_NAME=hand-made\n")
         with self.assertRaisesRegex(O.OnboardError, "was not written by onboard.py"):
@@ -125,36 +125,36 @@ class WriteTests(Base):
         self.assertEqual((self.project / "tools/adapter.py").read_text(), "# mine\n")
 
     def test_the_config_is_merged_never_replaced(self):
-        (self.project / ".console-kit.json").write_text(json.dumps(
+        (self.project / ".overture.json").write_text(json.dumps(
             {"keep": 1, "fold": {"locked": "custom/locked", "other": True}}))
         self.write(audit_seat="determinism", audit_brief="check replay")
-        cfg = json.loads((self.project / ".console-kit.json").read_text())
+        cfg = json.loads((self.project / ".overture.json").read_text())
         self.assertEqual(cfg["keep"], 1)
         self.assertEqual(cfg["fold"], {"locked": "custom/locked", "other": True,
-                                       "ledger": ".console-kit/folded.txt", "adapter": ".console-kit/adapter.py"})
+                                       "ledger": ".overture/folded.txt", "adapter": ".overture/adapter.py"})
         self.assertEqual(cfg["audit"], {"seat": "determinism", "brief": "check replay"})
 
     def test_next_step_defaults_to_the_plugins_own_skills_and_never_replaces_one(self):
         # Catches: onboarding that leaves Refine and Drill refused on a fresh install (no next_step),
         # one that overwrites a project's own choice of skill, and a default the server would refuse.
-        from console_kit import projectcfg as PC
+        from overture import projectcfg as PC
         self.write()
-        cfg = json.loads((self.project / ".console-kit.json").read_text())
-        self.assertEqual(cfg["next_step"], {"refine": "console-kit:refine", "drill": "console-kit:drill"})
+        cfg = json.loads((self.project / ".overture.json").read_text())
+        self.assertEqual(cfg["next_step"], {"refine": "overture:refine", "drill": "overture:drill"})
         self.assertEqual(PC.load(self.project).next_step, cfg["next_step"])
-        (self.project / ".console-kit.json").write_text(json.dumps({"next_step": {"refine": "refine"}}))
+        (self.project / ".overture.json").write_text(json.dumps({"next_step": {"refine": "refine"}}))
         self.write()
-        cfg = json.loads((self.project / ".console-kit.json").read_text())
-        self.assertEqual(cfg["next_step"], {"refine": "refine", "drill": "console-kit:drill"})
-        (self.project / ".console-kit.json").write_text(json.dumps({"next_step": ["refine"]}))
+        cfg = json.loads((self.project / ".overture.json").read_text())
+        self.assertEqual(cfg["next_step"], {"refine": "refine", "drill": "overture:drill"})
+        (self.project / ".overture.json").write_text(json.dumps({"next_step": ["refine"]}))
         with self.assertRaisesRegex(O.OnboardError, "next_step"):
             self.write()
 
     def test_a_broken_config_is_refused_before_anything_is_written(self):
-        (self.project / ".console-kit.json").write_text("{not json")
+        (self.project / ".overture.json").write_text("{not json")
         with self.assertRaisesRegex(O.OnboardError, "is not valid JSON"):
             self.write()
-        self.assertFalse((self.project / ".console-kit").exists())
+        self.assertFalse((self.project / ".overture").exists())
 
     def test_a_bad_answer_writes_nothing(self):
         with self.assertRaises(O.OnboardError):
@@ -182,7 +182,7 @@ class WriteTests(Base):
 class SymlinkTests(Base):
     """A cloned repository must not be able to steer a write outside itself (PR #1 security review, CRITICAL)."""
 
-    TARGETS = (".console-kit/console.env", ".console-kit.json", ".console-kit/adapter.py", ".console-kit/page.html")
+    TARGETS = (".overture/console.env", ".overture.json", ".overture/adapter.py", ".overture/page.html")
 
     def test_a_dangling_link_at_any_target_is_refused_and_nothing_is_written(self):
         for rel in self.TARGETS:
@@ -198,20 +198,20 @@ class SymlinkTests(Base):
                         O.write(self.project, GOOD, force=force, check_port=False)
                 self.assertFalse(outside.exists(), f"{rel} wrote through the link")
                 self.assertEqual(list(self.home.iterdir()), [], "something landed outside the project")
-                self.assertFalse((self.project / ".console-kit/console.env").exists() and rel != ".console-kit/console.env")
+                self.assertFalse((self.project / ".overture/console.env").exists() and rel != ".overture/console.env")
 
     def test_a_linked_directory_is_refused(self):
         elsewhere = self.home / "elsewhere"
         elsewhere.mkdir()
-        (self.project / ".console-kit").symlink_to(elsewhere)
+        (self.project / ".overture").symlink_to(elsewhere)
         with self.assertRaisesRegex(O.OnboardError, "is a symbolic link"):
             self.write()
         self.assertEqual(list(elsewhere.iterdir()), [])
 
     def test_a_link_to_a_real_file_inside_the_project_is_refused_too(self):
         (self.project / "real.html").write_text("<p>x</p>")
-        (self.project / ".console-kit").mkdir()
-        (self.project / ".console-kit/page.html").symlink_to(self.project / "real.html")
+        (self.project / ".overture").mkdir()
+        (self.project / ".overture/page.html").symlink_to(self.project / "real.html")
         with self.assertRaisesRegex(O.OnboardError, "is a symbolic link"):
             self.write()
 
@@ -229,8 +229,8 @@ class SymlinkTests(Base):
 
 class ReviewNoticeTests(Base):
     def test_an_adapter_or_page_already_there_is_named_for_review(self):
-        (self.project / ".console-kit").mkdir()
-        (self.project / ".console-kit/adapter.py").write_text(f"{O.MARK}\nimport os\n")  # a marker proves nothing
+        (self.project / ".overture").mkdir()
+        (self.project / ".overture/adapter.py").write_text(f"{O.MARK}\nimport os\n")  # a marker proves nothing
         out = self.write()
         review = [line for line in out if line.startswith("REVIEW")]
         self.assertEqual(len(review), 1, out)
@@ -282,7 +282,7 @@ class InstallGuardTests(Base):
 class ReadEnvTests(Base):
     def test_show_returns_only_validated_keys(self):
         self.write()
-        env = self.project / ".console-kit/console.env"
+        env = self.project / ".overture/console.env"
         env.write_text(env.read_text() + "EVIL=$(rm -rf ~)\nExecStartPre=/bin/sh\n")
         got = O.read_env(env)
         self.assertEqual(set(got), {"CONSOLE_NAME", "CONSOLE_TEAM_DOMAIN", "CONSOLE_AUD", "CONSOLE_HOSTNAME",
@@ -290,14 +290,14 @@ class ReadEnvTests(Base):
 
     def test_a_hand_edited_bad_value_is_refused_on_read(self):
         self.write()
-        env = self.project / ".console-kit/console.env"
+        env = self.project / ".overture/console.env"
         env.write_text(env.read_text().replace("CONSOLE_NAME=acme", "CONSOLE_NAME=acme;touch /tmp/x"))
         with self.assertRaisesRegex(O.OnboardError, "^name:"):
             O.read_env(env)
 
     def test_show_on_a_project_never_onboarded(self):
         with self.assertRaisesRegex(O.OnboardError, "run `onboard.py write` first"):
-            O.read_env(self.project / ".console-kit/console.env")
+            O.read_env(self.project / ".overture/console.env")
 
 
 class TunnelTests(Base):

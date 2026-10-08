@@ -18,7 +18,7 @@ script run, and a short list of commands **the user runs themselves**.
   `agent.py register`, `cloudflared tunnel create`,
   `cloudflared tunnel route dns`, or `systemctl --user enable`/`start`. The
   installer sets up a service that **imports and runs the project's
-  `.console-kit/adapter.py` as Python**. Registering tells every Claude
+  `.overture/adapter.py` as Python**. Registering tells every Claude
   session to trust this project's console. The tunnel and DNS make it
   reachable from the internet. They are the user's decisions, so you print
   them and the user runs them.
@@ -76,9 +76,9 @@ Run from the project root:
   get past a refusal.
 - **"exists and was not written by onboard.py":** show the user the file. Pass
   `--force` only if they say to replace it.
-- **Success:** it writes `.console-kit/console.env`, merges
-  `.console-kit.json`, and adds a starter `.console-kit/adapter.py` and
-  `.console-kit/page.html` when the project has none. Then it prints the
+- **Success:** it writes `.overture/console.env`, merges
+  `.overture.json`, and adds a starter `.overture/adapter.py` and
+  `.overture/page.html` when the project has none. Then it prints the
   next steps.
 
 ## 4. Hand over the next steps

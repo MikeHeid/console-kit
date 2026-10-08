@@ -8,11 +8,11 @@ non-secret config, and print the commands the OWNER runs.
 
 `write` creates, inside the project:
 
-    .console-kit/console.env     the server's settings (none of them a secret)
-    .console-kit.json            fold paths, the adapter, the audit seat, the next-step skills
+    .overture/console.env     the server's settings (none of them a secret)
+    .overture.json            fold paths, the adapter, the audit seat, the next-step skills
                                  (merged, never clobbered)
-    .console-kit/adapter.py      a starter adapter, only when the project has none
-    .console-kit/page.html       a starter page, only when the project has none
+    .overture/adapter.py      a starter adapter, only when the project has none
+    .overture/page.html       a starter page, only when the project has none
 
 `tunnel` renders ~/.cloudflared/config-<tunnel>.yml once `cloudflared tunnel
 create` has given the tunnel its id.
@@ -45,10 +45,10 @@ LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 HOST = re.compile(rf"^(?:{LABEL}\.)+[a-z]{{2,63}}\Z")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 REL = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_./-]{0,200}\Z")
-MARK = "# written by console-kit onboard.py"
+MARK = "# written by overture onboard.py"
 # The skills the plugin ships for the two next-step forks (resolved as an installed plugin's
-# `<plugin>:<name>`, never from the repository: console_kit/projectcfg.py `resolve_skill`).
-DEFAULT_NEXT_STEP = {"refine": "console-kit:refine", "drill": "console-kit:drill"}
+# `<plugin>:<name>`, never from the repository: overture/projectcfg.py `resolve_skill`).
+DEFAULT_NEXT_STEP = {"refine": "overture:refine", "drill": "overture:drill"}
 
 
 class OnboardError(ValueError):
@@ -83,7 +83,7 @@ def check(answers: dict) -> dict:
     if not 1024 <= port <= 65535:
         raise OnboardError(f"port: {port} is outside 1024-65535")
     a["port"] = port
-    for key, default in (("page", ".console-kit/page.html"), ("adapter", ".console-kit/adapter.py")):
+    for key, default in (("page", ".overture/page.html"), ("adapter", ".overture/adapter.py")):
         v = a.get(key) or default
         if not isinstance(v, str) or not REL.match(v) or ".." in Path(v).parts:
             raise OnboardError(f"{key}: {v!r} must be a plain relative path inside the project")
@@ -104,7 +104,7 @@ def _target(base: Path, rel: str) -> Path:
     """`base/rel`, refused when it or any directory on the way is a symbolic link, or it lands outside `base`.
 
     A cloned repository can ship a DANGLING link at a path onboarding writes
-    (`.console-kit/adapter.py -> ~/.bashrc`): `exists()` follows it, says no,
+    (`.overture/adapter.py -> ~/.bashrc`): `exists()` follows it, says no,
     and a plain write would create the link's target wherever it points. So
     every component is checked with lstat, never followed, and `--force`
     does not override this.
@@ -152,7 +152,7 @@ def env_text(a: dict) -> str:
 
 
 def config_json(project: Path, a: dict) -> str:
-    path = project / ".console-kit.json"
+    path = project / ".overture.json"
     cfg = {}
     if path.exists():
         try:
@@ -164,8 +164,8 @@ def config_json(project: Path, a: dict) -> str:
     fold = cfg.setdefault("fold", {})
     if not isinstance(fold, dict):
         raise OnboardError(f"{path}: \"fold\" must be an object")
-    fold.setdefault("locked", ".console-kit/locked")
-    fold.setdefault("ledger", ".console-kit/folded.txt")
+    fold.setdefault("locked", ".overture/locked")
+    fold.setdefault("ledger", ".overture/folded.txt")
     fold["adapter"] = a["adapter"]
     # Refine and drill run a skill the plugin itself ships, so a fresh install has them. A kind
     # already named is kept as it is: a project that installed its own skill keeps using it.
@@ -181,7 +181,7 @@ def config_json(project: Path, a: dict) -> str:
 
 def state_dir(name: str) -> Path:
     base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
-    return base / "console-kit" / name
+    return base / "overture" / name
 
 
 def write(project: Path, answers: dict, force: bool = False, check_port: bool = True) -> list[str]:
@@ -192,7 +192,7 @@ def write(project: Path, answers: dict, force: bool = False, check_port: bool = 
     if check_port and not port_free(a["port"]):
         raise OnboardError(f"port: {a['port']} is already in use on 127.0.0.1; pick another with --port")
     # Every target is checked BEFORE anything is written, so a refusal leaves the project untouched.
-    env, cfg = _target(project, ".console-kit/console.env"), _target(project, ".console-kit.json")
+    env, cfg = _target(project, ".overture/console.env"), _target(project, ".overture.json")
     starters = [(_target(project, a[k]), t) for k, t in (("adapter", "adapter_template.py"), ("page", "demo/index.html"))]
     new_cfg = config_json(project, a)  # parse the old config BEFORE writing anything
     out = [_write(env, env_text(a), force)]
@@ -223,7 +223,7 @@ Next, run these yourself, in order. Each one is yours to approve:
       bash "{KIT}/deploy/install.sh" --project "{project}" --start
  2. Let your Claude sessions trust this project's console. It is a trust decision, so a
     session never runs it for you:
-      python3 ~/.local/share/console-kit/kit/agent.py --state "{state_dir(a['name'])}" register --project "{project}"
+      python3 ~/.local/share/overture/kit/agent.py --state "{state_dir(a['name'])}" register --project "{project}"
  3. Create the Access application in Cloudflare Zero Trust for https://{a['hostname']}
     (docs/CLOUDFLARE.md, "Access application"). Its AUD tag is the one you gave.
  4. Create the tunnel, and route DNS WITH --config, or the record can land on another tunnel:
@@ -237,10 +237,10 @@ Next, run these yourself, in order. Each one is yours to approve:
  6. Push the project's items so an agent can `ask` on anything but the starter PROJECT item.
     The server never runs your adapter (CONSOLE-kit/Q24); run this now and whenever the item
     list or the adapter changes:
-      python3 ~/.local/share/console-kit/kit/agent.py --state "{state_dir(a['name'])}" items-push --adapter "{a['adapter']}"
+      python3 ~/.local/share/overture/kit/agent.py --state "{state_dir(a['name'])}" items-push --adapter "{a['adapter']}"
  7. (Optional, for the dashboard page) Send the page from a merged commit, then press
     "Use this page" in the console. Reads the default branch from origin/HEAD (0.9.1):
-      python3 ~/.local/share/console-kit/kit/agent.py --state "{state_dir(a['name'])}" page-snapshot --path "{a['page']}"
+      python3 ~/.local/share/overture/kit/agent.py --state "{state_dir(a['name'])}" page-snapshot --path "{a['page']}"
 """
 
 
@@ -262,7 +262,7 @@ def read_env(path: Path) -> dict:
 
 
 def tunnel(project: Path, tunnel_id: str, force: bool = False) -> str:
-    env = read_env(project.resolve() / ".console-kit/console.env")
+    env = read_env(project.resolve() / ".overture/console.env")
     tid = tunnel_id.strip().lower()
     if not UUID.match(tid):
         raise OnboardError(f"id: {tunnel_id!r} is not a tunnel id (a UUID, as `cloudflared tunnel create` prints)")
@@ -308,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(line)
             print(next_steps(a.project, check(answers)))
         elif a.cmd == "show":
-            for k, v in sorted(read_env(a.project.resolve() / ".console-kit/console.env").items()):
+            for k, v in sorted(read_env(a.project.resolve() / ".overture/console.env").items()):
                 print(f"{k}={v}")
         else:
             print(tunnel(a.project, a.id, a.force))

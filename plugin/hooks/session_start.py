@@ -5,7 +5,7 @@ installed per user and this hook runs, unasked, in every project that user
 opens. So it acts only in a project the user registered with `agent.py
 register`, which writes the user's own registry:
 
-    ${XDG_CONFIG_HOME:-~/.config}/console-kit/projects.json
+    ${XDG_CONFIG_HOME:-~/.config}/overture/projects.json
     {"projects": {"<absolute project root>": {"state": "<absolute dir>", "kit": "<absolute dir>",
                                               "steward": "<agent name, optional (0.8.3)>"}}}
 
@@ -14,21 +14,21 @@ whose name is that name) is told it alone watches, syncs and folds, and mirrors
 live answers to the console; every other session is told to sign its posts,
 never to run those, and that its AskUserQuestion is blocked (`ask_guard.py`).
 
-**A session's name (0.8.4)** is the one the user typed in it, `/console-kit:as
+**A session's name (0.8.4)** is the one the user typed in it, `/overture:as
 NAME` (recorded by `name_session.py` in STATE/sessions.jsonl against the
-session id Claude Code gives every hook on stdin), else CONSOLE_KIT_AGENT from
+session id Claude Code gives every hook on stdin), else OVERTURE_AGENT from
 the environment the session was started with. This hook also writes `export
-CONSOLE_KIT_SESSION=<session id>` to CLAUDE_ENV_FILE, so the session's Bash
+OVERTURE_SESSION=<session id>` to CLAUDE_ENV_FILE, so the session's Bash
 commands (`agent.py`, `fold.py`) can look the same name up. A session with no
-name, on a console with a steward, is told to type `/console-kit:as NAME`.
+name, on a console with a steward, is told to type `/overture:as NAME`.
 
 In any other project it prints nothing and exits 0, whatever files the project
-carries: a clone's `.console-kit.json` or fake doorbell is never read. It
+carries: a clone's `.overture.json` or fake doorbell is never read. It
 never fails a session: a problem is one line of context, never a non-zero exit.
 
 **It executes nothing and imports nothing from outside this file.** It reads
 the registry and the doorbell itself, with the standard library, by the kit's
-rules (`console_kit/registry.py`, `console_kit/doorbell.py`); the kit's tests
+rules (`overture/registry.py`, `overture/doorbell.py`); the kit's tests
 hold both copies to one fixture. It reads only regular files, never blocking
 (a FIFO is refused), and within a size cap. The agent's cursor moves only when
 the agent says it processed a line (`agent.py synced --through SEQ`).
@@ -50,33 +50,33 @@ import tempfile
 import time
 from pathlib import Path
 
-WAKE_INTENTS = ("process", "fork", "chat", "visual", "scan")     # console_kit/doorbell.py
-CURSOR_FILE = "agent-cursor.json"      # console_kit/doorbell.py
-MAX_DOORBELL = 64 << 20                # console_kit/doorbell.py
-MAX_CURSOR = 4096                      # console_kit/doorbell.py
-REGISTRY_FILE = "projects.json"        # console_kit/registry.py
-MAX_REGISTRY = 1 << 20                 # console_kit/registry.py
-PLAIN_PATH = re.compile(r"^/[A-Za-z0-9_./\-]{0,511}\Z")   # console_kit/registry.py
+WAKE_INTENTS = ("process", "fork", "chat", "visual", "scan")     # overture/doorbell.py
+CURSOR_FILE = "agent-cursor.json"      # overture/doorbell.py
+MAX_DOORBELL = 64 << 20                # overture/doorbell.py
+MAX_CURSOR = 4096                      # overture/doorbell.py
+REGISTRY_FILE = "projects.json"        # overture/registry.py
+MAX_REGISTRY = 1 << 20                 # overture/registry.py
+PLAIN_PATH = re.compile(r"^/[A-Za-z0-9_./\-]{0,511}\Z")   # overture/registry.py
 MAX_LISTED = 20                        # a long backlog is summarised, never pasted whole
-ITEM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}\Z")   # console_kit/schema.py ITEM_ID, length-capped
+ITEM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,127}\Z")   # overture/schema.py ITEM_ID, length-capped
 TS = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
-AGENT_ENV = "CONSOLE_KIT_AGENT"                                      # console_kit/names.py ENV
-AGENT_NAME = re.compile(r"^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31}\Z")  # console_kit/names.py NAME
-MAX_NAME = 32                                                        # console_kit/names.py
-RESERVED = frozenset({"agent", "owner"})                            # console_kit/names.py
-STEWARD = "steward"                                                  # console_kit/registry.py (0.8.3)
-SESSIONS_FILE = "sessions.jsonl"                                     # console_kit/sessions.py FILE (0.8.4)
-SESSION_ENV = "CONSOLE_KIT_SESSION"                                  # console_kit/sessions.py ENV
-SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]{0,127}\Z")      # console_kit/sessions.py SESSION_ID
-MAX_SESSIONS = 64 << 10                                              # console_kit/sessions.py MAX_FILE
-KEEP_SESSIONS = 256                                                  # console_kit/sessions.py KEEP
+AGENT_ENV = "OVERTURE_AGENT"                                      # overture/names.py ENV
+AGENT_NAME = re.compile(r"^[a-z](?:[a-z0-9]|-(?=[a-z0-9])){0,31}\Z")  # overture/names.py NAME
+MAX_NAME = 32                                                        # overture/names.py
+RESERVED = frozenset({"agent", "owner"})                            # overture/names.py
+STEWARD = "steward"                                                  # overture/registry.py (0.8.3)
+SESSIONS_FILE = "sessions.jsonl"                                     # overture/sessions.py FILE (0.8.4)
+SESSION_ENV = "OVERTURE_SESSION"                                  # overture/sessions.py ENV
+SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]{0,127}\Z")      # overture/sessions.py SESSION_ID
+MAX_SESSIONS = 64 << 10                                              # overture/sessions.py MAX_FILE
+KEEP_SESSIONS = 256                                                  # overture/sessions.py KEEP
 SESSIONS_LOCK = ".sessions.lock"
 MAX_INPUT = 1 << 20
 # 0.9.4: a per-project record of which kit version this STATE last saw, so an upgrade note prints once.
 VERSION_FILE = "last_seen_kit_version"
 MAX_VERSION_FILE = 64
 VERSION_RE = re.compile(r"""^__version__\s*=\s*['"]([0-9]+\.[0-9]+\.[0-9]+(?:[-+][\w.]+)?)['"]""", re.M)
-KIT_INIT = "console_kit/__init__.py"
+KIT_INIT = "overture/__init__.py"
 MAX_INIT = 1 << 16
 
 
@@ -85,7 +85,7 @@ class Unsafe(ValueError):
 
 
 def _read_regular(path: Path, cap: int, nofollow: bool = False) -> bytes | None:
-    """As console_kit/registry.read_regular: a regular file's bytes, None when absent, never blocking.
+    """As overture/registry.read_regular: a regular file's bytes, None when absent, never blocking.
 
     With `nofollow` a symlink is refused too (the sessions file, whose writer refuses one).
     """
@@ -106,11 +106,11 @@ def _read_regular(path: Path, cap: int, nofollow: bool = False) -> bytes | None:
 
 def _registry_path() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    return Path(base) / "console-kit" / REGISTRY_FILE
+    return Path(base) / "overture" / REGISTRY_FILE
 
 
 def is_name(v: object) -> bool:
-    """As console_kit/names.problem(v) is None: an agent name."""
+    """As overture/names.problem(v) is None: an agent name."""
     return isinstance(v, str) and v not in RESERVED and len(v) <= MAX_NAME and AGENT_NAME.match(v) is not None
 
 
@@ -130,7 +130,7 @@ def projects() -> dict:
 
 
 def checked(e: object) -> dict:
-    """A registry entry held to the kit's shape (console_kit/registry.entry_problems), or Unsafe."""
+    """A registry entry held to the kit's shape (overture/registry.entry_problems), or Unsafe."""
     if not (isinstance(e, dict) and {"state", "kit"} <= set(e) <= {"state", "kit", STEWARD}
             and all(isinstance(e[k], str) and PLAIN_PATH.match(e[k]) for k in ("state", "kit"))):
         raise Unsafe("this project's registry entry is not two absolute plain paths (and an optional steward)")
@@ -142,7 +142,7 @@ def checked(e: object) -> dict:
 def registered(start: Path, found: dict) -> dict | None:
     """The registry entry of the NEAREST registered project holding `start` (itself or an ancestor), or None.
 
-    The same walk as `console_kit/registry.enclosing`, which `fold.py`'s steward
+    The same walk as `overture/registry.enclosing`, which `fold.py`'s steward
     lock uses. A copy, not an import, because a hook may import nothing from a
     kit path; the kit's tests hold the two to one fixture.
     """
@@ -183,7 +183,7 @@ def session_id(payload: dict) -> str | None:
 
 
 def session_records(data: bytes) -> dict[str, dict]:
-    """As console_kit/sessions.mapping, keeping each session's whole line: the last well-formed one wins."""
+    """As overture/sessions.mapping, keeping each session's whole line: the last well-formed one wins."""
     out: dict[str, dict] = {}
     for line in data.decode("utf-8", errors="replace").split("\n")[:-1]:  # the last piece may still be written
         try:
@@ -199,7 +199,7 @@ def session_records(data: bytes) -> dict[str, dict]:
 
 
 def session_name(state: Path, sid: object) -> str | None:
-    """As console_kit/sessions.lookup: the name the user gave this session, or None (never raises)."""
+    """As overture/sessions.lookup: the name the user gave this session, or None (never raises)."""
     if not isinstance(sid, str) or not SESSION_ID.match(sid):
         return None
     try:
@@ -211,7 +211,7 @@ def session_name(state: Path, sid: object) -> str | None:
 
 
 def whoami(state: Path, sid: object) -> str:
-    """This session's name: its /console-kit:as, else CONSOLE_KIT_AGENT; "" when it has none."""
+    """This session's name: its /overture:as, else OVERTURE_AGENT; "" when it has none."""
     named = session_name(state, sid)
     if named:
         return named
@@ -224,7 +224,7 @@ def _read_tail(path: Path, cap: int) -> tuple[bytes, int]:
 
     Unlike the reader it accepts a file of any size, so a file grown past the
     reader's cap (by hand, or a damaged write) is still repaired by the next
-    /console-kit:as, never refused for ever. A cut-off first line is dropped. A
+    /overture:as, never refused for ever. A cut-off first line is dropped. A
     symlink or anything but a regular file is refused (Unsafe or OSError).
     """
     try:
@@ -330,7 +330,7 @@ def export_session(project: Path, sid: str | None) -> None:
 
     `agent.py` and `fold.py`, run from the session's Bash, look their name up
     with it. Only in a registered project, like everything this hook does; any
-    failure is silent (the session then falls back to CONSOLE_KIT_AGENT).
+    failure is silent (the session then falls back to OVERTURE_AGENT).
     """
     env_file = os.environ.get("CLAUDE_ENV_FILE")
     if not env_file or sid is None:
@@ -359,7 +359,7 @@ def steward_line(e: dict, agent: str, me: str | None = None) -> tuple[str | None
     """The steward note for this session (0.8.3), and whether this session is the steward.
 
     The session's own name `me` is the one the user gave it (`whoami`: its
-    /console-kit:as, else CONSOLE_KIT_AGENT), never anything from the repository.
+    /overture:as, else OVERTURE_AGENT), never anything from the repository.
     """
     name = e.get(STEWARD)
     if not name:
@@ -373,7 +373,7 @@ def steward_line(e: dict, agent: str, me: str | None = None) -> tuple[str | None
                 f"on its item with the owner's answer (`{agent} reply ITEM TEXT`)."), True
     you = f"--as {me}" if is_name(me) else "--as YOUR-NAME"
     unnamed = ("" if is_name(me) else
-               f"This session is not named: the user names it by typing `/console-kit:as NAME` in it (the "
+               f"This session is not named: the user names it by typing `/overture:as NAME` in it (the "
                f"steward's name is {name}); tell the user so. ")
     return (f"Owner console steward: {name} holds this console's doorbell, and this session is not it. {unnamed}Sign "
             f"every post with `{you}` (or start the session with {AGENT_ENV}=YOUR-NAME), and never run "
@@ -425,7 +425,7 @@ def _shown(value: object, shape: re.Pattern) -> str:
 
 
 def _kit_version(kit: Path) -> str | None:
-    """0.9.4: parse __version__ from <kit>/console_kit/__init__.py; None when unreadable or missing."""
+    """0.9.4: parse __version__ from <kit>/overture/__init__.py; None when unreadable or missing."""
     try:
         data = _read_regular(kit / KIT_INIT, MAX_INIT)
     except (OSError, Unsafe):
@@ -489,13 +489,13 @@ def _upgrade_note(agent: str, state: Path, kit: Path, running: str, last: str | 
     if last == running:
         return None
     kind = "installed" if last is None else "upgraded"
-    headline = (f"console-kit {kind} to {running}" if last is None
-                else f"console-kit upgraded {last} → {running} on this project")
+    headline = (f"overture {kind} to {running}" if last is None
+                else f"overture upgraded {last} → {running} on this project")
     return (
         f"{BANNER}\n\n"
         f"{headline}. The commands most useful right now:\n"
-        f"  {agent} items-push --adapter .console-kit/adapter.py          # push the project's items + board\n"
-        f"  {agent} items-watch --adapter .console-kit/adapter.py         # re-push on change (0.9.3+)\n"
+        f"  {agent} items-push --adapter .overture/adapter.py          # push the project's items + board\n"
+        f"  {agent} items-watch --adapter .overture/adapter.py         # re-push on change (0.9.3+)\n"
         f"  {agent} scaffold-dashboard --project .                        # one-command dashboard (0.9.3+)\n"
         f"  {agent} page-snapshot --path <page>                           # send the dashboard page from a commit\n"
         f"  {agent} prs-push                                              # push open + recent PRs\n"

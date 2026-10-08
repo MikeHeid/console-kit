@@ -4,7 +4,7 @@ The Access check runs for real: tokens are signed with a throwaway RSA key and
 verified by PyJWT through `access_verifier`. Only the key lookup is replaced,
 so no test reaches the network.
 
-    python3 tools/console-kit/test_server.py
+    python3 tools/overture/test_server.py
 """
 
 from __future__ import annotations
@@ -31,15 +31,15 @@ HERE = Path(__file__).resolve().parent
 KIT = HERE / "plugin" / "kit"  # the kit ships inside the plugin, so every install carries it
 sys.path.insert(0, str(KIT))
 # 0.8.3: never read or write the user's real registry (`watch`, `synced` and the fold read it).
-if not os.environ.get("CONSOLE_KIT_TEST_CONFIG"):
-    os.environ["CONSOLE_KIT_TEST_CONFIG"] = os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="ck-cfg-")
-os.environ.pop("CONSOLE_KIT_AGENT", None)
-from console_kit import server as SV  # noqa: E402
-from console_kit import multiserver as MS  # noqa: E402
-from console_kit import items as IT  # noqa: E402
-from console_kit import pagesnap as PS  # noqa: E402
-from console_kit import prs as PR  # noqa: E402
-from console_kit import publish as P  # noqa: E402
+if not os.environ.get("OVERTURE_TEST_CONFIG"):
+    os.environ["OVERTURE_TEST_CONFIG"] = os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="ck-cfg-")
+os.environ.pop("OVERTURE_AGENT", None)
+from overture import server as SV  # noqa: E402
+from overture import multiserver as MS  # noqa: E402
+from overture import items as IT  # noqa: E402
+from overture import pagesnap as PS  # noqa: E402
+from overture import prs as PR  # noqa: E402
+from overture import publish as P  # noqa: E402
 from html import escape as html_escape  # noqa: E402
 
 TEAM = "team.example.cloudflareaccess.com"
@@ -87,7 +87,7 @@ def seam_closed(test) -> None:
     they would read git where the served console does not. Reopened after the test.
     """
     from unittest import mock
-    from console_kit import gitseam as G
+    from overture import gitseam as G
     p = mock.patch.object(G, "_OPEN", False)
     p.start()
     test.addCleanup(p.stop)
@@ -96,7 +96,7 @@ def seam_closed(test) -> None:
 def seam_open():
     """The seam as an agent-side caller finds it: open, so git is read."""
     from unittest import mock
-    from console_kit import gitseam as G
+    from overture import gitseam as G
     return mock.patch.object(G, "_OPEN", True)
 
 
@@ -329,7 +329,7 @@ class EarlyRefusalDrainTests(unittest.TestCase):
 def steward_push(console, root) -> dict:
     """What `agent.py history-push` does, in-process: the server says what it wants, the steward reads git
     (the seam open, as in the agent's process) for exactly that, and pushes it through the console's own door."""
-    from console_kit import stewardgit as SG
+    from overture import stewardgit as SG
     want = console.history_wants()
     with seam_open():
         blobs, specs = SG.collect(root, want)
@@ -534,21 +534,21 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(set(body["items"]), set(ITEMS))
         code, page = self.req("GET", "/", tok=token())
         self.assertEqual(code, 200)
-        self.assertIn('id="console-kit-config"', page)
+        self.assertIn('id="overture-config"', page)
 
     def test_the_page_config_carries_the_running_kit_version(self):
         # Owner, 2026-10-01: "version number should be in footer". Catches: a footer version typed into
         # console.js (it would drift from the release), or one the page has no way to learn.
         import re
-        from console_kit import __version__
+        from overture import __version__
         code, page = self.req("GET", "/", tok=token())
         self.assertEqual(code, 200)
-        m = re.search(r'<script type="application/json" id="console-kit-config">(.*?)</script>', page, re.S)
+        m = re.search(r'<script type="application/json" id="overture-config">(.*?)</script>', page, re.S)
         self.assertIsNotNone(m, "no config block in the served page")
         self.assertEqual(json.loads(m.group(1)).get("version"), __version__)
         health = SV.agent_request(self.cfg.socket, "GET", "/health")[1]
         self.assertEqual(health.get("version"), __version__)   # the same value /health reports
-        js = (KIT / "console_kit" / "console.js").read_text(encoding="utf-8")
+        js = (KIT / "overture" / "console.js").read_text(encoding="utf-8")
         self.assertNotIn(__version__, js)   # never hardcoded in the page's script
 
     def test_every_other_method_meets_the_gate(self):
@@ -593,7 +593,7 @@ class ServerTests(unittest.TestCase):
         # the page (an unknown question, or a roar on an unlocked one, accepted), and a
         # doorbell line the agent's watch does not wake on, so the follow-up would sit unrun.
         # Seats on an OPEN question are a deliberation before answering (ruling build_reply).
-        from console_kit import doorbell as D
+        from overture import doorbell as D
         body = {"item": "LANE.1", "text": "follow up", "intent": "fork", "mode": "tighten",
                 "about_qid": "LANE.1/Q1", "roles": ["devops", "other:Legal"], "nonce": "ownerabout01"}
         code, got = self.req("POST", "/api/message", dict(body, roles=["roar"], nonce="ownerabout00"),
@@ -1072,7 +1072,7 @@ class HealthTests(unittest.TestCase):
     def test_the_agent_socket_answers_health_with_no_owner_content(self):
         # Catches: a health body that grows a field carrying owner text (an item title, a
         # question, a path) — the field set is pinned — and a store_seq that is not the store's.
-        from console_kit import __version__
+        from overture import __version__
         code, out = SV.agent_request(self.cfg.socket, "GET", "/health")
         self.assertEqual(code, 200, out)
         self.assertEqual(set(out), self.FIELDS)
@@ -1085,7 +1085,7 @@ class HealthTests(unittest.TestCase):
             self.assertNotIn(owner_text, blob)
 
     def test_health_follows_the_watch(self):
-        from console_kit import doorbell as D
+        from overture import doorbell as D
         D.write_watch(self.cfg.state, True)
         out = SV.agent_request(self.cfg.socket, "GET", "/health")[1]
         self.assertEqual((out["agent"], out["agent_listening"]), ("listening", True))
@@ -1268,7 +1268,7 @@ class DeliberateOpenQuestionTests(_Live, unittest.TestCase):
     def test_the_owner_door_accepts_seats_on_an_unanswered_or_unlocked_question(self):
         # Catches: the pre-change server, which refused about_qid until the answer was locked;
         # and a fork that moves the question (answers it, locks it, or changes its state).
-        from console_kit import doorbell as D
+        from overture import doorbell as D
         before = self.state()
         self.assertEqual(before[0], "awaiting_you")
         f = self.owner_msg(**self.BODY)
@@ -1591,7 +1591,7 @@ class ChatTests(_Live, unittest.TestCase):
     def test_a_chat_message_rings_the_doorbell_and_wakes_a_watch(self):
         # Catches: a chat stored but not rung (no session would ever wake), and a ring the
         # watch does not count as a wake line.
-        from console_kit import doorbell as D
+        from overture import doorbell as D
         code, out = self.chat()
         self.assertEqual(code, 200, out)
         bell = self.doorbell()
@@ -1803,7 +1803,7 @@ class EvidenceReadLimitTests(_Live, unittest.TestCase):
 
     def test_an_oversized_file_is_refused_unread(self):
         # Catches: reading the whole of a huge cited file and only truncating what is shown.
-        from console_kit import anchors as A
+        from overture import anchors as A
         big = self.cfg.root / "logs" / "big.log"
         big.parent.mkdir(parents=True, exist_ok=True)
         with open(big, "wb") as fh:
@@ -1831,7 +1831,7 @@ class Phase4Tests(_Live, unittest.TestCase):
         (d / "specs").mkdir()
         (d / "specs/owner-console.md").write_text("# Owner console\n\nThe console is a page.\n")
         os.utime(d / "specs/owner-console.md", (1_600_000_000, 1_600_000_000))
-        (d / ".console-kit.json").write_text(json.dumps(self.CONFIG))
+        (d / ".overture.json").write_text(json.dumps(self.CONFIG))
         self.cfg = SV.Config(root=d, page=d / "page.html", state=d / "state", adapter=d / "unused.py",
                              team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="test")
         self.console = SV.Console(self.cfg, FakeAdapter())
@@ -1929,8 +1929,8 @@ class Phase4Tests(_Live, unittest.TestCase):
         self.assertIn("went against the ★", t["reason"])
 
     def test_a_bad_project_config_stops_the_server_by_name(self):
-        (self.root / ".console-kit.json").write_text(json.dumps({"visuals_dir": "../out"}))
-        from console_kit import projectcfg as PC
+        (self.root / ".overture.json").write_text(json.dumps({"visuals_dir": "../out"}))
+        from overture import projectcfg as PC
         with self.assertRaisesRegex(PC.ConfigError, "visuals_dir"):
             SV.Console(self.cfg, FakeAdapter())
 
@@ -2026,8 +2026,8 @@ class Phase4Tests(_Live, unittest.TestCase):
 
     def test_without_visuals_dir_a_visual_is_stored_and_shown_but_not_exported(self):
         # Catches: a visuals_dir still required to store (0.8.0), and an export with no destination.
-        (self.root / ".console-kit.json").write_text(json.dumps({}))
-        self.console.project = __import__("console_kit.projectcfg", fromlist=["load"]).load(self.root)
+        (self.root / ".overture.json").write_text(json.dumps({}))
+        self.console.project = __import__("overture.projectcfg", fromlist=["load"]).load(self.root)
         req = self.visual_request()
         code, out = self.post_visual(req["id"])
         self.assertEqual(code, 200, out)
@@ -2110,7 +2110,7 @@ class VisualLandingTests(_Live, unittest.TestCase):
         git(base, "clone", "-q", str(base / "origin.git"), "seed")
         git(seedwt, "checkout", "-q", "-b", "main")
         (seedwt / "page.html").write_text(PAGE)
-        (seedwt / ".console-kit.json").write_text(json.dumps({"visuals_dir": "architect/visuals/"}))
+        (seedwt / ".overture.json").write_text(json.dumps({"visuals_dir": "architect/visuals/"}))
         (seedwt / "architect").mkdir()
         (seedwt / "architect/README.md").write_text("# architect\n")
         git(seedwt, "add", "-A")
@@ -2154,7 +2154,7 @@ class VisualLandingTests(_Live, unittest.TestCase):
         # (a) Catches: any write into the project's working tree: the visual, its doc, INDEX.md, a
         # folder, or a tidy-up that deletes something (v0.8.0 fails: it wrote all three there).
         before = snapshot(self.svc)
-        self.assertIn(".console-kit.json", before)
+        self.assertIn(".overture.json", before)
         rec = self.draw()
         self.draw(fmt="html", content=MOCK, title="Mock")
         self.get("/api/view")                              # a page view too (tags, evidence reads)
@@ -2293,9 +2293,9 @@ class AgentNameTests(_Live, unittest.TestCase):
     """Several agent sessions share one console: each may say who it is (`agent.py --as NAME`)."""
 
     def cli(self, *args, env=None):
-        """agent.py in-process with a controlled environment (CONSOLE_KIT_AGENT unset unless given)."""
+        """agent.py in-process with a controlled environment (OVERTURE_AGENT unset unless given)."""
         from unittest import mock
-        clean = {k: v for k, v in os.environ.items() if k != "CONSOLE_KIT_AGENT"}
+        clean = {k: v for k, v in os.environ.items() if k != "OVERTURE_AGENT"}
         with mock.patch.dict(os.environ, {**clean, **(env or {})}, clear=True):
             return self.agent_cli(*args)
 
@@ -2320,11 +2320,11 @@ class AgentNameTests(_Live, unittest.TestCase):
         self.assertEqual(rc, 0, out + err)
         reply = json.loads(out)["record"]
         rc, out, err = self.cli("reply", "LANE.1", "From a session with a name in its env.",
-                                env={"CONSOLE_KIT_AGENT": "agent-7"})
+                                env={"OVERTURE_AGENT": "agent-7"})
         self.assertEqual(rc, 0, out + err)
         from_env = json.loads(out)["record"]
         rc, out, err = self.cli("--as", "agent-8", "reply", "LANE", "--as beats the env.",
-                                env={"CONSOLE_KIT_AGENT": "agent-7"})
+                                env={"OVERTURE_AGENT": "agent-7"})
         self.assertEqual(rc, 0, out + err)
         beats = json.loads(out)["record"]
         req = self.owner_msg(item="LANE.1", intent="visual", text="Draw it")
@@ -2357,9 +2357,9 @@ class AgentNameTests(_Live, unittest.TestCase):
                 self.assertEqual(rc, 2, out + err)
                 self.assertIn(repr(bad), err)
                 if bad:                                    # an empty variable is an unset one
-                    rc, out, err = self.cli("reply", "LANE.1", "hello", env={"CONSOLE_KIT_AGENT": bad})
+                    rc, out, err = self.cli("reply", "LANE.1", "hello", env={"OVERTURE_AGENT": bad})
                     self.assertEqual(rc, 2, out + err)
-                    self.assertIn("CONSOLE_KIT_AGENT", err)
+                    self.assertIn("OVERTURE_AGENT", err)
         # The server refuses it too, whoever calls the door.
         code, out = SV.agent_request(self.cfg.socket, "POST", "/message",
                                      {"item": "LANE.1", "text": "hi", "nonce": "badname001"}, agent="Bad Name")
@@ -2402,9 +2402,9 @@ class AgentNameTests(_Live, unittest.TestCase):
     def test_an_unnamed_record_is_stored_and_rendered_exactly_as_before(self):
         # Catches: a name written into store.jsonl (a 0.8.1 kit refuses the WHOLE store on an
         # unknown field, so a rollback would not start), and an unnamed record that gains a key.
-        from console_kit import fold as F
-        from console_kit import schema as S
-        from console_kit.store import Store
+        from overture import fold as F
+        from overture import schema as S
+        from overture.store import Store
         rc, out, _ = self.cli("reply", "LANE.1", "No name.")
         plain = json.loads(out)["record"]
         rc, out, _ = self.cli("--as", "agent-6", "reply", "LANE.1", "Named.")
@@ -2481,7 +2481,7 @@ class StewardDoorTests(_Live, unittest.TestCase):
     def setUp(self):
         _Live.setUp(self)
         from unittest import mock
-        from console_kit import registry as R
+        from overture import registry as R
         cfg = Path(self.tmp.name) / "cfg"
         self._env = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(cfg)})
         self._env.start()
@@ -2797,7 +2797,7 @@ class SlimReadCliTests(_Live, unittest.TestCase):
             for args in (("answers", "--since", "0"), ("answers", "--json", "--since", "0"), ("view", "--since", "0")):
                 rc, out, err = self.agent_cli(*args)
                 self.assertEqual((rc, out), (1, ""), args)
-                said = [ln for ln in err.splitlines() if not ln.startswith("console ")]
+                said = [ln for ln in err.splitlines() if not ln.startswith("overture ")]
                 self.assertEqual(len(said), 1, err)
                 self.assertNotIn("Traceback", err)
                 self.assertIn("questions.*.last_seq", said[0])
@@ -2813,7 +2813,7 @@ class SlimReadCliTests(_Live, unittest.TestCase):
                 rc, out, err = self.agent_cli(*args)
                 self.assertEqual((rc, out), (1, ""), args)
                 self.assertNotIn("Traceback", err)
-                said = [ln for ln in err.splitlines() if not ln.startswith("console ")]  # the server's own log
+                said = [ln for ln in err.splitlines() if not ln.startswith("overture ")]  # the server's own log
                 self.assertEqual(len(said), 1, err)
                 self.assertTrue(said[0].startswith("refused: "), err)
                 self.assertIn(f"runs kit {SV.__version__}", err)
@@ -2856,9 +2856,9 @@ def git_project(root: Path) -> str:
     (root / "specs").mkdir()
     spec = root / "specs/spec.md"
     spec.write_text(ServerTests.SPEC)
-    (root / ".console-kit.json").write_text(json.dumps({"specs_dir": "specs/"}))
+    (root / ".overture.json").write_text(json.dumps({"specs_dir": "specs/"}))
     git(root, "init", "-q")
-    git(root, "add", "specs/spec.md", ".console-kit.json")
+    git(root, "add", "specs/spec.md", ".overture.json")
     git(root, "commit", "-qm", "v1")
     spec.write_text("A new first line.\n" + ServerTests.SPEC)
     git(root, "commit", "-qam", "unrelated")
@@ -2874,7 +2874,7 @@ def legacy_ask(store_path: Path, *bodies: dict) -> None:
     refuses since CONSOLE-kit/Q30 (R1). Those answers still exist and still
     need reanchoring, so tests of that path start from a stored question.
     """
-    from console_kit.store import Store
+    from overture.store import Store
     st = Store(store_path)
     for b in bodies:
         st.append({**b, "type": "question", "schemaVersion": SV.S.SCHEMA_VERSION, "by": "agent"})
@@ -2889,7 +2889,7 @@ def spec_question(v1: str) -> dict:
 
 # Modules that may start a process, and why each is allowed (the no-spawn walk skips them):
 SPAWN_ALLOWED = {
-    "console_kit/gitseam.py": "the one door for git; it starts nothing once the server closes it",
+    "overture/gitseam.py": "the one door for git; it starts nothing once the server closes it",
     "agent.py": "run by an agent inside its own jail; the server process never imports it",
     "tools/": "operator tools (verify_vendor.py runs git on a kit clone); never imported by the server",
 }
@@ -2960,7 +2960,7 @@ import http.client, os, socket, threading, time
 from pathlib import Path
 p = json.loads(sys.argv[1])
 sys.path.insert(0, p["kit"])
-from console_kit import server as SV
+from overture import server as SV
 
 root = Path(p["root"])
 s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
@@ -2968,7 +2968,7 @@ cfg = SV.Config(root=root, page=Path(p.get("page") or root / "page.html"), state
                 adapter=root / "adapter.py", team_domain="team.example.cloudflareaccess.com", aud="a" * 64,
                 hostname=p["host"], port=port, project="audit")
 if p.get("question"):   # stored as an older kit's ask stored it: `ask` refuses this shape since Q30 (R1)
-    from console_kit.store import Store
+    from overture.store import Store
     Store(cfg.store).append({**p["question"], "type": "question", "schemaVersion": 1, "by": "agent"})
 threading.Thread(target=SV.serve, args=(cfg, lambda _tok: {"email": "owner@example.com"}), daemon=True).start()
 for _ in range(200):
@@ -3138,7 +3138,7 @@ class NoServerGitTests(_Live, unittest.TestCase):
         # read as "not a git work tree", and a git call in the kit that goes around the seam.
         import subprocess
         from unittest import mock
-        from console_kit import gitseam as G
+        from overture import gitseam as G
         self.assertFalse(G.is_open())
         with mock.patch.object(subprocess, "run", side_effect=AssertionError("git was started")):
             self.assertIs(G.run(["status"], self.root, timeout=5), G.NO_GIT)
@@ -3155,7 +3155,7 @@ class NoServerGitTests(_Live, unittest.TestCase):
         kit = Path(SV.__file__).resolve().parent.parent
         found = spawn_scan(kit)
         self.assertGreater(len(found), 15)   # the walk really read the kit, subfolders included
-        self.assertIn("console_kit/server.py", found)
+        self.assertIn("overture/server.py", found)
         self.assertIn("tools/verify_vendor.py", found)
         for rel, sites in sorted(found.items()):
             if any(rel == k or (k.endswith("/") and rel.startswith(k)) for k in SPAWN_ALLOWED):
@@ -3236,7 +3236,7 @@ class NoServerGitTests(_Live, unittest.TestCase):
     def test_agent_side_history_still_finds_what_the_server_cannot(self):
         # The same store and tree, read the way an agent-side caller reads them (outside the
         # server process): git history is there, and every feature the server labels has its data.
-        from console_kit import tags as T
+        from overture import tags as T
         self.enterContext(seam_open())
         items = self.console.items()
         status = {k: v.get("status") for k, v in items.items()}
@@ -3305,8 +3305,8 @@ def hook(event, args):
 
 sys.addaudithook(hook)
 sys.path.insert(0, kit)
-from console_kit import multiserver as MS
-from console_kit import server as SV
+from overture import multiserver as MS
+from overture import server as SV
 from cryptography.hazmat.primitives import serialization
 pub = serialization.load_pem_public_key(open(pem, "rb").read())
 r = MS.start(server_file, sock, verify_for=lambda aud: SV.access_verifier("team.example.cloudflareaccess.com", aud,
@@ -3323,14 +3323,14 @@ class _OneServer:
 
     def setUp(self):
         import test_kit as TK
-        from console_kit import serverfile as SF
-        from console_kit import registry as R
+        from overture import serverfile as SF
+        from overture import registry as R
         from cryptography.hazmat.primitives import serialization
         self.TK, self.SF, self.R = TK, SF, R
         self.tmp = tempfile.TemporaryDirectory()
         self.t = Path(os.path.realpath(self.tmp.name))
         self.cfg = self.t / "cfg"
-        self.reg = self.cfg / "console-kit" / "projects.json"
+        self.reg = self.cfg / "overture" / "projects.json"
         self.sfile = self.reg.parent / "server.json"
         self.sock = self.sfile.parent / "server.sock"          # where agent.py looks for the one server
         self.audit = self.t / "audit.log"
@@ -3434,12 +3434,12 @@ class OneServerTests(_OneServer, unittest.TestCase):
         # The footer's version (owner, 2026-10-01) on the ONE server. Catches: a ProjectConsole.page() of its
         # own that builds the config without `version`; today it holds only because page() is inherited.
         import re
-        from console_kit import __version__
+        from overture import __version__
         self.spawn()
         for name in ("alpha", "beta"):
             code, html = self.owner(name, "GET", "/")
             self.assertEqual(code, 200, name)
-            m = re.search(r'<script type="application/json" id="console-kit-config">(.*?)</script>', html, re.S)
+            m = re.search(r'<script type="application/json" id="overture-config">(.*?)</script>', html, re.S)
             self.assertIsNotNone(m, f"{name}: no config block in the served page")
             self.assertEqual(json.loads(m.group(1)).get("version"), __version__, name)
 
@@ -3575,7 +3575,7 @@ class OneServerTests(_OneServer, unittest.TestCase):
             "def seed_questions():\n    return []\n"
             "def record(entries, dry_run):\n    return []\n")
         env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg), "PYTHONDONTWRITEBYTECODE": "1"}
-        env.pop("CONSOLE_KIT_AGENT", None)
+        env.pop("OVERTURE_AGENT", None)
         agent_py = str(HERE / "plugin" / "kit" / "agent.py")
         r = subprocess.run([sys.executable, agent_py, "--state", str(fixture), "server", "add", "alpha", "--hostname",
                             "alpha.example.com", "--aud", AUD, "--port", "4901", "--team-domain", TEAM],
@@ -3755,13 +3755,13 @@ def page_opens(trace: str, names: tuple[str, ...]) -> tuple[int, list[str]]:
     return safe, unsafe
 
 
-NO_STRACE = "CONSOLE_KIT_NO_STRACE"
+NO_STRACE = "OVERTURE_NO_STRACE"
 
 
 def need_strace(test: unittest.TestCase) -> None:
     """Every syscall test starts here. Missing strace FAILS it, so the gap cannot hide as a quiet skip.
 
-    `CONSOLE_KIT_NO_STRACE=1` is the explicit opt-out: the test is then skipped, BY NAME, saying it did not run.
+    `OVERTURE_NO_STRACE=1` is the explicit opt-out: the test is then skipped, BY NAME, saying it did not run.
     """
     import shutil
     if shutil.which("strace") is not None:
@@ -3811,7 +3811,7 @@ WRITE_FAULT_CHILD = r'''
 import errno, os, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from console_kit import stewardgit as SG
+from overture import stewardgit as SG
 os.urandom = lambda n: b"\0" * n          # the temporary's name, fixed so the trace can be read for it
 def full(*a, **k):
     raise OSError(errno.ENOSPC, "No space left on device")
@@ -3860,7 +3860,7 @@ class StewardGitWriteFaultTests(unittest.TestCase):
         # can leave the NAME pointing at an empty or partial file. Records the order of fsync and rename on the
         # temporary's descriptor and name, for both callers' write (steward-git blobs and items.json).
         from unittest import mock
-        from console_kit import atfile as AF
+        from overture import atfile as AF
         real_fsync, real_rename, order = os.fsync, os.rename, []
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -3942,7 +3942,7 @@ class RootConfinementTests(_OneServer, unittest.TestCase):
     def plant(self):
         """Targets with a sentinel each, and the links in alpha's root that point at them."""
         A, B = self.p["alpha"], self.p["beta"]
-        tokens = self.cfg / "console-kit" / "tokens"
+        tokens = self.cfg / "overture" / "tokens"
         tokens.mkdir(parents=True, exist_ok=True)
         (tokens / "beta").write_text("SENTINEL-TOKEN-FILE-beta\n")
         (B["root"] / "secret.txt").write_text("SENTINEL-B-ROOT-FILE\n")
@@ -4059,7 +4059,7 @@ class RootConfinementTests(_OneServer, unittest.TestCase):
 
     def test_ac37_negative_controls_leak_where_the_real_reader_refuses(self):
         # The counter-check: the same planted tree read three ways, in this process.
-        from console_kit import rootfs as RF
+        from overture import rootfs as RF
         self.spawn()
         for name, sentinel in (("alpha", "SENTINEL-A-STORE"), ("beta", "SENTINEL-B-STORE")):
             self.push(name)
@@ -4102,7 +4102,7 @@ class RootConfinementTests(_OneServer, unittest.TestCase):
 
     def test_ac38_a_swapped_parent_never_serves_the_other_side(self):
         # Catches: realpath-then-open (passes AC3.7, loses this race) and O_NOFOLLOW on the last component only.
-        from console_kit import rootfs as RF
+        from overture import rootfs as RF
         A, B = self.p["alpha"], self.p["beta"]
         (B["state"] / "page.html").write_text("SENTINEL-RACE-B-STATE\n")
         self.SF.add("alpha", A["state"], "alpha.example.com", AUD, 4901, TEAM, page="race/page.html",
@@ -4248,7 +4248,7 @@ class StewardGitTests(_Live, unittest.TestCase):
         # Catches (lane 4 review, LOW): wants() indexing c["sha256"] and calling .get on every condition with
         # none of named_shas' isinstance guards, so one malformed condition turned /history-wants into a 500.
         from unittest import mock
-        from console_kit import anchors as A
+        from overture import anchors as A
         real = A.conditions_for
         junk = ["not a dict", None, {"kind": "file_sha256"}, {"kind": "file_sha256", "sha256": 5, "path": "x"},
                 {"kind": "file_sha256", "sha256": "a" * 64, "path": ["specs/spec.md"]}]
@@ -4321,7 +4321,7 @@ class StewardGitTests(_Live, unittest.TestCase):
     def test_the_stored_versions_have_a_total_cap(self):
         # Catches: a per-blob cap with no total, so many locks fill the state disk.
         from unittest import mock
-        from console_kit import stewardgit as SG
+        from overture import stewardgit as SG
         good = steward_push(self.console, self.root)["blobs"][0]
         (self.blob_dir() / ("f" * 64)).write_bytes(b"x" * 100)   # what the folder already holds, for a live lock
         real = SG.named_shas
@@ -4338,7 +4338,7 @@ class StewardGitTests(_Live, unittest.TestCase):
         # Catches (lane 4 review, MEDIUM): a cap that counts dead blobs, so versions whose locks have moved on
         # fill it and every later push of a NAMED blob is refused until a specs push happens to prune them.
         from unittest import mock
-        from console_kit import stewardgit as SG
+        from overture import stewardgit as SG
         good = steward_push(self.console, self.root)["blobs"][0]
         size = (self.blob_dir() / self.v1).stat().st_size
         (self.blob_dir() / self.v1).unlink()
@@ -4462,12 +4462,12 @@ class StewardGitTests(_Live, unittest.TestCase):
 
     def test_history_push_from_the_cli_in_its_own_process(self):
         # The real `agent.py history-push`, a separate process (git allowed there), against this server.
-        from console_kit import registry as R
-        reg = self.root.parent / f"{self.root.name}-cfg" / "console-kit" / "projects.json"
+        from overture import registry as R
+        reg = self.root.parent / f"{self.root.name}-cfg" / "overture" / "projects.json"
         R.register(self.root, self.cfg.state, Path(SV.__file__).resolve().parent.parent, path=reg)
         self.addCleanup(lambda: __import__("shutil").rmtree(reg.parent.parent, ignore_errors=True))
         env = {**os.environ, "XDG_CONFIG_HOME": str(reg.parent.parent)}
-        env.pop("CONSOLE_KIT_AGENT", None)
+        env.pop("OVERTURE_AGENT", None)
         r = subprocess.run([sys.executable, str(Path(SV.__file__).resolve().parent.parent / "agent.py"),
                             "--state", str(self.cfg.state), "history-push", "--project", str(self.root)],
                            capture_output=True, text=True, env=env, timeout=120)
@@ -4490,7 +4490,7 @@ class StewardGitTests(_Live, unittest.TestCase):
             "def seed_questions():\n    return []\n"
             "def record(entries, dry_run):\n    return []\n")
         st = (root / "specs/spec.md").stat()
-        from console_kit import stewardgit as SG
+        from overture import stewardgit as SG
         with seam_open():
             blobs, specs = SG.collect(root, {"blobs": [{"path": "specs/spec.md", "sha256": v1}],
                                              "specs": [{"path": "specs/spec.md", "mtime_ns": st.st_mtime_ns,
@@ -4539,7 +4539,7 @@ class OneServerStewardGitTests(_OneServer, unittest.TestCase):
         _, before = self.agent("GET", "/p/alpha/check")
         self.assertEqual(before["history"], NOGIT)
         env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg)}
-        env.pop("CONSOLE_KIT_AGENT", None)
+        env.pop("OVERTURE_AGENT", None)
         r = subprocess.run([sys.executable, str(HERE / "plugin" / "kit" / "agent.py"), "--state", str(alpha["state"]),
                             "history-push", "--project", str(alpha["root"])],
                            capture_output=True, text=True, env=env, timeout=120, cwd=alpha["root"])   # K4: cwd picks
@@ -4555,7 +4555,7 @@ class OneServerStewardGitTests(_OneServer, unittest.TestCase):
     def history_push(self, alpha):
         import subprocess
         env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg)}
-        env.pop("CONSOLE_KIT_AGENT", None)
+        env.pop("OVERTURE_AGENT", None)
         r = subprocess.run([sys.executable, str(HERE / "plugin" / "kit" / "agent.py"), "--state", str(alpha["state"]),
                             "history-push", "--project", str(alpha["root"])],
                            capture_output=True, text=True, env=env, timeout=120, cwd=alpha["root"])   # K4: cwd picks
@@ -4676,8 +4676,8 @@ class ProjectTokenTests(_RawAgent, _OneServer, unittest.TestCase):
 
     def agent_py(self, cwd, *args, state=None, check=None):
         env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg), "PYTHONDONTWRITEBYTECODE": "1"}
-        env.pop("CONSOLE_KIT_AGENT", None)
-        env.pop("CONSOLE_KIT_SESSION", None)
+        env.pop("OVERTURE_AGENT", None)
+        env.pop("OVERTURE_SESSION", None)
         r = subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(state), *args],
                            capture_output=True, text=True, env=env, timeout=120, cwd=cwd)
         self.outputs += [r.stdout, r.stderr]
@@ -4758,7 +4758,7 @@ class ProjectTokenTests(_RawAgent, _OneServer, unittest.TestCase):
         import email.message
         import hmac
         from unittest import mock
-        from console_kit import serverfile as SF
+        from overture import serverfile as SF
         tok, other = "ck1_" + "a" * 43, "ck1_" + "b" * 43
 
         class FakeMS:
@@ -4790,7 +4790,7 @@ class ProjectTokenTests(_RawAgent, _OneServer, unittest.TestCase):
         # wrote is searched: both state dirs, server.json, the server's stderr and every agent.py output.
         import shutil
         A, B = self.p["alpha"], self.p["beta"]
-        tdir = self.cfg / "console-kit" / "tokens"
+        tdir = self.cfg / "overture" / "tokens"
         self.assertEqual(stat.S_IMODE(tdir.stat().st_mode), 0o700)
         for name in ("alpha", "beta"):
             self.assertEqual(stat.S_IMODE((tdir / name).lstat().st_mode), 0o600)
@@ -4800,10 +4800,10 @@ class ProjectTokenTests(_RawAgent, _OneServer, unittest.TestCase):
         minted = set(self.tokens.values())
         # A tokens directory that resolves inside a registered root is refused by `server add` and `rotate`.
         cfg2 = self.t / "cfg2"
-        (cfg2 / "console-kit").mkdir(parents=True)
-        shutil.copy(self.reg, cfg2 / "console-kit" / "projects.json")
+        (cfg2 / "overture").mkdir(parents=True)
+        shutil.copy(self.reg, cfg2 / "overture" / "projects.json")
         (A["root"] / "tok").mkdir()
-        (cfg2 / "console-kit" / "tokens").symlink_to(A["root"] / "tok")
+        (cfg2 / "overture" / "tokens").symlink_to(A["root"] / "tok")
         env = {**os.environ, "XDG_CONFIG_HOME": str(cfg2)}
         r = subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(A["state"]), "server", "add",
                             "alpha", "--hostname", "alpha.example.com", "--aud", AUD, "--port", "4901",
@@ -4811,20 +4811,20 @@ class ProjectTokenTests(_RawAgent, _OneServer, unittest.TestCase):
         self.outputs += [r.stdout, r.stderr]
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertIn("inside the registered project root", r.stderr)
-        self.assertFalse((cfg2 / "console-kit" / "server.json").exists())
-        shutil.copy(self.sfile, cfg2 / "console-kit" / "server.json")
-        held = (cfg2 / "console-kit" / "server.json").read_bytes()
+        self.assertFalse((cfg2 / "overture" / "server.json").exists())
+        shutil.copy(self.sfile, cfg2 / "overture" / "server.json")
+        held = (cfg2 / "overture" / "server.json").read_bytes()
         r = subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(A["state"]), "server", "token",
                             "rotate", "alpha"], capture_output=True, text=True, env=env, timeout=60)
         self.outputs += [r.stdout, r.stderr]
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertIn("inside the registered project root", r.stderr)
         self.assertEqual(list((A["root"] / "tok").iterdir()), [])
-        self.assertEqual((cfg2 / "console-kit" / "server.json").read_bytes(), held)
+        self.assertEqual((cfg2 / "overture" / "server.json").read_bytes(), held)
         # And a config dir that is itself a plain directory inside a registered root (no link to see through).
         cfg3 = B["root"] / "cfg-in-repo"
-        (cfg3 / "console-kit").mkdir(parents=True)
-        shutil.copy(self.reg, cfg3 / "console-kit" / "projects.json")
+        (cfg3 / "overture").mkdir(parents=True)
+        shutil.copy(self.reg, cfg3 / "overture" / "projects.json")
         r = subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(B["state"]), "server", "add",
                             "beta", "--hostname", "beta.example.com", "--aud", AUD, "--port", "4902",
                             "--team-domain", TEAM], capture_output=True, text=True,
@@ -4832,8 +4832,8 @@ class ProjectTokenTests(_RawAgent, _OneServer, unittest.TestCase):
         self.outputs += [r.stdout, r.stderr]
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertIn(f"inside the registered project root {B['root']}", r.stderr)
-        self.assertFalse((cfg3 / "console-kit" / "tokens").exists())
-        self.assertFalse((cfg3 / "console-kit" / "server.json").exists())
+        self.assertFalse((cfg3 / "overture" / "tokens").exists())
+        self.assertFalse((cfg3 / "overture" / "server.json").exists())
         # A full run: every agent route through agent.py, refusals and errors included, and a rotation.
         self.spawn()
         self.agent_py(A["root"], "items-push", "--adapter", "console_adapter.py", state=A["state"], check=0)
@@ -4936,14 +4936,14 @@ class ProjectTokenTests(_RawAgent, _OneServer, unittest.TestCase):
         self.assertNotIn(b"SENTINEL-K4-BETA", b"".join(two.values()))
         self.stop()
         # The one-project server, built on A's state alone: its own config dir holding A and nothing of B.
-        one = self.t / "cfg-one" / "console-kit"
+        one = self.t / "cfg-one" / "overture"
         (one / "tokens").mkdir(parents=True, mode=0o700)
         os.chmod(one, 0o700)
         shutil.copy(self.reg, one / "projects.json")
         doc = json.loads(self.sfile.read_text())
         doc["projects"] = {"alpha": doc["projects"]["alpha"]}
         (one / "server.json").write_text(json.dumps(doc))
-        shutil.copy(self.cfg / "console-kit" / "tokens" / "alpha", one / "tokens" / "alpha")
+        shutil.copy(self.cfg / "overture" / "tokens" / "alpha", one / "tokens" / "alpha")
         os.chmod(one / "tokens" / "alpha", 0o600)
         self.cfg, self.sfile, self.sock = one.parent, one / "server.json", one / "server.sock"
         info = self.spawn()
@@ -5015,7 +5015,7 @@ class ProjectTokenTests(_RawAgent, _OneServer, unittest.TestCase):
         self.spawn()
         self.seed_sentinels()
         env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg)}
-        env.pop("CONSOLE_KIT_AGENT", None)
+        env.pop("OVERTURE_AGENT", None)
         watchers = {}
         for name, timeout in (("alpha", "8"), ("beta", "60")):
             v = self.p[name]
@@ -5092,8 +5092,8 @@ class TokenReviewTests(_RawAgent, _OneServer, unittest.TestCase):
 
     def agent_py(self, cwd, *args, state):
         env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg), "PYTHONDONTWRITEBYTECODE": "1"}
-        env.pop("CONSOLE_KIT_AGENT", None)
-        env.pop("CONSOLE_KIT_SESSION", None)
+        env.pop("OVERTURE_AGENT", None)
+        env.pop("OVERTURE_SESSION", None)
         return subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(state), *args],
                               capture_output=True, text=True, env=env, timeout=120, cwd=cwd)
 
@@ -5102,7 +5102,7 @@ class TokenReviewTests(_RawAgent, _OneServer, unittest.TestCase):
         # treated as no token: read_token and agent.py both refuse, naming the FILE, and no request is made.
         from unittest import mock
         A = self.p["alpha"]
-        f = self.cfg / "console-kit" / "tokens" / "alpha"
+        f = self.cfg / "overture" / "tokens" / "alpha"
         with self.fake_door() as seen:
             r = self.agent_py(A["root"], "health", state=A["state"])
             self.assertEqual(r.returncode, 0, r.stderr)                   # the control: 0600 is sent
@@ -5230,7 +5230,7 @@ class TokenReviewTests(_RawAgent, _OneServer, unittest.TestCase):
         # symlinked tokens/ points into.
         import shutil
         A, SF = self.p["alpha"], self.SF
-        cfg2 = self.t / "cfg-link" / "console-kit"
+        cfg2 = self.t / "cfg-link" / "overture"
         cfg2.mkdir(parents=True)
         shutil.copy(self.reg, cfg2 / "projects.json")
         shutil.copy(self.sfile, cfg2 / "server.json")
@@ -5298,7 +5298,7 @@ class TokenReviewTests(_RawAgent, _OneServer, unittest.TestCase):
     def test_add_and_rotate_sweep_stale_plaintext_temp_files(self):
         # Catches: a crash between mkstemp and rename leaving a plaintext token in tokens/.token.*.tmp for ever.
         A, SF = self.p["alpha"], self.SF
-        tdir = self.cfg / "console-kit" / "tokens"
+        tdir = self.cfg / "overture" / "tokens"
         stale = "ck1_" + "S" * 43
         for run in (lambda: SF.rotate("alpha", self.sfile, self.reg),
                     lambda: SF.add("alpha", A["state"], "alpha.example.com", AUD, 4901, TEAM, registry=self.reg,
@@ -5572,7 +5572,7 @@ SET_ASIDE_CHILD = r'''
 import json, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from console_kit import items as IT
+from overture import items as IT
 IT.store_snapshot(Path(sys.argv[2]), json.loads(sys.argv[3]))
 '''
 
@@ -5775,11 +5775,11 @@ class SingleServerItemsTests(_SingleServer, unittest.TestCase):
     def test_the_cli_pushes_to_the_single_server_and_the_adapter_runs_in_the_steward(self):
         # AC 3. The real `agent.py items-push`, a separate process, against the single server's own socket.
         # The adapter runs THERE (its marker appears, and only after the CLI ran); the server gets its output.
-        from console_kit import registry as R
-        reg = self.base / "cfg" / "console-kit" / "projects.json"
+        from overture import registry as R
+        reg = self.base / "cfg" / "overture" / "projects.json"
         R.register(self.scfg.root, self.scfg.state, HERE / "plugin" / "kit", path=reg)
         env = {**os.environ, "XDG_CONFIG_HOME": str(reg.parent.parent)}
-        env.pop("CONSOLE_KIT_AGENT", None)
+        env.pop("OVERTURE_AGENT", None)
         self.assertFalse(self.marker.exists())
         r = subprocess.run([sys.executable, str(HERE / "plugin" / "kit" / "agent.py"), "--state",
                             str(self.scfg.state), "items-push", "--project", str(self.scfg.root),
@@ -5795,8 +5795,8 @@ ITEMS_CHILD = r'''
 import json, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from console_kit import items as IT
-from console_kit import server as SV
+from overture import items as IT
+from overture import server as SV
 root = Path(sys.argv[2])
 cfg = SV.Config(root=root, page=root / "page.html", state=root / "state", adapter=root / "none.py",
                 team_domain="t.example.com", aud="a" * 64, hostname="h.example.com", port=0)
@@ -5853,8 +5853,8 @@ PAGE_CHILD = r'''
 import json, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from console_kit import items as IT
-from console_kit import server as SV
+from overture import items as IT
+from overture import server as SV
 root = Path(sys.argv[2])
 cfg = SV.Config(root=root, page=None, state=root / "state", adapter=root / "none.py",
                 team_domain="t.example.com", aud="a" * 64, hostname="h.example.com", port=0)
@@ -6078,7 +6078,7 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
 
     def cli_project(self):
         """The single server's root as a git work tree: the page committed and merged (origin/main), registered."""
-        from console_kit import registry as R
+        from overture import registry as R
         root = self.scfg.root
         (root / "docs").mkdir()
         (root / "docs" / "index.html").write_text(DASH)
@@ -6086,10 +6086,10 @@ class PageSnapshotTests(_SingleServer, unittest.TestCase):
         git(root, "add", "docs/index.html")
         git(root, "commit", "-qm", "page v1")
         git(root, "update-ref", "refs/remotes/origin/main", "HEAD")   # what a `git fetch` of the merged page gives
-        reg = self.base / "cfg" / "console-kit" / "projects.json"
+        reg = self.base / "cfg" / "overture" / "projects.json"
         R.register(root, self.scfg.state, HERE / "plugin" / "kit", path=reg)
         self.env = {**os.environ, **GIT_ENV, "XDG_CONFIG_HOME": str(reg.parent.parent)}
-        self.env.pop("CONSOLE_KIT_AGENT", None)
+        self.env.pop("OVERTURE_AGENT", None)
         return root
 
     def cli(self, *args):
@@ -6701,7 +6701,7 @@ class RefactorTests(_Live, unittest.TestCase):
     def test_the_log_refuses_an_owner_kind_written_as_the_agent(self):
         # The shape check under the routes: a withdraw, keep or confirm by "agent" is refused at append and on
         # load, so a hand-written line cannot make an agent's act look like the owner's.
-        from console_kit import refactor as RXM
+        from overture import refactor as RXM
         self.go_stale()
         for kind, extra in (("withdraw", {"reason": "x"}), ("untrack", {}), ("confirm", {"proposal": "0" * 24})):
             rec = {"type": kind, "by": "agent", "qid": self.QID, "lock": self.lock_id, "nonce": "rxforged01",
@@ -6714,7 +6714,7 @@ class RefactorTests(_Live, unittest.TestCase):
         # The rules under the routes, driven at the log, since the routes check first and would hide a log that
         # forgot them. Catches: a settled lock settled again (two outcomes, which one is the record?), a second
         # open replacement, and a replacement of a ruling that is no longer in force or no longer this lock.
-        from console_kit import refactor as RXM
+        from overture import refactor as RXM
         log = self.console.store.refactor
         self.go_stale()
         self.assertEqual(self.replacement()[0], 200)                      # LANE.1/Q3 replaces Q2
@@ -6746,7 +6746,7 @@ class RefactorTests(_Live, unittest.TestCase):
     def test_an_older_kit_reads_the_store_whole_and_every_settled_answer_stale(self):
         # Catches: any lane 7 record (or a `replaces` field) in store.jsonl, which an older kit refuses whole, and
         # a confirmed anchor an older kit would read as fresh. "Older kit" = the store without its sidecar.
-        from console_kit.store import Store
+        from overture.store import Store
         self.go_stale(extra="RULE-GAMMA: answers are locked by the owner alone.\n")
         pid = self.propose(cites=("rules.md:7",))[1]["record"]["id"]
         self.assertEqual(self.act({"action": "confirm", "qid": self.QID, "proposal": pid})[0], 200)
@@ -6758,7 +6758,7 @@ class RefactorTests(_Live, unittest.TestCase):
             self.assertEqual(SV.S.validate(rec), [], rec)
         (self.cfg.state / "refactor.jsonl").rename(self.cfg.state / "aside.jsonl")
         older = Store(self.cfg.store)
-        from console_kit import view as VW
+        from overture import view as VW
         holds = SV.A.evaluator(self.cfg.root, {k: v["status"] for k, v in ITEMS.items()})
         self.assertEqual(VW.question_state(older, older.question(self.QID), holds), "stale")
 
@@ -6816,8 +6816,8 @@ class RefactorTests(_Live, unittest.TestCase):
     def test_the_export_carries_each_outcome_and_fold_refuses_an_adapter_that_would_drop_it(self):
         # Catches: an outcome missing from the export (the ruling silently vanishes from the record), a fold that
         # passes it to an adapter that ignores it, and an outcome on a lock folded before never folded at all.
-        from console_kit import fold as F
-        from console_kit.store import Store
+        from overture import fold as F
+        from overture.store import Store
         out_dir, ledger = self.cfg.root / "locked", self.cfg.root / "folded.txt"
 
         class Adapter:
@@ -6992,7 +6992,7 @@ class RefactorTests(_Live, unittest.TestCase):
     def test_six_stale_answers_with_proposals_stay_under_the_slim_read_cap(self):
         # agent-5: `view` / `todo` / `answers` merge refactor state, so they must stay under 64 KiB with the live
         # shape: six stale answers, each with a proposal of a few hundred characters.
-        from console_kit import view as VW
+        from overture import view as VW
         para = "RULE-{n}: " + "the console keeps every ruling the owner made readable in the record. " * 5
         (self.cfg.root / "big.md").write_text("".join(para.format(n=n) + "\n" for n in range(6)))
         for n in range(6):
@@ -7060,7 +7060,7 @@ class ScanTests(_Live, unittest.TestCase):
         return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
 
     def todo(self):
-        from console_kit import view as VW
+        from overture import view as VW
         code, view = SV.agent_request(self.cfg.socket, "GET", "/view")
         self.assertEqual(code, 200, view)
         return VW.todo(view["view"])
@@ -7170,7 +7170,7 @@ class ScanTests(_Live, unittest.TestCase):
     def test_a_scan_rings_a_line_that_wakes_a_watch_until_the_agent_marks_its_rx(self):
         # Catches: a scan that rings nothing (watch never wakes), a line keyed only by the store seq (the
         # agent's cursor is already there, so it would never wake), and an rx line that wakes forever.
-        from console_kit import doorbell as D
+        from overture import doorbell as D
         RefactorTests.go_stale(self)
         D.write_cursor(self.cfg.state, self.console.store.seq())   # the agent is up to date with the store
         code, sc = self.scan([self.QID], [self.lock_id])
@@ -7227,7 +7227,7 @@ class ScanTests(_Live, unittest.TestCase):
         # The reviewer's case. Catches: a done-rule that follows the files (a revert closes the scan, the steward
         # marks its rx, and when the text goes again the scan reopens with nothing to wake anyone, refusing every
         # new scan), and the opposite failure: a ruling that holds for good leaving the scan open with no move.
-        from console_kit import doorbell as D
+        from overture import doorbell as D
         RefactorTests.go_stale(self)
         code, sc = self.scan([self.QID], [self.lock_id])
         self.assertEqual(code, 200, sc)
@@ -7267,7 +7267,7 @@ class ScanTests(_Live, unittest.TestCase):
     def test_an_older_agent_py_that_drops_rx_through_costs_one_wake(self):
         # Catches: a cursor an older agent.py rewrites as {"through": N} making the scan line wake on every
         # watch for good, rather than once until the steward marks it again.
-        from console_kit import doorbell as D
+        from overture import doorbell as D
         RefactorTests.go_stale(self)
         code, sc = self.scan([self.QID], [self.lock_id])
         rx = sc["record"]["seq"]
@@ -7298,7 +7298,7 @@ class ScanTests(_Live, unittest.TestCase):
         self.assertEqual(self.advise(self.QID)[0], 200)
         old = Path(tempfile.mkdtemp(prefix="ck-old-"))
         self.addCleanup(lambda: __import__("shutil").rmtree(old, ignore_errors=True))
-        arc = subprocess.run(["git", "-C", str(repo), "archive", "v0.8.15", "plugin/kit/console_kit"],
+        arc = subprocess.run(["git", "-C", str(repo), "archive", "v0.8.15", "plugin/kit/overture"],
                              capture_output=True, timeout=60)
         self.assertEqual(arc.returncode, 0, arc.stderr)
         subprocess.run(["tar", "-x", "-C", str(old)], input=arc.stdout, check=True, timeout=60)
@@ -7307,7 +7307,7 @@ class ScanTests(_Live, unittest.TestCase):
             "import json, sys\n"
             "sys.path.insert(0, sys.argv[1])\n"
             "from pathlib import Path\n"
-            "from console_kit import store as ST, view as V\n"
+            "from overture import store as ST, view as V\n"
             "st = ST.Store(Path(sys.argv[2]))\n"
             "holds = V.make_evaluator(Path(sys.argv[3]), {})\n"
             "qs = {r['qid']: V.question_state(st, r, holds) for r in st.records() if r['type'] == 'question'}\n"
@@ -7473,8 +7473,8 @@ class PrsPushCliTests(_SingleServer, unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.base = Path(os.path.realpath(tmp.name))
         self.single(self.base)
-        from console_kit import registry as R
-        reg = self.base / "cfg" / "console-kit" / "projects.json"
+        from overture import registry as R
+        reg = self.base / "cfg" / "overture" / "projects.json"
         R.register(self.scfg.root, self.scfg.state, HERE / "plugin" / "kit", path=reg)
         bindir = self.base / "bin"
         bindir.mkdir()
@@ -7484,7 +7484,7 @@ class PrsPushCliTests(_SingleServer, unittest.TestCase):
         self.log = self.base / "gh.log"
         self.env = {**os.environ, "XDG_CONFIG_HOME": str(reg.parent.parent), "FAKE_GH_LOG": str(self.log),
                     "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"}
-        self.env.pop("CONSOLE_KIT_AGENT", None)
+        self.env.pop("OVERTURE_AGENT", None)
 
     def run_cli(self, *extra, **env):
         return subprocess.run([sys.executable, str(HERE / "plugin" / "kit" / "agent.py"), "--state",

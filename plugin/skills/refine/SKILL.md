@@ -1,6 +1,6 @@
 ---
 name: refine
-description: Revise one existing spec or planning document so it says what was decided - read it and the decisions and findings that bear on it, propose the changes as a change list before touching it, and name the other documents the change ripples into. Use when the user types /console-kit:refine, or for an owner-console "Refine" fork (the console-kit:refine next_step).
+description: Revise one existing spec or planning document so it says what was decided - read it and the decisions and findings that bear on it, propose the changes as a change list before touching it, and name the other documents the change ripples into. Use when the user types /overture:refine, or for an owner-console "Refine" fork (the overture:refine next_step).
 ---
 
 # Refine: revise one document to match what was decided
@@ -10,7 +10,7 @@ into something that has no spec yet, use drill instead.)
 
 ## Where the project keeps its documents
 
-1. `.console-kit.json`'s `specs_dir`, if set, is where its specs live.
+1. `.overture.json`'s `specs_dir`, if set, is where its specs live.
 2. The project's `CLAUDE.md` or README, which usually names its spec folder,
    decision log and findings register.
 3. Otherwise the **App Architect convention**, if the project uses it: an

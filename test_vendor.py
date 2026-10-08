@@ -22,9 +22,9 @@ sys.path.insert(0, str(HERE / "plugin" / "kit" / "tools"))
 import verify_vendor as VV  # noqa: E402
 
 KIT_FILES = {
-    "plugin/kit/console_kit/__init__.py": "v = 1\n",
-    "plugin/kit/console_kit/server.py": "server\n",
-    "plugin/kit/console_kit/console.js": "js\n",
+    "plugin/kit/overture/__init__.py": "v = 1\n",
+    "plugin/kit/overture/server.py": "server\n",
+    "plugin/kit/overture/console.js": "js\n",
     "plugin/kit/agent.py": "agent\n",
     "plugin/kit/fold.py": "fold\n",
     "plugin/kit/publish.py": "publish\n",
@@ -43,7 +43,7 @@ KIT_FILES = {
 
 def vendor_map(kit_path: str) -> str | None:
     """The inverse of RULES, for building a correct copy (the test's own table, not the script's)."""
-    for src, dst in (("plugin/kit/console_kit/", "console_kit/"), ("plugin/kit/", ""), ("plugin/", "plugin/")):
+    for src, dst in (("plugin/kit/overture/", "overture/"), ("plugin/kit/", ""), ("plugin/", "plugin/")):
         if kit_path.startswith(src):
             rel = dst + kit_path[len(src):]
             return None if rel in ("onboard.py", "plugin/skills/console-onboard/SKILL.md") else rel
@@ -55,7 +55,7 @@ class VerifyVendorTests(unittest.TestCase):
         self._td = tempfile.TemporaryDirectory()
         self.addCleanup(self._td.cleanup)
         d = Path(self._td.name)
-        self.kit, self.copy = d / "kit", d / "project" / "tools" / "console-kit"
+        self.kit, self.copy = d / "kit", d / "project" / "tools" / "overture"
         for rel, text in KIT_FILES.items():
             (self.kit / rel).parent.mkdir(parents=True, exist_ok=True)
             (self.kit / rel).write_text(text)
@@ -70,8 +70,8 @@ class VerifyVendorTests(unittest.TestCase):
                 shutil.copy2(self.kit / rel, self.copy / dst)
         # What a flat vendoring project adapts: its tests point at a flat layout.
         (self.copy / "test_kit.py").write_text("KIT = HERE\n")
-        (self.copy / "console_kit" / "__pycache__").mkdir()
-        (self.copy / "console_kit" / "__pycache__" / "server.cpython-312.pyc").write_bytes(b"\0")
+        (self.copy / "overture" / "__pycache__").mkdir()
+        (self.copy / "overture" / "__pycache__" / "server.cpython-312.pyc").write_bytes(b"\0")
 
     def git(self, *args):
         subprocess.run(["git", "-C", str(self.kit), *args], check=True, capture_output=True)
@@ -92,11 +92,11 @@ class VerifyVendorTests(unittest.TestCase):
 
     def test_one_changed_byte_is_drift(self):
         # Catches: a check by name or size only.
-        p = self.copy / "console_kit" / "server.py"
+        p = self.copy / "overture" / "server.py"
         p.write_text("servex\n")
         rc, out = self.run_cli()
         self.assertEqual(rc, 1)
-        self.assertIn("DRIFT console_kit/server.py: differs", out)
+        self.assertIn("DRIFT overture/server.py: differs", out)
 
     def test_a_line_ending_change_is_drift(self):
         (self.copy / "agent.py").write_bytes(b"agent\r\n")
@@ -104,19 +104,19 @@ class VerifyVendorTests(unittest.TestCase):
 
     def test_a_stray_file_is_drift(self):
         # Catches: a project file dropped into the kit's folder, or a kit file renamed.
-        (self.copy / "console_kit" / "local_patch.py").write_text("x\n")
+        (self.copy / "overture" / "local_patch.py").write_text("x\n")
         (self.copy / "notes.txt").write_text("x\n")
         rc, out = self.run_cli()
         self.assertEqual(rc, 1)
-        self.assertIn("DRIFT console_kit/local_patch.py", out)
+        self.assertIn("DRIFT overture/local_patch.py", out)
         self.assertIn("DRIFT notes.txt", out)
 
     def test_a_module_the_release_added_but_the_copy_lacks_is_drift(self):
-        (self.copy / "console_kit" / "console.js").unlink()
+        (self.copy / "overture" / "console.js").unlink()
         (self.copy / "plugin" / "hooks" / "hooks.json").unlink()
         (self.copy / "fold.py").unlink()
         rep = VV.verify(self.kit, "v1.0.0", self.copy)
-        self.assertEqual(sorted(rep["missing"]), ["console_kit/console.js", "fold.py", "plugin/hooks/hooks.json"])
+        self.assertEqual(sorted(rep["missing"]), ["overture/console.js", "fold.py", "plugin/hooks/hooks.json"])
         self.assertFalse(rep["ok"])
 
     def test_skills_may_be_left_out_but_one_taken_is_taken_whole(self):
@@ -143,8 +143,8 @@ class VerifyVendorTests(unittest.TestCase):
         self.assertEqual(self.run_cli(ref="v1.0.0")[0], 0)
 
     def test_an_adapted_file_is_listed_not_compared_and_more_can_be_declared(self):
-        (self.copy / "console_kit" / "local_patch.py").write_text("x\n")
-        self.assertEqual(self.run_cli("--adapted", "console_kit/local_patch.py")[0], 0)
+        (self.copy / "overture" / "local_patch.py").write_text("x\n")
+        self.assertEqual(self.run_cli("--adapted", "overture/local_patch.py")[0], 0)
 
     def test_a_symlink_is_never_followed(self):
         # Catches: a link to the kit's own file passing as a vendored copy.

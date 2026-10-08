@@ -1,7 +1,7 @@
-# Moving a project from a vendored console-kit to the standalone pinned install
+# Moving a project from a vendored overture to the standalone pinned install
 
 Until 0.8.7, a project could run the console from a copy of the kit **vendored
-into its own repository** (for example `<project>/tools/console-kit`, checked
+into its own repository** (for example `<project>/tools/overture`, checked
 with `kit/tools/verify_vendor.py`). This guide moves such a project onto **one
 user-level install of a pinned kit release**, outside every project, and then
 removes the vendored copy.
@@ -18,7 +18,7 @@ Why move:
   user-level install of a pinned release, with one server that each project's
   install links into through an API and a per-project token. **That server is
   not built yet.** It is specified in the multi-project spec
-  (`console-kit-multiproject.md`, kept with the owner's architect docs). Today each project still
+  (`overture-multiproject.md`, kept with the owner's architect docs). Today each project still
   runs its own server process, and this guide only changes *which copy of the
   kit* that process runs. When the one-server build ships, it will start from
   the pinned install this guide sets up.
@@ -33,7 +33,7 @@ and you have checked them. Step 6 explains why.
 
 You need:
 
-- a local clone of `MikeHeid/console-kit` with its tags (`git fetch --tags origin`);
+- a local clone of `MikeHeid/overture` with its tags (`git fetch --tags origin`);
 - the release your vendored copy is, confirmed byte for byte:
 
       python3 <kit-clone>/plugin/kit/tools/verify_vendor.py \
@@ -48,24 +48,24 @@ You need:
 Write down what you have now. You will need it to roll back:
 
     systemctl --user cat <name>-console.service
-    cat ~/.config/console-kit/projects.json
+    cat ~/.config/overture/projects.json
     systemctl --user list-timers --all | grep <name>
 
 ## Placeholders
 
 | Placeholder | Meaning | Example |
 |---|---|---|
-| `<kit-clone>` | your development clone of console-kit | `~/dev/projects/console-kit` |
+| `<kit-clone>` | your development clone of overture | `~/dev/projects/overture` |
 | `<tag>` | the pinned release | `v0.8.7` |
-| `<pins>` | where pinned releases live | `~/.local/share/console-kit/releases` |
-| `<current>` | a symlink to the pinned release in use | `~/.local/share/console-kit/current` |
+| `<pins>` | where pinned releases live | `~/.local/share/overture/releases` |
+| `<current>` | a symlink to the pinned release in use | `~/.local/share/overture/current` |
 | `<project>` | the checkout the unit serves | `~/src/acme` |
-| `<vendored>` | the vendored copy, relative to `<project>` | `tools/console-kit` |
+| `<vendored>` | the vendored copy, relative to `<project>` | `tools/overture` |
 | `<name>` | the unit name, `<name>-console.service` | `acme` |
 | `<state>` | the server's `--state` directory | `~/.local/state/acme-console` |
 | `<venv>` | a Python with the kit's pinned PyJWT and cryptography | `~/.local/share/acme-console/venv` |
 
-`~/.local/share/console-kit/kit` and `~/.local/share/console-kit/venv` belong to
+`~/.local/share/overture/kit` and `~/.local/share/overture/venv` belong to
 `deploy/install.sh` (the zip route in `INSTALL.md`). The pinned releases go in
 `releases/` beside them, so neither ever overwrites the other.
 
@@ -97,7 +97,7 @@ worktree repair <pins>/<tag>`. If you would rather the pin not depend on the
 clone at all, make it a standalone clone instead; everything below is the
 same:
 
-    git clone --branch <tag> --depth 1 https://github.com/MikeHeid/console-kit <pins>/<tag>
+    git clone --branch <tag> --depth 1 https://github.com/MikeHeid/overture <pins>/<tag>
 
 **Why `<current>`.** The systemd unit and the Claude Code marketplace point at
 `<current>`, not at `<pins>/<tag>`. An upgrade or a rollback is then one
@@ -111,7 +111,7 @@ reused when it holds the same pins:
     <venv>/bin/pip install -q -r <current>/plugin/kit/requirements.txt
     <venv>/bin/python -c 'import jwt, cryptography; print(jwt.__version__, cryptography.__version__)'
 
-For a new machine, make one: `python3 -m venv ~/.local/share/console-kit/venv-pinned`
+For a new machine, make one: `python3 -m venv ~/.local/share/overture/venv-pinned`
 and use that as `<venv>`.
 
 **Rollback:** nothing uses the pin yet. `git -C <kit-clone> worktree remove
@@ -119,16 +119,16 @@ and use that as `<venv>`.
 
 ## 2. Point the registry at the pinned kit
 
-The registry (`~/.config/console-kit/projects.json`) tells the plugin's hook
+The registry (`~/.config/overture/projects.json`) tells the plugin's hook
 and skills which `agent.py` to run for a project. `register` records the
 directory of the `agent.py` you run it with, so run the **pinned** one.
 
 **`register` replaces the project's whole entry.** It drops any existing
-entry for that root (`projects.pop(root)` in `console_kit/registry.py`) and
+entry for that root (`projects.pop(root)` in `overture/registry.py`) and
 writes a new one. Back the registry up first, and note the steward if one is
 set:
 
-    cp ~/.config/console-kit/projects.json ~/.config/console-kit/projects.json.bak-before-pin
+    cp ~/.config/overture/projects.json ~/.config/overture/projects.json.bak-before-pin
     python3 <current>/plugin/kit/agent.py --state <state> steward      # prints the steward, if any
 
 Then register with the **pinned** `agent.py`, passing `--steward NAME` again if
@@ -143,11 +143,11 @@ resolved, so the registry names the release itself, not `<current>`.
 
 Check it:
 
-    cat ~/.config/console-kit/projects.json        # "kit" is <pins>/<tag>/plugin/kit
+    cat ~/.config/overture/projects.json        # "kit" is <pins>/<tag>/plugin/kit
     python3 <current>/plugin/kit/agent.py --state <state> health
 
 **Rollback:** restore the backup
-(`cp ~/.config/console-kit/projects.json.bak-before-pin ~/.config/console-kit/projects.json`),
+(`cp ~/.config/overture/projects.json.bak-before-pin ~/.config/overture/projects.json`),
 or register again with the vendored `agent.py` (and `--steward NAME`):
 `python3 <project>/<vendored>/agent.py --state <state> register --project <project>`.
 
@@ -234,7 +234,7 @@ Check it:
     systemctl --user status <name>-console.service --no-pager | head -5   # active (running)
     systemctl --user show <name>-console.service -p DropInPaths           # names pinned-kit.conf
     tr '\0' ' ' < /proc/$(systemctl --user show -p MainPID --value <name>-console.service)/cmdline; echo
-                                                   # .../console-kit/current/plugin/kit/server.py ...
+                                                   # .../overture/current/plugin/kit/server.py ...
     python3 <current>/plugin/kit/agent.py --state <state> health   # exit 0, "ok": true, "version": "<tag without v>"
     curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<port>/   # 403: no Access token, as it must be
     python3 <current>/plugin/kit/agent.py --state <state> inbox --all | head
@@ -272,7 +272,7 @@ deletes the vendored copy (step 6).
 The plugin (hooks, skills, committee agents) comes from a **marketplace**.
 A vendored project usually registered its vendored directory as one. Point the
 marketplace of the same name at `<current>` instead. `<current>` is a
-marketplace: it holds `.claude-plugin/marketplace.json`, named `console-kit`,
+marketplace: it holds `.claude-plugin/marketplace.json`, named `overture`,
 whose plugin is `./plugin`, and `plugin/kit/` is inside it.
 
 **A directory marketplace's plugin loads in place.** Claude Code runs it from
@@ -292,18 +292,18 @@ and hooks from the pin, and until it does, they load from the vendored folder.
    so an entry left on the old path could bring it back.
 2. **Then repoint the marketplace**, in a shell (absolute path):
 
-       claude plugin marketplace remove console-kit
+       claude plugin marketplace remove overture
        claude plugin marketplace add <current>
-       claude plugin marketplace list        # console-kit, at <current>
+       claude plugin marketplace list        # overture, at <current>
 
 3. **Then reinstall and reload**, in a `claude` session:
 
-       /plugin install console-kit@console-kit
+       /plugin install overture@overture
        /reload-plugins
 
 If the plugin asks for its two optional defaults again (team domain, default
 zone), give the same values, or set them later with
-`/plugin configure console-kit@console-kit`.
+`/plugin configure overture@overture`.
 
 **Nothing in the hooks names a path.** The SessionStart note and the skills
 build the `agent.py` command from the registry's `kit`. After step 2, a new
@@ -311,9 +311,9 @@ session is told `python3 <pins>/<tag>/plugin/kit/agent.py --state <state>`.
 
 Check it, in a new session in the project:
 
-- `/plugin` lists `console-kit` at the new version, from marketplace `console-kit`;
+- `/plugin` lists `overture` at the new version, from marketplace `overture`;
 - the SessionStart note's `agent.py` path is under `<pins>/<tag>/plugin/kit`;
-- `cat ~/.claude/plugins/known_marketplaces.json` shows `console-kit` at `<current>`.
+- `cat ~/.claude/plugins/known_marketplaces.json` shows `overture` at `<current>`.
 
 **Rollback:** the same three steps with the vendored directory in place of
 `<current>`, including the old `extraKnownMarketplaces` path.
@@ -332,7 +332,7 @@ deletion within minutes, with nobody watching:
 - if the registry still named `<vendored>`, every session's SessionStart note
   and every skill would run an `agent.py` that no longer exists;
 - if the marketplace still pointed at `<vendored>`, every session would lose
-  console-kit's skills and hooks at its next start or `/reload-plugins`: a
+  overture's skills and hooks at its next start or `/reload-plugins`: a
   directory marketplace's plugin loads in place from that folder, with no copy
   to fall back on (step 5).
 
@@ -452,7 +452,7 @@ both together. Nothing is added to the store itself.
 
 Read the release's notes in `INSTALL.md` ("Upgrading to …") first. Some
 releases ask for a step of their own, such as `reanchor` or a
-`.console-kit.json` key. Keep the old worktree until the new one has run for
+`.overture.json` key. Keep the old worktree until the new one has run for
 a while: it is your rollback.
 
 ## Rolling back to the previous pin

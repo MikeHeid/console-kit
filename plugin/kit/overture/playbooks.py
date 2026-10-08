@@ -1,6 +1,6 @@
 """The owner's codified orchestrations: a sequence of delegations named by file.
 
-0.11.0. A playbook is a JSON file under `.console-kit/playbooks/<name>.json`:
+0.11.0. A playbook is a JSON file under `.overture/playbooks/<name>.json`:
 
     {
       "description": "Release-safety: a round, a visual of the deploy flow, a chat heads-up.",
@@ -20,7 +20,7 @@ in the store, ring the doorbell with their intent, and the steward's `watch`
 picks them up as it does any delegation.
 
 Files are read from the project tree the same way `projectcfg.py` reads
-`.console-kit.json`: via `rootfs.read` when confined, else a plain `read_regular`.
+`.overture.json`: via `rootfs.read` when confined, else a plain `read_regular`.
 Each file is capped and schema-checked; a bad file is skipped (one line to stderr)
 rather than refused, so one malformed playbook never hides the rest from the owner.
 """
@@ -37,7 +37,7 @@ from . import rootfs as RF
 from . import schema as S
 from .registry import RegistryError, read_regular
 
-DIR = ".console-kit/playbooks"
+DIR = ".overture/playbooks"
 MAX_FILE = 32 * 1024
 MAX_PLAYBOOKS = 128
 MAX_STEPS = 24
@@ -67,7 +67,7 @@ class Playbook:
 
 
 def load(root: Path) -> dict[str, Playbook]:
-    """Every well-formed playbook in `<root>/.console-kit/playbooks/`, keyed by name.
+    """Every well-formed playbook in `<root>/.overture/playbooks/`, keyed by name.
 
     An unreadable or malformed file is skipped, not refused: one bad playbook does not hide the rest.
     Returns {} when the directory is absent.

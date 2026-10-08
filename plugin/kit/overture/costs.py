@@ -64,7 +64,7 @@ LOCK = ".costs.lock"
 FORK_TAG = re.compile(r"^ck-fork:([0-9a-f]{24})(?=\s|\Z)")
 TAG_SPAN = 64                                   # the only part of a description ever matched
 AGENT_TYPE = re.compile(r"^[A-Za-z0-9:_.-]{1,64}\Z")
-SEAT_PREFIX = "console-kit:"
+SEAT_PREFIX = "overture:"
 COUNTS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 # The only keys any decoded object keeps; everything else (content above all) is dropped as it is parsed.
 KEEP = frozenset({"message", "id", "usage", *COUNTS})

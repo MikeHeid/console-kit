@@ -5,7 +5,7 @@
 #   deploy/install.sh --project DIR --start    also enable and start the SERVER (loopback only)
 #
 # The project must have been onboarded first (onboard.py write), which leaves
-# DIR/.console-kit/console.env. Nothing of any one project is baked in here.
+# DIR/.overture/console.env. Nothing of any one project is baked in here.
 #
 # It never creates a tunnel, never writes DNS, never starts the tunnel unit and
 # never registers the project: those make the console reachable from the
@@ -22,7 +22,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$PROJECT" ] || { echo "install.sh: --project DIR is required" >&2; exit 2; }
 PROJECT=$(cd "$PROJECT" && pwd)
-ENV_FILE="$PROJECT/.console-kit/console.env"
+ENV_FILE="$PROJECT/.overture/console.env"
 [ -f "$ENV_FILE" ] || { echo "install.sh: $ENV_FILE is missing; run onboard.py write first" >&2; exit 2; }
 
 SRC=$(cd "$(dirname "$0")/.." && pwd)
@@ -33,10 +33,10 @@ CONSOLE_NAME=$(printf '%s\n' "$VALUES" | sed -n 's/^CONSOLE_NAME=//p')
 CONSOLE_TUNNEL=$(printf '%s\n' "$VALUES" | sed -n 's/^CONSOLE_TUNNEL=//p')
 CONSOLE_PORT=$(printf '%s\n' "$VALUES" | sed -n 's/^CONSOLE_PORT=//p')
 
-SHARE="${XDG_DATA_HOME:-$HOME/.local/share}/console-kit"
+SHARE="${XDG_DATA_HOME:-$HOME/.local/share}/overture"
 KIT="$SHARE/kit"
 UNITS="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
-STATE="${XDG_STATE_HOME:-$HOME/.local/state}/console-kit/$CONSOLE_NAME"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/overture/$CONSOLE_NAME"
 CLOUDFLARED=$(command -v cloudflared || echo /usr/local/bin/cloudflared)
 
 # Every value rendered into a unit must be a plain path or name. The names are
@@ -61,7 +61,7 @@ if [ "$SRC" != "$KIT" ]; then
   mkdir -p "$SHARE"
   rm -rf "$KIT.new"
   mkdir "$KIT.new"
-  for part in console_kit deploy demo docs agent.py fold.py onboard.py publish.py server.py \
+  for part in overture deploy demo docs agent.py fold.py onboard.py publish.py server.py \
               adapter_template.py requirements.txt README.md INSTALL.md VERSION; do
     if [ -e "$SRC/$part" ]; then cp -R "$SRC/$part" "$KIT.new/"; fi
   done

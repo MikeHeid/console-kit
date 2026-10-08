@@ -2,7 +2,7 @@
 
 Every write through the agent's door is stored `by: "agent"`, so with several
 sessions on one console the owner could not tell them apart. An agent may now
-say who it is: `agent.py --as agent-6` (or CONSOLE_KIT_AGENT=agent-6), which
+say who it is: `agent.py --as agent-6` (or OVERTURE_AGENT=agent-6), which
 sends the name in the `X-Console-Agent` header. The name is optional; a
 session that gives none writes exactly what 0.8.1 wrote.
 
@@ -40,7 +40,7 @@ from . import schema as S
 
 FILE = "names.jsonl"
 HEADER = "X-Console-Agent"
-ENV = "CONSOLE_KIT_AGENT"
+ENV = "OVERTURE_AGENT"
 # A short plain token: a lowercase letter, then lowercase letters, digits and
 # single hyphens, at most 32 characters ("agent-6", "review-bot"). It is shown
 # on the owner's page and printed into the rulings record, so it is held to

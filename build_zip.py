@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Build dist/console-kit-<version>.zip: a local Claude Code plugin marketplace
-holding the console-kit plugin and, inside it, the server kit.
+"""Build dist/overture-<version>.zip: a local Claude Code plugin marketplace
+holding the overture plugin and, inside it, the server kit.
 
     python3 build_zip.py [--deny-file FILE] [--no-validate]
 
 Claude Desktop installs plugins from a marketplace, not from a bare zip: unzip
 it, then in the Code tab run `/plugin marketplace add <unzipped folder>` and
-`/plugin install console-kit@console-kit-local` (INSTALL.md).
+`/plugin install overture@overture-local` (INSTALL.md).
 
 The zip is deterministic (sorted entries, fixed timestamps and modes), so the
 same tree always gives the same bytes and the printed sha256 identifies it.
@@ -29,7 +29,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-MARKET = "console-kit-local"
+MARKET = "overture-local"
 # What the installed kit needs at run time. Tests, dist/ and git metadata stay out.
 # The plugin folder is the whole product: the kit lives in plugin/kit, so an install
 # from this zip and one straight from the repository carry the same files.
@@ -68,8 +68,8 @@ def stage(tmp: Path) -> Path:
     ver = version()
     # Unversioned on purpose: the marketplace is added by path, so an update must
     # land at the same path for `/plugin marketplace update` to find it.
-    top = tmp / "console-kit"
-    plugin = top / "plugins/console-kit"
+    top = tmp / "overture"
+    plugin = top / "plugins/overture"
     for f in files(ROOT / "plugin", [p for p in PLUGIN_PARTS if (ROOT / "plugin" / p).exists()]):
         dst = plugin / f.relative_to(ROOT / "plugin")
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -80,9 +80,9 @@ def stage(tmp: Path) -> Path:
     (top / ".claude-plugin").mkdir(parents=True)
     (top / ".claude-plugin/marketplace.json").write_text(json.dumps({
         "name": MARKET,
-        "owner": manifest.get("author", {"name": "console-kit"}),
-        "description": "A local marketplace holding the console-kit plugin, unzipped from its release zip.",
-        "plugins": [{"name": "console-kit", "source": "./plugins/console-kit", "version": ver,
+        "owner": manifest.get("author", {"name": "overture"}),
+        "description": "A local marketplace holding the overture plugin, unzipped from its release zip.",
+        "plugins": [{"name": "overture", "source": "./plugins/overture", "version": ver,
                      "description": manifest["description"]}],
     }, indent=2) + "\n", encoding="utf-8")
     shutil.copy2(ROOT / "INSTALL.md", top / "INSTALL.md")
@@ -111,7 +111,7 @@ def validate(top: Path) -> str:
     claude = shutil.which("claude")
     if not claude:
         return "validate: skipped, `claude` is not on PATH"
-    for target in (top, top / "plugins/console-kit"):
+    for target in (top, top / "plugins/overture"):
         r = subprocess.run([claude, "plugin", "validate", "--strict", str(target)],
                            capture_output=True, text=True, timeout=120)
         if r.returncode != 0:
@@ -136,7 +136,7 @@ def build(deny: list[str], check: bool = True, out_dir: Path | None = None) -> t
         top = stage(Path(td))
         scan(top, deny)
         note = validate(top) if check else "validate: skipped (--no-validate)"
-        out = (out_dir or ROOT / "dist") / f"console-kit-{version()}.zip"
+        out = (out_dir or ROOT / "dist") / f"overture-{version()}.zip"
         return out, pack(top, out), note
 
 

@@ -35,22 +35,22 @@ class Base(unittest.TestCase):
 class LayoutTests(Base):
     def test_the_zip_is_a_marketplace_holding_the_plugin_and_the_kit(self):
         out, _ = self.built()
-        self.assertEqual(out.name, f"console-kit-{B.version()}.zip")
+        self.assertEqual(out.name, f"overture-{B.version()}.zip")
         names = set(zipfile.ZipFile(out).namelist())
-        for must in ("console-kit/.claude-plugin/marketplace.json", "console-kit/INSTALL.md",
-                     "console-kit/plugins/console-kit/.claude-plugin/plugin.json",
-                     "console-kit/plugins/console-kit/hooks/hooks.json",
-                     "console-kit/plugins/console-kit/hooks/session_start.py",
-                     "console-kit/plugins/console-kit/skills/console-onboard/SKILL.md",
-                     "console-kit/plugins/console-kit/skills/console-process/SKILL.md",
-                     *(f"console-kit/plugins/console-kit/skills/{s}/SKILL.md" for s in SHIPPED_SKILLS),
-                     "console-kit/plugins/console-kit/agents/security.md",
-                     "console-kit/plugins/console-kit/kit/onboard.py",
-                     "console-kit/plugins/console-kit/kit/agent.py",
-                     "console-kit/plugins/console-kit/kit/server.py",
-                     "console-kit/plugins/console-kit/kit/deploy/install.sh",
-                     "console-kit/plugins/console-kit/kit/console_kit/console.js",
-                     "console-kit/plugins/console-kit/kit/requirements.txt"):
+        for must in ("overture/.claude-plugin/marketplace.json", "overture/INSTALL.md",
+                     "overture/plugins/overture/.claude-plugin/plugin.json",
+                     "overture/plugins/overture/hooks/hooks.json",
+                     "overture/plugins/overture/hooks/session_start.py",
+                     "overture/plugins/overture/skills/console-onboard/SKILL.md",
+                     "overture/plugins/overture/skills/console-process/SKILL.md",
+                     *(f"overture/plugins/overture/skills/{s}/SKILL.md" for s in SHIPPED_SKILLS),
+                     "overture/plugins/overture/agents/security.md",
+                     "overture/plugins/overture/kit/onboard.py",
+                     "overture/plugins/overture/kit/agent.py",
+                     "overture/plugins/overture/kit/server.py",
+                     "overture/plugins/overture/kit/deploy/install.sh",
+                     "overture/plugins/overture/kit/overture/console.js",
+                     "overture/plugins/overture/kit/requirements.txt"):
             self.assertIn(must, names)
         for n in names:
             with self.subTest(entry=n):
@@ -61,19 +61,19 @@ class LayoutTests(Base):
 
     def test_the_marketplace_points_at_the_plugin_at_the_same_version(self):
         z = zipfile.ZipFile(self.built()[0])
-        market = json.loads(z.read("console-kit/.claude-plugin/marketplace.json"))
-        plugin = json.loads(z.read("console-kit/plugins/console-kit/.claude-plugin/plugin.json"))
+        market = json.loads(z.read("overture/.claude-plugin/marketplace.json"))
+        plugin = json.loads(z.read("overture/plugins/overture/.claude-plugin/plugin.json"))
         self.assertEqual(market["name"], B.MARKET)
         [entry] = market["plugins"]
         self.assertEqual(entry["name"], plugin["name"])
-        self.assertEqual(entry["source"], "./plugins/console-kit")
+        self.assertEqual(entry["source"], "./plugins/overture")
         self.assertEqual(entry["version"], plugin["version"])
         self.assertEqual(plugin["version"], B.version())
 
     def test_every_place_that_states_the_version_agrees(self):
-        # 0.6.0: /health reports console_kit.__version__, and a vendoring project carries no
+        # 0.6.0: /health reports overture.__version__, and a vendoring project carries no
         # VERSION file, so the package must say the same as VERSION and both manifests.
-        init = (B.ROOT / "plugin/kit/console_kit/__init__.py").read_text(encoding="utf-8")
+        init = (B.ROOT / "plugin/kit/overture/__init__.py").read_text(encoding="utf-8")
         [pkg] = re.findall(r'^__version__ = "([^"]+)"', init, re.M)
         repo_market = json.loads((B.ROOT / ".claude-plugin/marketplace.json").read_text(encoding="utf-8"))
         plugin = json.loads((B.ROOT / "plugin/.claude-plugin/plugin.json").read_text(encoding="utf-8"))
@@ -82,9 +82,9 @@ class LayoutTests(Base):
     def test_scripts_are_executable_and_the_rest_is_not(self):
         z = zipfile.ZipFile(self.built()[0])
         mode = {i.filename: (i.external_attr >> 16) & 0o777 for i in z.infolist()}
-        self.assertEqual(mode["console-kit/plugins/console-kit/kit/deploy/install.sh"], 0o755)
-        self.assertEqual(mode["console-kit/plugins/console-kit/kit/onboard.py"], 0o755)
-        self.assertEqual(mode["console-kit/INSTALL.md"], 0o644)
+        self.assertEqual(mode["overture/plugins/overture/kit/deploy/install.sh"], 0o755)
+        self.assertEqual(mode["overture/plugins/overture/kit/onboard.py"], 0o755)
+        self.assertEqual(mode["overture/INSTALL.md"], 0o644)
 
     def test_the_same_tree_gives_the_same_bytes(self):
         (_, a), (_, b) = self.built(sub="a"), self.built(sub="b")
@@ -108,7 +108,7 @@ class RefusalTests(Base):
             "b.json": '{"AccountTag": "x", "TunnelSecret": "y"}',
             "0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b.json": "{}",
             "cert.pem": "x",
-            ".console-kit/console.env": "CONSOLE_NAME=x\n",
+            ".overture/console.env": "CONSOLE_NAME=x\n",
             "c.md": "token ghp_" + "a" * 36,
         }
         for rel, text in cases.items():
@@ -156,7 +156,7 @@ class UnitTemplateTests(unittest.TestCase):
         self.assertIn("--root", flags)   # the parse found the ExecStart at all
         self.assertNotIn("--page", flags)
         self.assertNotIn("--adapter", flags)   # IGNORED since Q24: the steward pushes items, nothing runs it
-        parser = (self.KIT / "console_kit" / "server.py").read_text()
+        parser = (self.KIT / "overture" / "server.py").read_text()
         for f in flags:
             self.assertIn(f'ap.add_argument("{f}"', parser, f)
 
@@ -185,13 +185,13 @@ class InstalledPluginTests(Base):
             r = subprocess.run(["claude", *argv], env=env, capture_output=True, text=True, timeout=120,
                                stdin=subprocess.DEVNULL)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        [skill] = cfg.glob("plugins/cache/*/console-kit/*/skills/console-onboard/SKILL.md")
+        [skill] = cfg.glob("plugins/cache/*/overture/*/skills/console-onboard/SKILL.md")
         return skill.parent
 
     def assert_complete(self, skill_dir: Path):
         kit = (skill_dir / "../../kit").resolve()     # where SKILL.md looks
         for rel in ("onboard.py", "agent.py", "server.py", "deploy/install.sh", "docs/CLOUDFLARE.md",
-                    "adapter_template.py", "demo/index.html", "console_kit/console.js", "requirements.txt"):
+                    "adapter_template.py", "demo/index.html", "overture/console.js", "requirements.txt"):
             self.assertTrue((kit / rel).is_file(), f"installed plugin lacks kit/{rel}")
         # Every KIT/<path> a skill tells a session to read must be in the installed kit.
         for skill in (skill_dir / "..").resolve().glob("*/SKILL.md"):
@@ -200,25 +200,25 @@ class InstalledPluginTests(Base):
                 self.assertTrue((kit / rel).exists(), f"{skill.parent.name} cites KIT/{rel}, not in the installed kit")
 
     def test_an_install_from_the_repository_carries_the_kit(self):
-        self.assert_complete(self.install(B.ROOT, "console-kit@console-kit"))
+        self.assert_complete(self.install(B.ROOT, "overture@overture"))
 
     def test_an_install_from_the_release_zip_carries_the_kit(self):
         out, _ = self.built()
         with zipfile.ZipFile(out) as z:
             z.extractall(self.tmp / "unzipped")
-        self.assert_complete(self.install(self.tmp / "unzipped/console-kit", "console-kit@console-kit-local"))
+        self.assert_complete(self.install(self.tmp / "unzipped/overture", "overture@overture-local"))
 
     def test_the_default_next_step_skills_resolve_from_the_installed_plugin_and_never_the_repository(self):
         # Catches: a fresh install where Refine and Drill are refused because the skills the
-        # onboarding default names were never shipped; a resolver that finds `console-kit:refine`
+        # onboarding default names were never shipped; a resolver that finds `overture:refine`
         # anywhere but the installed plugin; and one that lets a repository's own
         # .claude/skills/refine stand in, under either name, for what the user installed.
         import sys
         sys.path.insert(0, str(B.ROOT / "plugin/kit"))
-        from console_kit import projectcfg as PC
+        from overture import projectcfg as PC
         import onboard as O
-        skill_dir = self.install(B.ROOT, "console-kit@console-kit")
-        cfg = self.tmp / "cfg-console-kit"
+        skill_dir = self.install(B.ROOT, "overture@overture")
+        cfg = self.tmp / "cfg-overture"
         installed = (skill_dir / "..").resolve()
         for name in SHIPPED_SKILLS:
             with self.subTest(skill=name):
@@ -227,8 +227,8 @@ class InstalledPluginTests(Base):
         proj = self.tmp / "proj"
         (proj / ".claude/skills/refine").mkdir(parents=True)
         (proj / ".claude/skills/refine/SKILL.md").write_text("repo-supplied: do something else\n")
-        (proj / ".console-kit.json").write_text(json.dumps({"next_step": O.DEFAULT_NEXT_STEP}))
-        self.assertEqual(PC.load(proj).next_step, {"refine": "console-kit:refine", "drill": "console-kit:drill"})
+        (proj / ".overture.json").write_text(json.dumps({"next_step": O.DEFAULT_NEXT_STEP}))
+        self.assertEqual(PC.load(proj).next_step, {"refine": "overture:refine", "drill": "overture:drill"})
         for kind, name in O.DEFAULT_NEXT_STEP.items():
             with self.subTest(kind=kind):
                 got = PC.resolve_skill(name, proj, cfg)
@@ -245,7 +245,7 @@ class InstalledPluginTests(Base):
         self.assertEqual(ok.returncode, 0, ok.stderr)
         self.assertEqual(json.loads(ok.stdout)["skill_md"], str((installed / "refine/SKILL.md").resolve()))
         self.assertNotIn("repo-supplied", ok.stdout + ok.stderr)
-        (proj / ".console-kit.json").write_text(json.dumps({"next_step": {"refine": "refine"}}))
+        (proj / ".overture.json").write_text(json.dumps({"next_step": {"refine": "refine"}}))
         bad = subprocess.run([*agent, "refine", "--project", str(proj)], capture_output=True, text=True, env=env,
                              timeout=60)
         self.assertEqual(bad.returncode, 1, bad.stdout + bad.stderr)

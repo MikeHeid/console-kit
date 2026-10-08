@@ -1,12 +1,19 @@
-# console-kit
+# Overture
 
-> **Console-kit is the self-hosted owner-operator layer for AI software
+```
+    ___                __
+   / _ \_  _____ ____/ /___  _______
+  / // / |/ / -_) __/ __/ // / __/ -_)
+ /____/|___/\__/_/  \__/\_,_/_/  \__/
+```
+
+> **Overture is the self-hosted owner-operator layer for AI software
 > development: one web cockpit, behind your own Cloudflare Access, that
 > unifies every AI-coding project you run — Portfolio and cross-project
 > Priority ribbon, Playbooks and Triggers with branching and replay,
 > Command palette and deep links for owner speed, and a full audit
 > trail from trigger log to Markdown export. In a market of AI
-> assistants that generate code, console-kit is the trust-first
+> assistants that generate code, Overture is the trust-first
 > control plane — SHA-256 secret drift checks, sandboxed-iframe
 > visuals with no CDN, closed-set predicate validation, signed
 > releases — that keeps a single operator in command of what gets
@@ -25,46 +32,46 @@ says what each release added.
 
 ## Install
 
-Two routes. Both end at `/console-kit:console-onboard`.
+Two routes. Both end at `/overture:console-onboard`.
 
 ### A. Straight from this repository (no download)
 
 In Claude Desktop's **Code** tab or in `claude`:
 
-    /plugin marketplace add MikeHeid/console-kit
-    /plugin install console-kit@console-kit
+    /plugin marketplace add MikeHeid/overture
+    /plugin install overture@overture
 
 Then, in your project:
 
-    /console-kit:console-onboard
+    /overture:console-onboard
 
 Updates land with:
 
-    /plugin marketplace update console-kit
-    /plugin update console-kit@console-kit
+    /plugin marketplace update overture
+    /plugin update overture@overture
 
 ### B. From a release zip
 
-Get **`console-kit-<version>.zip`** from
-[Releases](https://github.com/MikeHeid/console-kit/releases). Unzip it
-somewhere it can stay (it makes a `console-kit/` folder). Then:
+Get **`overture-<version>.zip`** from
+[Releases](https://github.com/MikeHeid/overture/releases). Unzip it
+somewhere it can stay (it makes a `overture/` folder). Then:
 
-    /plugin marketplace add ~/console-kit
-    /plugin install console-kit@console-kit-local
-    /console-kit:console-onboard
+    /plugin marketplace add ~/overture
+    /plugin install overture@overture-local
+    /overture:console-onboard
 
-Updates: delete `~/console-kit/`, unzip the new release zip in its place,
+Updates: delete `~/overture/`, unzip the new release zip in its place,
 then:
 
-    /plugin marketplace update console-kit-local
-    /plugin update console-kit@console-kit-local
+    /plugin marketplace update overture-local
+    /plugin update overture@overture-local
 
 A one-liner for scripts, including other Claude sessions:
 
-    rm -rf ~/console-kit && \
-      gh release download --repo MikeHeid/console-kit --pattern 'console-kit-*.zip' \
+    rm -rf ~/overture && \
+      gh release download --repo MikeHeid/overture --pattern 'overture-*.zip' \
         --dir /tmp --clobber && \
-      unzip -q /tmp/console-kit-*.zip -d ~ && rm /tmp/console-kit-*.zip
+      unzip -q /tmp/overture-*.zip -d ~ && rm /tmp/overture-*.zip
 
 Then run the two `/plugin` commands above and restart the session.
 
@@ -73,9 +80,9 @@ Then run the two `/plugin` commands above and restart the session.
 Updating the plugin only refreshes the files on disk; the running Python
 server does not pick them up until it restarts. For every project that was
 onboarded, run the installer with `--start` to copy the fresh kit to
-`~/.local/share/console-kit/kit/` and restart the systemd user units:
+`~/.local/share/overture/kit/` and restart the systemd user units:
 
-    bash ~/console-kit/plugins/console-kit/kit/deploy/install.sh \
+    bash ~/overture/plugins/overture/kit/deploy/install.sh \
       --project <path to project> --start
 
 (When using route A, the path is the plugin cache instead; the install
@@ -83,7 +90,7 @@ script's path is printed by `onboard.py show` on the project.)
 
 After the restart, verify from the project's machine:
 
-    curl -s http://127.0.0.1:$(grep ^CONSOLE_PORT .console-kit/console.env | cut -d= -f2)/health
+    curl -s http://127.0.0.1:$(grep ^CONSOLE_PORT .overture/console.env | cut -d= -f2)/health
     # → {"ok": true, "version": "<the version you just installed>", ...}
 
 The first Claude session in each project after the upgrade prints a short
@@ -105,24 +112,24 @@ banner naming the new version and the commands most useful at that moment
 
 **Set the agent id for a Claude session** — type this in Claude Code:
 
-    /console-kit:as my-agent-name
+    /overture:as my-agent-name
 
 The name is recorded against this session in `STATE/sessions.jsonl`. Every
 `agent.py` call the session makes signs with it, questions and messages are
 attributed to it, and the SessionStart banner knows which session is which.
-`CONSOLE_KIT_AGENT=my-agent-name` in the shell env is a machine-wide fallback;
-`/console-kit:as` wins for that session.
+`OVERTURE_AGENT=my-agent-name` in the shell env is a machine-wide fallback;
+`/overture:as` wins for that session.
 
 **Bootstrap the dashboard** — in a terminal on the project's machine:
 
     # Writes docs/console/page.html with Header / Items / Rollout / Engine / Spec
-    # sections and injects a matching board() into .console-kit/adapter.py.
+    # sections and injects a matching board() into .overture/adapter.py.
     agent.py --state <STATE> scaffold-dashboard --project .
 
     # Insert a <details data-ck-item="X"> stub for every item not yet on the
     # page, nested under its parent. Idempotent; hand-edits inside each node
     # survive re-syncs.
-    agent.py --state <STATE> items-push --adapter .console-kit/adapter.py \
+    agent.py --state <STATE> items-push --adapter .overture/adapter.py \
       --sync-dashboard docs/console/page.html
 
     # Commit, snapshot, press "Use this page" in the console.
@@ -130,7 +137,7 @@ attributed to it, and the SessionStart banner knows which session is which.
     agent.py --state <STATE> page-snapshot --path docs/console/page.html
 
     # Keep the live values fresh:
-    agent.py --state <STATE> items-watch --adapter .console-kit/adapter.py
+    agent.py --state <STATE> items-watch --adapter .overture/adapter.py
 
 **Make it more beautiful.** The console inherits CSS custom properties from the
 host page's `:root`. Define any of these to re-skin the whole kit (an unlayered
@@ -154,7 +161,7 @@ The 0.9.11 fallback palette is Primer-aligned (`#0969da` accent on light,
 `#58a6ff` on dark) and ships `color-scheme` so native scrollbars match. Then:
 
 - Add deep links from the item view to your dashboard by setting
-  `sections` in `.console-kit.json`:
+  `sections` in `.overture.json`:
   `{"sections": {"AB-2": ["#features/rollout", "#features/timeline"]}}`.
   The item view renders chips linking to each anchor.
 - Add in-place state badges by marking any `<section data-ck-item="X">`
@@ -165,13 +172,13 @@ The 0.9.11 fallback palette is Primer-aligned (`#0969da` accent on light,
 
 The plugin runs three hooks in every Claude session on your machine. All three
 act only in projects that `agent.py register` has entered in your user-level
-registry (`~/.config/console-kit/projects.json`); in any other project they
+registry (`~/.config/overture/projects.json`); in any other project they
 print nothing and exit 0.
 
 | Hook event | File | What it does |
 |---|---|---|
 | `SessionStart` (startup/resume/clear/compact/fork) | `plugin/hooks/session_start.py` | Reads the doorbell for this project's console and prints what the owner sent while no session was watching: questions, process requests, chat replies, scan requests, visual requests, each with its seq and the command to handle it. On first run after an install or an upgrade, prints a banner naming the running kit version and the commands most useful at that moment. |
-| `UserPromptSubmit` | `plugin/hooks/name_session.py` | Picks up `/console-kit:as NAME` and records the mapping `session_id → agent name` in `STATE/sessions.jsonl` (atomic rewrite). The next `agent.py` call reads the name from this file. |
+| `UserPromptSubmit` | `plugin/hooks/name_session.py` | Picks up `/overture:as NAME` and records the mapping `session_id → agent name` in `STATE/sessions.jsonl` (atomic rewrite). The next `agent.py` call reads the name from this file. |
 | `PreToolUse` (matcher: `AskUserQuestion`) | `plugin/hooks/ask_guard.py` | On a non-steward session in a project that names a steward, refuses `AskUserQuestion` so the question goes to the owner through the console instead of a transient prompt. |
 
 All three are stdlib-only, read-only outside their known files, and never run
@@ -213,7 +220,7 @@ anything from the repository. See the module docstrings for the trust model.
   - **Follow up**: chosen seats look at that answer again.
   - **Roar**: a three-round panel, at most once per lock.
   - **Refine** or **Drill**: runs the skill your project names, by default
-    the plugin's own `console-kit:refine` and `console-kit:drill`.
+    the plugin's own `overture:refine` and `overture:drill`.
 
   Each step comes back as questions for you to lock. Nothing is written into
   the project before you lock.
@@ -293,7 +300,7 @@ server cannot check it.
 - The status bar says whether an agent session is listening right now.
   Optionally, a footer shows your Claude usage for the 5-hour and 7-day
   windows.
-- **Several agents, one console.** Sessions can be named (`/console-kit:as
+- **Several agents, one console.** Sessions can be named (`/overture:as
   agent-6`). One of them, the **steward**, named in your own registry, is the
   only one that processes your requests and folds your answers. The others
   post their questions to your inbox instead of asking you directly.
@@ -322,7 +329,7 @@ server cannot check it.
   that opens it in a new tab. A bell button opts in to desktop
   notifications so a sibling's new `?you` or `!stale` reaches you even
   when the tab is in the background; a Snooze button sets a 1-hour DND
-  lid. Peers are declared in `.console-kit/portfolio.json`; the Cloudflare
+  lid. Peers are declared in `.overture/portfolio.json`; the Cloudflare
   Access service-token secrets live in `STATE/portfolio-secrets/<peer>.json`
   (`agent.py portfolio-token` prints the layout). The home server does the
   cross-origin calls, so the browser never sees a peer's secret.
@@ -371,7 +378,7 @@ server cannot check it.
 - **`plugin/`** holds the Claude Code plugin: the hook, the skills, and the
   committee agents. Its skills include `roar`, `refine`, `drill` and
   `deliberate`, which a console round uses and which also run on their own
-  (`/console-kit:roar` and so on).
+  (`/overture:roar` and so on).
 - **`onboard.py`** and **`deploy/`** onboard a project and install the
   services.
 
@@ -379,7 +386,7 @@ server cannot check it.
 
 One console server can host several projects. Each project's agents reach it
 with that project's own token. The token is kept in
-`~/.config/console-kit/tokens/NAME` (mode 0600, outside every repository);
+`~/.config/overture/tokens/NAME` (mode 0600, outside every repository);
 `server.json` holds only its hash. `agent.py` picks the project from the
 directory it runs in. `agent.py server token rotate NAME` (which you run)
 refuses the old token from the next request.
@@ -410,7 +417,7 @@ either side. A few traps worth knowing:
   and fails on a repository whose default is anything else. Pass
   `--from-ref HEAD --unreviewed` while bootstrapping, or point `--from-ref`
   at your actual branch.
-- **Page path.** `onboard.py` defaults the page to `.console-kit/page.html`,
+- **Page path.** `onboard.py` defaults the page to `.overture/page.html`,
   which `page-snapshot` refuses (leading dot). Move the page under
   `docs/console/page.html` or similar.
 - **Items.** The server never runs your adapter. After onboarding, run
@@ -427,9 +434,9 @@ either side. A few traps worth knowing:
 ## Trust
 
 - The plugin's hook runs in every project you open, but acts only in projects
-  listed in `~/.config/console-kit/projects.json`, which only `agent.py
+  listed in `~/.config/overture/projects.json`, which only `agent.py
   register` and `agent.py steward` write. A cloned repository's
-  `.console-kit.json` is never trusted by itself, and cannot name a steward.
+  `.overture.json` is never trusted by itself, and cannot name a steward.
 - Anything an agent can write — the adapter, `.git/config`, the dashboard file
   in the working tree — is never run or read by the server.
 - The kit never opens `~/.cloudflared/cert.pem` or a tunnel credentials file.
@@ -442,11 +449,11 @@ either side. A few traps worth knowing:
     python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
     .venv/bin/python test_kit.py && .venv/bin/python test_server.py && .venv/bin/python test_onboard.py
     .venv/bin/python test_build.py
-    CONSOLE_KIT_BROWSER=1 .venv/bin/python test_browser.py   # needs playwright + browsers
+    OVERTURE_BROWSER=1 .venv/bin/python test_browser.py   # needs playwright + browsers
 
 `test_server.py`'s syscall tests need `strace`, and FAIL when it is missing,
 so they cannot quietly not run. On a machine without it, set
-`CONSOLE_KIT_NO_STRACE=1` to skip them, and each is then reported, by name, as
+`OVERTURE_NO_STRACE=1` to skip them, and each is then reported, by name, as
 not run.
 
 To build the release zip:

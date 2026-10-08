@@ -2,11 +2,11 @@
 """The docked inbox (AB-2/Q2) in a real browser: console.js + console.css injected
 into a minimal host page, against a stub /view.
 
-CI has no browser, so this file skips unless CONSOLE_KIT_BROWSER=1 is set; with it
+CI has no browser, so this file skips unless OVERTURE_BROWSER=1 is set; with it
 set, a missing Playwright or browser is a failure, never a skip. Run locally:
 
-    CONSOLE_KIT_BROWSER=1 python3 tools/console-kit/test_browser.py
-    CONSOLE_KIT_BROWSERS=chromium,firefox CONSOLE_KIT_BROWSER=1 python3 tools/console-kit/test_browser.py
+    OVERTURE_BROWSER=1 python3 tools/overture/test_browser.py
+    OVERTURE_BROWSERS=chromium,firefox OVERTURE_BROWSER=1 python3 tools/overture/test_browser.py
 """
 from __future__ import annotations
 
@@ -22,10 +22,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 KIT = HERE / "plugin" / "kit"  # the kit ships inside the plugin, so every install carries it
 sys.path.insert(0, str(KIT))
-from console_kit import publish as P  # noqa: E402
+from overture import publish as P  # noqa: E402
 
-REQUIRED = os.environ.get("CONSOLE_KIT_BROWSER") == "1"
-BROWSERS = [b.strip() for b in os.environ.get("CONSOLE_KIT_BROWSERS", "chromium").split(",") if b.strip()]
+REQUIRED = os.environ.get("OVERTURE_BROWSER") == "1"
+BROWSERS = [b.strip() for b in os.environ.get("OVERTURE_BROWSERS", "chromium").split(",") if b.strip()]
 
 # A host page with nothing of any vendoring project's in it: the kit must bring its own room.
 HOST = """<!doctype html><html><head><meta charset="utf-8"><title>host</title>
@@ -43,8 +43,8 @@ def _view(owner_message: bool = False, second_lane: bool = False, multiline: boo
     owner_message adds one owner message on LANE.1 with no agent reply, which
     puts that item in awaiting_agent; second_lane adds LANE.2 with one too."""
     import tempfile
-    from console_kit import view as V
-    from console_kit.store import Store
+    from overture import view as V
+    from overture.store import Store
     from test_kit import message, question
     items = {"LANE.1": {"title": "first lane", "parent": None}}
     if second_lane:
@@ -77,9 +77,9 @@ PAGE = P.inject(HOST, P.console_block('{"api": "/api"}'))
 
 # The lane board (AB-2/Q4): the REAL page, rendered from the real register, so
 # console.js is held to dashboard.apply_live -- the patcher the shape is built on.
-# It lives in the project that hosts the kit (CONSOLE_KIT_BOARD_DIR, default the
+# It lives in the project that hosts the kit (OVERTURE_BOARD_DIR, default the
 # layout the kit was born in); without it LiveBoardTests skip, by name.
-BOARD_DIR = Path(os.environ.get("CONSOLE_KIT_BOARD_DIR", HERE.parent.parent / "scripts/register"))
+BOARD_DIR = Path(os.environ.get("OVERTURE_BOARD_DIR", HERE.parent.parent / "scripts/register"))
 if (BOARD_DIR / "dashboard.py").is_file():
     sys.path.insert(0, str(BOARD_DIR))
     import dashboard as D  # noqa: E402
@@ -186,10 +186,10 @@ class DockTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not REQUIRED:
-            raise unittest.SkipTest("browser tests run only with CONSOLE_KIT_BROWSER=1")
+            raise unittest.SkipTest("browser tests run only with OVERTURE_BROWSER=1")
         sp = _playwright()
         if sp is None:
-            raise RuntimeError("CONSOLE_KIT_BROWSER=1 but Playwright is not installed")
+            raise RuntimeError("OVERTURE_BROWSER=1 but Playwright is not installed")
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
         cls.url = f"http://127.0.0.1:{cls.server.server_address[1]}/"
@@ -595,7 +595,7 @@ class LiveBoardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if D is None:
-            raise unittest.SkipTest(f"no lane board at {BOARD_DIR} (set CONSOLE_KIT_BOARD_DIR)")
+            raise unittest.SkipTest(f"no lane board at {BOARD_DIR} (set OVERTURE_BOARD_DIR)")
         DockTests.__dict__["setUpClass"].__func__(cls)
 
     tearDownClass = DockTests.__dict__["tearDownClass"]
@@ -765,8 +765,8 @@ class LiveBoardTests(unittest.TestCase):
 def _locked_view() -> dict:
     """/view with LANE.1/Q1 answered and locked, and LANE.1/Q2 still unanswered."""
     import tempfile
-    from console_kit import view as V
-    from console_kit.store import Store
+    from overture import view as V
+    from overture.store import Store
     from test_kit import answer, lock, question
     items = {"LANE.1": {"title": "first lane", "parent": None}}
     with tempfile.TemporaryDirectory() as td:
@@ -780,7 +780,7 @@ def _locked_view() -> dict:
 class AnswerFollowUpTests(unittest.TestCase):
     """0.4.0 (owner, 2026-09-29): a "Follow up" button beside each locked answer.
 
-    CONSOLE_KIT_SHOTS=<dir> also saves the open panel at desktop and phone width.
+    OVERTURE_SHOTS=<dir> also saves the open panel at desktop and phone width.
     """
 
     @classmethod
@@ -840,10 +840,10 @@ class AnswerFollowUpTests(unittest.TestCase):
                     form.get_by_label("Other seat (optional)").fill("Legal")
                     self.assertTrue(form.get_by_label("UX").is_disabled())  # three is the limit
                     form.get_by_label("Note for the seats (optional)").fill("Does B hold on tour?")
-                    if os.environ.get("CONSOLE_KIT_SHOTS"):
+                    if os.environ.get("OVERTURE_SHOTS"):
                         card = page.locator(".ck-question", has=page.locator(".ck-followup"))
                         card.scroll_into_view_if_needed()
-                        card.screenshot(path=str(Path(os.environ["CONSOLE_KIT_SHOTS"]) / f"followup-{kind}-{width}.png"))
+                        card.screenshot(path=str(Path(os.environ["OVERTURE_SHOTS"]) / f"followup-{kind}-{width}.png"))
                     self.assertFalse(page.evaluate("document.documentElement.scrollWidth > innerWidth"))
                     form.get_by_role("button", name="Send follow-up").click()
                     page.wait_for_function("document.querySelectorAll('.ck-followup').length === 0")
@@ -861,8 +861,8 @@ def _open_view(reply: str | None = None, lock_q3: bool = False) -> dict:
 
     `reply` adds an agent reply to that deliberation; `lock_q3` locks Q3 after it was asked."""
     import tempfile
-    from console_kit import view as V
-    from console_kit.store import Store
+    from overture import view as V
+    from overture.store import Store
     from test_kit import answer, fork, lock, message, question
     items = {"LANE.1": {"title": "first lane", "parent": None}}
     with tempfile.TemporaryDirectory() as td:
@@ -1015,9 +1015,9 @@ class DeliberateOpenQuestionTests(unittest.TestCase):
 def _stale_view() -> tuple[dict, dict]:
     """/view and /check with LANE.1/Q1 locked on an excerpt whose text then changed, both built by the kit."""
     import tempfile
-    from console_kit import anchors as A
-    from console_kit import view as V
-    from console_kit.store import Store
+    from overture import anchors as A
+    from overture import view as V
+    from overture.store import Store
     from test_kit import answer, lock, question
     items = {"LANE.1": {"title": "first lane", "parent": None}}
     with tempfile.TemporaryDirectory() as td:
@@ -1038,7 +1038,7 @@ NOGIT = "unavailable (no git in the server)"
 def _seam_closed(test) -> None:
     """Close the git seam for one test, as `server.serve` does for the console's process (CONSOLE-kit/Q23)."""
     from unittest import mock
-    from console_kit import gitseam as G
+    from overture import gitseam as G
     p = mock.patch.object(G, "_OPEN", False)
     p.start()
     test.addCleanup(p.stop)
@@ -1089,9 +1089,9 @@ class WhyStaleTests(unittest.TestCase):
                     self.assertIn("-The console refuses a write from any other origin.", diff)
                     self.assertIn("+The console refuses a write from a different origin.", diff)
                     self.assertFalse(page.evaluate("document.documentElement.scrollWidth > innerWidth"))
-                    if os.environ.get("CONSOLE_KIT_SHOTS"):
+                    if os.environ.get("OVERTURE_SHOTS"):
                         page.locator(".ck-question").first.screenshot(
-                            path=str(Path(os.environ["CONSOLE_KIT_SHOTS"]) / f"why-stale-{kind}-{width}.png"))
+                            path=str(Path(os.environ["OVERTURE_SHOTS"]) / f"why-stale-{kind}-{width}.png"))
                     page.locator("button[aria-label^='Re-lock this answer as it stands']").click()
                     page.get_by_role("button", name="Re-lock as it stands").click()
                     page.wait_for_function("document.querySelectorAll('.ck-confirm').length === 0")
@@ -1106,9 +1106,9 @@ class WhyStaleTests(unittest.TestCase):
         # history", when the server simply never asked git.
         import hashlib
         import tempfile
-        from console_kit import anchors as A
-        from console_kit import view as V
-        from console_kit.store import Store
+        from overture import anchors as A
+        from overture import view as V
+        from overture.store import Store
         from test_kit import answer, lock, question
         _seam_closed(self)
         items = {"LANE.1": {"title": "first lane", "parent": None}}
@@ -1175,10 +1175,10 @@ class LiveConsoleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not REQUIRED:
-            raise unittest.SkipTest("browser tests run only with CONSOLE_KIT_BROWSER=1")
+            raise unittest.SkipTest("browser tests run only with OVERTURE_BROWSER=1")
         sp = _playwright()
         if sp is None:
-            raise RuntimeError("CONSOLE_KIT_BROWSER=1 but Playwright is not installed")
+            raise RuntimeError("OVERTURE_BROWSER=1 but Playwright is not installed")
         cls.pw = sp().start()
 
     @classmethod
@@ -1194,8 +1194,8 @@ class LiveConsoleTests(unittest.TestCase):
         "Use this page" would (Q29): only a published page is served.
         """
         import tempfile
-        from console_kit import items as IT
-        from console_kit import server as SV
+        from overture import items as IT
+        from overture import server as SV
         from test_server import AUD, HOSTNAME, KEY, TEAM, page_body, token
         td = tempfile.mkdtemp(prefix="ck-live-")
         self.addCleanup(lambda: __import__("shutil").rmtree(td, ignore_errors=True))
@@ -1278,7 +1278,7 @@ class LiveConsoleTests(unittest.TestCase):
     def test_before_the_first_items_push_the_inbox_says_why_the_board_is_empty(self):
         # Q24. Catches: a silent blank before the steward's first push (the server runs no adapter, so it has
         # no items until then), the note never rendered, and a note that stays after the push arrives.
-        from console_kit import items as IT
+        from overture import items as IT
         for kind in BROWSERS:
             with self.subTest(browser=kind):
                 url = self.serve(snapshot=True)
@@ -1298,7 +1298,7 @@ class LiveConsoleTests(unittest.TestCase):
         # with innerHTML (the img's onerror would run and mark the body); a link that is not the PR's GitHub URL,
         # or one that opens without noopener; a merged PR above an open one; a question the title names that is
         # not linked to its item; and a PRs view that never re-reads after a live push.
-        from console_kit import prs as PR
+        from overture import prs as PR
         hostile = "<img src=x onerror=\"document.body.setAttribute('data-ran','pr')\"> fixes LANE.1/Q1"
         pr = lambda n, **o: {**{"number": n, "title": f"PR {n}", "state": "open", "draft": False,
                                 "head": f"lane-{n}", "base": "main", "author": "octo",
@@ -1612,9 +1612,9 @@ class LiveConsoleTests(unittest.TestCase):
                     # Q1: evidence, read now, says the cited line changed.
                     page.wait_for_selector(".ck-evidence-state[data-state='changed']")
                     self.assertIn("32 KiB", page.locator(".ck-evidence-row .ck-evidence-lines").text_content())
-                    if os.environ.get("CONSOLE_KIT_SHOTS"):
+                    if os.environ.get("OVERTURE_SHOTS"):
                         page.locator(".ck-panel").screenshot(
-                            path=str(Path(os.environ["CONSOLE_KIT_SHOTS"]) / f"round-step-{kind}-{width}.png"))
+                            path=str(Path(os.environ["OVERTURE_SHOTS"]) / f"round-step-{kind}-{width}.png"))
                     page.keyboard.press("2")  # picks "Record in findings.md"
                     self.assertTrue(page.locator(".ck-round-options input[value='record']").is_checked())
                     page.fill("#ck-round-words", "Record it; the cap moves next quarter.")
@@ -1647,9 +1647,9 @@ class LiveConsoleTests(unittest.TestCase):
                     page.keyboard.press("3")
                     page.get_by_role("button", name="Review all").click()
                     self.assertIn("Leave it", page.locator(".ck-review-row").nth(1).text_content())
-                    if os.environ.get("CONSOLE_KIT_SHOTS"):
+                    if os.environ.get("OVERTURE_SHOTS"):
                         page.locator(".ck-panel").screenshot(
-                            path=str(Path(os.environ["CONSOLE_KIT_SHOTS"]) / f"round-review-{kind}-{width}.png"))
+                            path=str(Path(os.environ["OVERTURE_SHOTS"]) / f"round-review-{kind}-{width}.png"))
                     self.assertFalse(page.evaluate(OVERFLOW))
                     self.assertEqual([b for b in self.bell() if b.get("intent") == "process"], [])
                     page.click(".ck-lock-all")
@@ -1712,7 +1712,7 @@ class LiveConsoleTests(unittest.TestCase):
     def test_a_chat_message_wakes_the_watch_and_the_reply_appears(self):
         # Catches: a chat that is stored but rings nothing (no session would wake), and an
         # agent reply that only shows after a reload.
-        from console_kit import doorbell as D
+        from overture import doorbell as D
         for kind in BROWSERS:
             for width in (1280, 375):
                 with self.subTest(browser=kind, width=width):
@@ -1734,9 +1734,9 @@ class LiveConsoleTests(unittest.TestCase):
                     self.assertIn("Green at abc123.", page.locator(".ck-chat-msg[data-by='agent']").text_content())
                     page.wait_for_function("!document.querySelector('#ck-tab-chat .ck-tab-note')")  # no longer waiting
                     self.assertFalse(page.evaluate(OVERFLOW))
-                    if os.environ.get("CONSOLE_KIT_SHOTS"):
+                    if os.environ.get("OVERTURE_SHOTS"):
                         page.locator(".ck-panel").screenshot(
-                            path=str(Path(os.environ["CONSOLE_KIT_SHOTS"]) / f"chat-{kind}-{width}.png"))
+                            path=str(Path(os.environ["OVERTURE_SHOTS"]) / f"chat-{kind}-{width}.png"))
                     self.assert_not_reloaded(page)
 
     def test_a_named_agent_is_shown_by_name_and_an_unnamed_one_as_before(self):
@@ -1946,9 +1946,9 @@ class LiveConsoleTests(unittest.TestCase):
                 url = self.serve()
                 page = self.page(kind, 1280, url)
                 page.evaluate("window.ConsoleKit.refreshUsage()")
-                from console_kit import __version__
+                from overture import __version__
                 # No usage file: the footer carries the kit version alone, never usage it was not given.
-                self.assertEqual(page.locator(".ck-footer").text_content(), f"console-kit {__version__}")
+                self.assertEqual(page.locator(".ck-footer").text_content(), f"overture {__version__}")
                 d = self.cfg.root
                 write_usage(d)
                 (d / "acct.json").write_text(json.dumps(
@@ -1960,7 +1960,7 @@ class LiveConsoleTests(unittest.TestCase):
                 page.wait_for_selector(".ck-footer")
                 text = page.locator(".ck-footer").text_content()
                 for want in ("5-hour 42% (resets", "7-day 18%", "as of just now", "owner@example.com",
-                             f"console-kit {__version__}"):
+                             f"overture {__version__}"):
                     self.assertIn(want, text)
                 self.assertNotIn("planted", text)
                 self.assertEqual(page.locator(".ck-footer").get_attribute("data-stale"), "false")
@@ -1983,13 +1983,13 @@ class LiveConsoleTests(unittest.TestCase):
         # Owner, 2026-10-01: "version number should be in footer". Catches: a version shown only when the
         # usage footer is on; one typed into console.js rather than read from the server; and one put in
         # as markup.
-        from console_kit import __version__
+        from overture import __version__
         for kind in BROWSERS:
             with self.subTest(browser=kind):
                 url = self.serve()
                 page = self.page(kind, 1280, url)
                 page.wait_for_selector(".ck-footer")
-                self.assertEqual(page.locator(".ck-footer").text_content(), f"console-kit {__version__}")
+                self.assertEqual(page.locator(".ck-footer").text_content(), f"overture {__version__}")
                 self.assertEqual(page.locator(".ck-footer").evaluate("e => e.children.length"), 0)  # text only
                 room = page.evaluate("[parseFloat(getComputedStyle(document.body).paddingBottom),"
                                      " document.querySelector('.ck-footer').offsetHeight]")
@@ -2085,7 +2085,7 @@ class NextStepAndVisualTests(unittest.TestCase):
     def serve(self):
         """LiveConsoleTests.serve, with a project that sets specs_dir and visuals_dir."""
         import tempfile
-        from console_kit import server as SV
+        from overture import server as SV
         from test_server import AUD, HOSTNAME, KEY, TEAM, page_body, token
         td = tempfile.mkdtemp(prefix="ck-p4-")
         self.addCleanup(lambda: __import__("shutil").rmtree(td, ignore_errors=True))
@@ -2093,7 +2093,7 @@ class NextStepAndVisualTests(unittest.TestCase):
         (root / "specs").mkdir()
         (root / "specs/grid.md").write_text("# Grid\n\nA session block holds the cells.\n")
         os.utime(root / "specs/grid.md", (1_600_000_000, 1_600_000_000))   # long before any lock
-        (root / ".console-kit.json").write_text(json.dumps({"specs_dir": "specs/", "visuals_dir": "visuals/"}))
+        (root / ".overture.json").write_text(json.dumps({"specs_dir": "specs/", "visuals_dir": "visuals/"}))
         cfg = SV.Config(root=root, page=None, state=root / "state", adapter=root / "unused.py",
                         team_domain=TEAM, aud=AUD, hostname=HOSTNAME, port=0, project="p4-test")
         console = SV.Console(cfg, _LiveAdapter())
@@ -2127,9 +2127,9 @@ class NextStepAndVisualTests(unittest.TestCase):
         page.wait_for_selector(".ck-panel .ck-tools")
 
     def shot(self, page, name, kind, width):
-        if os.environ.get("CONSOLE_KIT_SHOTS"):
+        if os.environ.get("OVERTURE_SHOTS"):
             page.locator(".ck-panel").screenshot(
-                path=str(Path(os.environ["CONSOLE_KIT_SHOTS"]) / f"{name}-{kind}-{width}.png"))
+                path=str(Path(os.environ["OVERTURE_SHOTS"]) / f"{name}-{kind}-{width}.png"))
 
     def forks(self):
         return [r for r in self.console.store.records() if r["type"] == "message" and r.get("intent") == "fork"]

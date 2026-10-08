@@ -6,7 +6,7 @@ serves: `inject` inserts one marked block before `</body>`, and `strip`
 removes exactly that block. `check` proves that `strip(inject(page)) == page`,
 so nothing the console needs can leak into the gated file.
 
-    python3 tools/console-kit/publish.py check docs/dashboard/index.html
+    python3 tools/overture/publish.py check docs/dashboard/index.html
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-BEGIN = "<!-- BEGIN console-kit (tools/console-kit/publish.py) -->"
-END = "<!-- END console-kit -->"
+BEGIN = "<!-- BEGIN overture (tools/overture/publish.py) -->"
+END = "<!-- END overture -->"
 
 
 class PublishError(Exception):
@@ -32,7 +32,7 @@ def console_block(config_json: str) -> str:
             raise PublishError(f"{name} contains a marker or a closing tag; it would break out of its block")
     safe_cfg = config_json.replace("<", "\\u003c")
     return (f"{BEGIN}\n<style>\n{css}</style>\n"
-            f'<script type="application/json" id="console-kit-config">{safe_cfg}</script>\n'
+            f'<script type="application/json" id="overture-config">{safe_cfg}</script>\n'
             f"<script>\n{js}</script>\n{END}\n")
 
 

@@ -93,6 +93,6 @@ the page loads, with the Inbox button on it.
 | What you see | Likely cause |
 |---|---|
 | Access says you are not allowed | the policy does not include your email |
-| 403 after logging in | the AUD in `.console-kit/console.env` is not this application's |
+| 403 after logging in | the AUD in `.overture/console.env` is not this application's |
 | 502 or 1033 from Cloudflare | the tunnel is not running (`systemctl --user status acme-console-tunnel`) |
 | The hostname shows a different site | DNS was routed without `--config` (section 4) |

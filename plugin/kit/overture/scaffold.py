@@ -32,7 +32,7 @@ from typing import Iterable
 
 # Sections the first-run template includes. Order defines the page's order.
 SECTIONS = ("header", "items", "rollout", "engine", "spec", "footer")
-BOARD_SHAPE = "console-kit/dashboard/1"
+BOARD_SHAPE = "overture/dashboard/1"
 MARK_START = "<!-- scaffold:{name} start -->"
 MARK_END = "<!-- scaffold:{name} end -->"
 BOARD_MARK = "# scaffold:board start"
@@ -224,7 +224,7 @@ def _section_inner(name: str, project_name: str) -> str:
     if name == "footer":
         return (
             '<footer>\n'
-            '  <span data-live="footer_note">Served by console-kit.</span>\n'
+            '  <span data-live="footer_note">Served by overture.</span>\n'
             '</footer>'
         )
     return f"<!-- scaffold: unknown section {name} -->"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for the owner-console kit (`schema`, `store`, `view`, `fold`, `publish`).
+"""Tests for the owner-Overture (`schema`, `store`, `view`, `fold`, `publish`).
 
-    python3 tools/console-kit/test_kit.py
+    python3 tools/overture/test_kit.py
 
 Each test names the wrong implementation it exists to catch, per the project's
 rule: "what would pass this while missing the point?". Every write happens in
@@ -25,19 +25,19 @@ KIT = HERE / "plugin" / "kit"  # the kit ships inside the plugin, so every insta
 sys.path.insert(0, str(KIT))
 # 0.8.3: `watch`, `synced` and the fold read the user's registry for a steward, so no test may
 # ever read (or write) the real one: every test process gets an empty config home of its own.
-if not os.environ.get("CONSOLE_KIT_TEST_CONFIG"):
-    os.environ["CONSOLE_KIT_TEST_CONFIG"] = os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="ck-cfg-")
-os.environ.pop("CONSOLE_KIT_AGENT", None)
+if not os.environ.get("OVERTURE_TEST_CONFIG"):
+    os.environ["OVERTURE_TEST_CONFIG"] = os.environ["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="ck-cfg-")
+os.environ.pop("OVERTURE_AGENT", None)
 # 0.8.4: a test run from inside a named session must not inherit its name, nor write its Bash environment.
-os.environ.pop("CONSOLE_KIT_SESSION", None)
+os.environ.pop("OVERTURE_SESSION", None)
 os.environ.pop("CLAUDE_ENV_FILE", None)
-from console_kit import doorbell as D  # noqa: E402
-from console_kit import registry as R  # noqa: E402
-from console_kit import fold as F  # noqa: E402
-from console_kit import publish as P  # noqa: E402
-from console_kit import schema as S  # noqa: E402
-from console_kit import view as V  # noqa: E402
-from console_kit.store import Store, StoreError  # noqa: E402
+from overture import doorbell as D  # noqa: E402
+from overture import registry as R  # noqa: E402
+from overture import fold as F  # noqa: E402
+from overture import publish as P  # noqa: E402
+from overture import schema as S  # noqa: E402
+from overture import view as V  # noqa: E402
+from overture.store import Store, StoreError  # noqa: E402
 
 ITEMS = {
     "LANE": {"title": "a lane", "parent": None, "status": "open"},
@@ -352,7 +352,7 @@ class FakeAdapter:
 class FoldTests(Tmp):
     def test_fold_paths_must_stay_inside_the_project_before_any_import(self):
         # PR #171 security re-review HIGH: `--adapter` is imported and run, and its value
-        # reaches the command from the repository's `.console-kit.json`. Catches: a
+        # reaches the command from the repository's `.overture.json`. Catches: a
         # containment rule living only in skill prose, and a check made after the import.
         marker = self.dir / "ran"
         outside = self.dir / "evil.py"
@@ -558,13 +558,13 @@ class PublishTests(unittest.TestCase):
 
     def test_config_cannot_close_its_script_tag(self):
         # Catches: a config string that ends the JSON <script> and runs HTML.
-        if not (KIT / "console_kit" / "console.js").exists():
+        if not (KIT / "overture" / "console.js").exists():
             self.skipTest("console.js not written yet")
         block = P.console_block('{"x": "</script><script>alert(1)</script>"}')
         self.assertNotIn("</script><script>alert", block)
 
     def test_shipped_assets_do_not_break_out_of_their_block(self):
-        if not (KIT / "console_kit" / "console.js").exists():
+        if not (KIT / "overture" / "console.js").exists():
             self.skipTest("console.js not written yet")
         P.console_block("{}")  # raises PublishError if either file contains a closing tag or a marker
 
@@ -572,8 +572,8 @@ class PublishTests(unittest.TestCase):
         # AB-2/Q2: console.js decides docked-or-overlay from DOCK_QUERY and
         # console.css styles the dock under its own @media. If they drift, a
         # width between them gets the strip with no room, or neither form.
-        js = (KIT / "console_kit" / "console.js").read_text()
-        css = (KIT / "console_kit" / "console.css").read_text()
+        js = (KIT / "overture" / "console.js").read_text()
+        css = (KIT / "overture" / "console.css").read_text()
         m = re.search(r"DOCK_QUERY = '\(min-width: (\d+)px\)'", js)
         self.assertIsNotNone(m, "console.js no longer declares DOCK_QUERY")
         widths = set(re.findall(r"@media \(min-width: (\d+)px\)", css))
@@ -652,7 +652,7 @@ class ForkStoreTests(Tmp):
 
     def test_a_fork_writes_at_most_five_questions(self):
         # Catches: an uncapped fork, the cost the owner's "Panel of 4, capped" ruled out.
-        from console_kit.store import MAX_FORK_QUESTIONS
+        from overture.store import MAX_FORK_QUESTIONS
         st = self.store()
         f = st.append(fork())
         for n in range(1, MAX_FORK_QUESTIONS + 1):
@@ -984,7 +984,7 @@ class RosterStoreTests(Tmp):
     def test_a_deliberation_has_at_most_four_rounds(self):
         # PR #170 security review, LOW: a follow-up is itself a fork, so without a cap the
         # chain (and the agent runs it starts) had no bound.
-        from console_kit.store import MAX_ROUNDS
+        from overture.store import MAX_ROUNDS
         st = self.store()
         head = st.append(fork())
         for _ in range(MAX_ROUNDS - 1):
@@ -1236,7 +1236,7 @@ class DoorbellTests(Tmp):
         # AC (§7.5 F3) and its counter-check: a watch that returns on every doorbell line
         # passes a happy-path test and must fail here, where answers, locks and plain
         # messages arrive first and must not wake the session.
-        from console_kit import doorbell as D
+        from overture import doorbell as D
         bell = self.dir / "inbox.jsonl"
         self.ring(1, type="answer", qid="LANE.1/Q1")
         self.ring(2, type="lock", qid="LANE.1/Q1")
@@ -1250,21 +1250,21 @@ class DoorbellTests(Tmp):
 
     def test_a_signal_sent_before_the_watch_started_returns_at_once(self):
         # AC (§7.5 F3): no session watching when the owner pressed the button must not lose it.
-        from console_kit import doorbell as D
+        from overture import doorbell as D
         self.ring(7, intent="process")
         sleep = self.bounded(limit=0)
         self.assertEqual([g["seq"] for g in D.watch(self.dir / "inbox.jsonl", 0, sleep=sleep)], [7])
         self.assertEqual(sleep.calls, [])
 
     def test_a_signal_at_or_before_the_cursor_does_not_wake(self):
-        from console_kit import doorbell as D
+        from overture import doorbell as D
         self.ring(7, intent="process")
         clock = iter([0, 1, 2, 3, 99])
         self.assertEqual(D.watch(self.dir / "inbox.jsonl", 7, poll=0, sleep=lambda _: None,
                                  timeout=5, clock=lambda: next(clock)), [])
 
     def test_a_torn_or_damaged_line_is_skipped_not_guessed(self):
-        from console_kit import doorbell as D
+        from overture import doorbell as D
         bell = self.dir / "inbox.jsonl"
         self.ring(1, intent="process")
         with open(bell, "a", encoding="utf-8") as fh:
@@ -1279,7 +1279,7 @@ class DoorbellTests(Tmp):
 
     def test_the_agent_cursor_only_moves_forward(self):
         # Catches: `synced` run late with an older seq, which would re-offer processed signals.
-        from console_kit import doorbell as D
+        from overture import doorbell as D
         self.assertEqual(D.read_cursor(self.dir), 0)
         self.assertEqual(D.write_cursor(self.dir, 9), 9)
         self.assertEqual(D.write_cursor(self.dir, 4), 9)
@@ -1423,7 +1423,7 @@ class SessionStartHookTests(Tmp):
 
     def register(self, entry):
         """Write the USER's registry, the only thing that switches the hook on (§7.7)."""
-        p = self.config_home / "console-kit" / "projects.json"
+        p = self.config_home / "overture" / "projects.json"
         p.parent.mkdir(parents=True, exist_ok=True)
         body = entry if isinstance(entry, str) else json.dumps(
             {"projects": {os.path.realpath(self.project): entry}})
@@ -1446,24 +1446,24 @@ class SessionStartHookTests(Tmp):
 
     def test_an_unregistered_project_hears_nothing_whatever_it_carries(self):
         # §7.7, the PR #171 security review's CRITICAL. A hostile clone ships a
-        # .console-kit.json naming its own kit and state, its own agent.py, and a fake
+        # .overture.json naming its own kit and state, its own agent.py, and a fake
         # doorbell asking to be processed. Catches: any hook that takes the paths it
         # reports (and a session then runs) from the repository instead of the user.
         payload = self.project / "payload"
-        (payload / "console_kit").mkdir(parents=True)
+        (payload / "overture").mkdir(parents=True)
         (payload / "agent.py").write_text("raise SystemExit('attacker code')\n")
         (payload / "inbox.jsonl").write_text(json.dumps(
             {"seq": 1, "type": "message", "ts": "t", "item": "AB", "intent": "process"}) + "\n")
-        (self.project / ".console-kit.json").write_text(json.dumps({"state": "payload", "kit": "payload"}))
+        (self.project / ".overture.json").write_text(json.dumps({"state": "payload", "kit": "payload"}))
         self.assertIsNone(self.run_hook())
         self.register({"state": str(self.dir / "elsewhere"), "kit": str(KIT)})  # registered, but not this root
-        other = self.config_home / "console-kit" / "projects.json"
+        other = self.config_home / "overture" / "projects.json"
         other.write_text(json.dumps({"projects": {"/some/other/project": {"state": str(payload), "kit": str(payload)}}}))
         self.assertIsNone(self.run_hook())
 
     def test_the_hook_reports_only_paths_the_user_registered(self):
         cfg = self.ring({"seq": 1, "type": "message", "ts": "t", "item": "AB", "intent": "process"})
-        (self.project / ".console-kit.json").write_text(json.dumps({"state": "/tmp/decoy", "kit": "/tmp/decoy"}))
+        (self.project / ".overture.json").write_text(json.dumps({"state": "/tmp/decoy", "kit": "/tmp/decoy"}))
         note = self.run_hook(cfg)
         self.assertIn(f"python3 {KIT / 'agent.py'} --state {cfg['state']}", note)
         self.assertNotIn("decoy", note)
@@ -1544,10 +1544,10 @@ class SessionStartHookTests(Tmp):
     def test_the_hook_runs_no_code_from_the_project(self):
         # Catches: a hook that imports the kit's modules, even from a registered kit path.
         kit = self.dir / "hostile"
-        (kit / "console_kit").mkdir(parents=True)
+        (kit / "overture").mkdir(parents=True)
         marker = self.dir / "ran"
         for name in ("__init__.py", "doorbell.py", "registry.py"):
-            (kit / "console_kit" / name).write_text(f"open({str(marker)!r}, 'w').close()\n")
+            (kit / "overture" / name).write_text(f"open({str(marker)!r}, 'w').close()\n")
         cfg = self.ring({"seq": 1, "type": "message", "ts": "t", "item": "AB", "intent": "process"})
         note = self.run_hook(dict(cfg, kit=str(kit)))
         self.assertIn("- seq 1 ", note)
@@ -1620,7 +1620,7 @@ class SessionStartHookTests(Tmp):
             self.assertEqual(getattr(hook, name), getattr(R, name), name)
         self.assertEqual(hook.PLAIN_PATH.pattern, R.PLAIN_PATH.pattern)
         self.assertEqual(hook.REGISTRY_FILE, R.FILE)
-        from console_kit import names as N
+        from overture import names as N
         self.assertEqual((hook.AGENT_NAME.pattern, hook.MAX_NAME, hook.RESERVED, hook.AGENT_ENV),
                          (N.NAME.pattern, N.MAX_NAME, N.RESERVED, N.ENV))
         good = {"state": str(self.dir / "s"), "kit": str(KIT)}
@@ -1628,7 +1628,7 @@ class SessionStartHookTests(Tmp):
                  dict(good, steward="agent-5"), dict(good, steward="Agent 5"), dict(good, steward="agent"),
                  dict(good, steward="agent-5\n"), dict(good, steward=5), dict(good, steward=None),
                  dict(good, steward="agent-5", x=1)]  # 0.8.3: an optional steward, held to the name rule
-        reg = self.config_home / "console-kit" / "projects.json"
+        reg = self.config_home / "overture" / "projects.json"
         reg.parent.mkdir(parents=True)
         env_before = os.environ.get("XDG_CONFIG_HOME")
         os.environ["XDG_CONFIG_HOME"] = str(self.config_home)
@@ -1688,7 +1688,7 @@ class RegistryTests(Tmp):
         agent = [sys.executable, str(KIT / "agent.py"), "--state", str(state), "register", "--project"]
         r = subprocess.run(agent + [str(project)], env=env, capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
-        reg = json.loads((self.dir / "cfg" / "console-kit" / "projects.json").read_text())
+        reg = json.loads((self.dir / "cfg" / "overture" / "projects.json").read_text())
         self.assertEqual(reg["projects"][os.path.realpath(project)],
                          {"state": os.path.realpath(state), "kit": str(KIT)})
         odd = self.dir / "pro`j"
@@ -1717,13 +1717,13 @@ class _Steward(Tmp):
         self.project.mkdir()
         self.state = self.dir / "state"
         self.state.mkdir()
-        self.reg = self.cfg_home / "console-kit" / "projects.json"
+        self.reg = self.cfg_home / "overture" / "projects.json"
 
     def env(self, agent=None, **extra):
-        e = {k: v for k, v in os.environ.items() if k != "CONSOLE_KIT_AGENT"}
+        e = {k: v for k, v in os.environ.items() if k != "OVERTURE_AGENT"}
         e["XDG_CONFIG_HOME"] = str(self.cfg_home)
         if agent is not None:
-            e["CONSOLE_KIT_AGENT"] = agent
+            e["OVERTURE_AGENT"] = agent
         e.update(extra)
         return e
 
@@ -1820,10 +1820,10 @@ class StewardRegistryTests(_Steward):
         self.assertIn("agent-6", err)
 
     def test_the_repository_cannot_set_a_steward(self):
-        # Registry trust, as for kit and state. Catches: a steward read from .console-kit.json,
+        # Registry trust, as for kit and state. Catches: a steward read from .overture.json,
         # which would let a clone lock the owner's own sessions out (or name itself steward).
         self.register()
-        (self.project / ".console-kit.json").write_text(json.dumps({"steward": "agent-9"}))
+        (self.project / ".overture.json").write_text(json.dumps({"steward": "agent-9"}))
         self.assertIsNone(R.steward_for_state(self.state, path=self.reg))
         rc, out, err = self.agent("watch", "--timeout", "0.1", agent="agent-1")
         self.assertEqual(rc, 3, out + err)      # timed out waiting: not refused
@@ -1925,29 +1925,29 @@ class FoldLockPathTests(_Steward):
                            "--ledger", rel("folded.txt"), "--adapter", rel("adapter.py"), "--dry-run", agent=agent)
 
     def test_an_ancestor_root_does_not_escape_the_lock(self):
-        # Catches: a lock looked up by exact --root, so `--root /p` folds into the registered /p/console-kit.
-        inner = self.project / "console-kit"
+        # Catches: a lock looked up by exact --root, so `--root /p` folds into the registered /p/overture.
+        inner = self.project / "overture"
         inner.mkdir()
         self.register("--steward", "agent-5", project=inner)
-        rc, _, err = self.fold(self.project, "console-kit", agent="agent-6")
+        rc, _, err = self.fold(self.project, "overture", agent="agent-6")
         self.assertEqual(rc, 1, err)
         self.assertIn("steward, agent-5", err)
         self.assertFalse((inner / "folded.txt").exists())
-        rc, _, err = self.fold(self.project, "console-kit", agent=None)
+        rc, _, err = self.fold(self.project, "overture", agent=None)
         self.assertEqual(rc, 1, err)
         other = self.dir / "other-state"
         other.mkdir()
         (other / "store.jsonl").write_text("")
         rc, _, err = self.run_py(KIT / "fold.py", "--root", str(self.project), "export", "--store",
-                                 str(other / "store.jsonl"), "--out", "console-kit/locked", agent="agent-6")
+                                 str(other / "store.jsonl"), "--out", "overture/locked", agent="agent-6")
         self.assertEqual(rc, 1, err)                     # --out lands in the steward's project
         self.assertIn("steward, agent-5", err)
 
     def test_the_steward_is_allowed_through_an_ancestor_root(self):
-        inner = self.project / "console-kit"
+        inner = self.project / "overture"
         inner.mkdir()
         self.register("--steward", "agent-5", project=inner)
-        rc, out, err = self.fold(self.project, "console-kit", agent="agent-5")
+        rc, out, err = self.fold(self.project, "overture", agent="agent-5")
         self.assertEqual(rc, 0, out + err)
 
     def test_a_path_reaching_into_another_registered_project_is_locked_by_that_project(self):
@@ -2049,7 +2049,7 @@ class QuestionHookTests(_Steward):
 
     def test_an_unregistered_project_is_allowed(self):
         self.register("--steward", "agent-5", project=self.dir / "state")  # some other project is registered
-        (self.project / ".console-kit.json").write_text(json.dumps({"steward": "agent-9"}))
+        (self.project / ".overture.json").write_text(json.dumps({"steward": "agent-9"}))
         rc, out, err = self.hook(agent="agent-6")
         self.assertEqual((rc, out.strip()), (0, ""), err)
 
@@ -2120,10 +2120,10 @@ class TrailingNewlineTests(unittest.TestCase):
 
     def test_no_shape_accepts_a_trailing_newline(self):
         import importlib.util
-        from console_kit import anchors as A
-        from console_kit import names as N
-        from console_kit import projectcfg as PC
-        from console_kit import visuals as VIS
+        from overture import anchors as A
+        from overture import names as N
+        from overture import projectcfg as PC
+        from overture import visuals as VIS
         spec = importlib.util.spec_from_file_location("session_start", HERE / "plugin" / "hooks" / "session_start.py")
         hook = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(hook)
@@ -2166,7 +2166,7 @@ class BundleTests(Tmp):
         return V.build(st, ITEMS, V.make_evaluator(self.dir, {}))
 
     def test_the_bundle_carries_the_scope_every_answer_and_earlier_rounds(self):
-        from console_kit import bundle as B
+        from overture import bundle as B
         st = self.store()
         f = st.append(fork(item="LANE.1", text="Deliberate the full round."))
         st.append(question(qid="LANE.1.a/Q1", forked_from=f["id"], star_by="panel"))
@@ -2193,7 +2193,7 @@ class BundleTests(Tmp):
         # 0.4.0. Catches: a bundle that only adds the qid to the header, so the seats read
         # the item first and find the answer (if at all) inside the sheet, without the
         # owner's earlier words or which answer holds the lock.
-        from console_kit import bundle as B
+        from overture import bundle as B
         st = self.store()
         st.append(question(qid="LANE.1/Q1"))
         st.append(answer(qid="LANE.1/Q1", picks=("a",), own_text="first thought"))
@@ -2218,7 +2218,7 @@ class BundleTests(Tmp):
         # Owner ruling build_reply. Catches: a bundle that calls an open question a locked
         # answer (so the seats review a decision nobody made), and one that never tells the
         # session the round ends in one reply, not an answer or a lock.
-        from console_kit import bundle as B
+        from overture import bundle as B
         st = self.store()
         st.append(question(qid="LANE.1/Q1"))
         f = st.append(about(qid="LANE.1/Q1", roles=("analyst",), text="Which survives?"))
@@ -2237,7 +2237,7 @@ class BundleTests(Tmp):
 
     def test_a_bundle_over_the_cap_is_refused_never_trimmed(self):
         # D14. Catches: a silent truncation that hands the committee a partial picture.
-        from console_kit import bundle as B
+        from overture import bundle as B
         st = self.store()
         f = st.append(fork(text="x" * 5000))
         with self.assertRaisesRegex(B.BundleTooLarge, "refused, not trimmed"):
@@ -2249,7 +2249,7 @@ class BundleTests(Tmp):
     def test_the_refusal_names_the_largest_parts(self):
         # §6.3: "refused by name, listing its largest parts". Catches: a refusal that
         # says only "too big", leaving the owner to guess which item to narrow to.
-        from console_kit import bundle as B
+        from overture import bundle as B
         st = self.store()
         f = st.append(fork(item="LANE.1", text="Deliberate."))
         st.append(message(item="LANE.1.a", text="y" * 3000))
@@ -2260,7 +2260,7 @@ class BundleTests(Tmp):
     def test_the_cap_counts_bytes_not_characters(self):
         # §6.6 caps the bundle in KiB. Catches: a check on len(text), which lets a
         # bundle of multi-byte text through at up to four times the cap.
-        from console_kit import bundle as B
+        from overture import bundle as B
         st = self.store()
         f = st.append(fork(text="€" * 900))  # three bytes each in UTF-8
         text = B.fork_context(self._view(st), ITEMS, f["id"])
@@ -2356,7 +2356,7 @@ class AnswersSheetTests(Tmp):
 
 # -- 0.5.0: anchors on the lock, excerpt conditions, why stale, reanchor ----------------
 
-from console_kit import anchors as A  # noqa: E402
+from overture import anchors as A  # noqa: E402
 
 SPEC = "# Spec\n\nIntro line.\n\nThe console refuses a write from any other origin.\nIt says why.\n\nTail.\n"
 CITED = "The console refuses a write from any other origin.\nIt says why."
@@ -2693,7 +2693,7 @@ class OlderKitRefusesTests(unittest.TestCase):
         # Catches: a new field or intent a 0.6.0 kit would silently accept or drop, which would
         # let a rollback lose the owner's chat or a question's evidence without a word.
         try:
-            src = subprocess.run(["git", "show", "v0.6.0:plugin/kit/console_kit/schema.py"], cwd=HERE,
+            src = subprocess.run(["git", "show", "v0.6.0:plugin/kit/overture/schema.py"], cwd=HERE,
                                  capture_output=True, text=True, timeout=20, check=True).stdout
         except (OSError, subprocess.SubprocessError):
             self.skipTest("the v0.6.0 tag is not in this checkout")
@@ -2820,7 +2820,7 @@ class TreeReadLimitTests(Tmp):
         # Catches: a Tree that reads a whole huge file before truncating its output, and one
         # that reads a secrets file for a condition written before the ask-time rule.
         from unittest import mock
-        from console_kit import anchors as A
+        from overture import anchors as A
         (self.dir / ".env").write_text("TOKEN=abc123 secret value\n")
         big = self.dir / "big.log"
         with open(big, "wb") as fh:
@@ -3026,7 +3026,7 @@ class OlderKit070RefusesTests(Tmp):
         dest = self.dir / "kit070"
         dest.mkdir()
         try:
-            tar = subprocess.run(["git", "archive", "v0.7.0", "plugin/kit/console_kit"], cwd=HERE,
+            tar = subprocess.run(["git", "archive", "v0.7.0", "plugin/kit/overture"], cwd=HERE,
                                  capture_output=True, timeout=30, check=True).stdout
         except (OSError, subprocess.SubprocessError):
             self.skipTest("the v0.7.0 tag is not in this checkout")
@@ -3076,7 +3076,7 @@ class OlderKit070RefusesTests(Tmp):
     def test_the_070_schema_names_each_new_kind(self):
         # The transcript's own refusal, which the store test reaches only after the roar.
         try:
-            src = subprocess.run(["git", "show", "v0.7.0:plugin/kit/console_kit/schema.py"], cwd=HERE,
+            src = subprocess.run(["git", "show", "v0.7.0:plugin/kit/overture/schema.py"], cwd=HERE,
                                  capture_output=True, text=True, timeout=20, check=True).stdout
         except (OSError, subprocess.SubprocessError):
             self.skipTest("the v0.7.0 tag is not in this checkout")
@@ -3091,7 +3091,7 @@ class OlderKit070RefusesTests(Tmp):
 
     def open_with(self, kit: Path) -> str:
         code = ("import sys; sys.path.insert(0, sys.argv[1]);\n"
-                "from console_kit.store import Store, StoreError\n"
+                "from overture.store import Store, StoreError\n"
                 "try:\n    Store(__import__('pathlib').Path(sys.argv[2]))\n    print('OPENED')\n"
                 "except StoreError as e:\n    print(e)\n")
         r = subprocess.run([sys.executable, "-c", code, str(kit), str(self.path)], capture_output=True, text=True,
@@ -3107,7 +3107,7 @@ class TermHeuristicTests(unittest.TestCase):
         # Owner ruling "Any backtick or Capital ★". Catches: single Capitalised words ignored
         # (the old two-word rule), a sentence-start "The"/"Use" read as a term, and a backticked
         # span counted twice (once whole, once for a capital inside it).
-        from console_kit import tags as T
+        from overture import tags as T
         got = T.terms("Use the `ZoneMaster` and a Session Block. The Grid stays. We Keep Going Places. "
                       "lower case idea, API Key, `ab`, Option B, `the Goal`")
         # "Use", "The", "We", "Keep", "Option" are in STOPLIST; `ab` is too short; "API" and "B"
@@ -3126,7 +3126,7 @@ class TagTests(Tmp):
 
     def setUp(self):
         super().setUp()
-        from console_kit import tags as T
+        from overture import tags as T
         self.T = T
         T._INDEXES.clear()
         T._GITS.clear()
@@ -3261,14 +3261,14 @@ class TagTests(Tmp):
 
 class ProjectConfigTests(Tmp):
     def load(self, doc):
-        from console_kit import projectcfg as PC
-        (self.dir / ".console-kit.json").write_text(json.dumps(doc))
+        from overture import projectcfg as PC
+        (self.dir / ".overture.json").write_text(json.dumps(doc))
         return PC.load(self.dir)
 
     def test_dirs_are_jailed_and_refused_by_name(self):
         # Catches: a visuals_dir that writes outside the project, into .git, over the root's own
         # files ("." would regenerate an INDEX.md at the top), or through a symlink.
-        from console_kit import projectcfg as PC
+        from overture import projectcfg as PC
         self.assertEqual(self.load({}).specs_dir, None)
         good = self.load({"specs_dir": "architect/40-specs/", "visuals_dir": "architect/visuals",
                           "next_step": {"refine": "refine", "drill": "drill"}})
@@ -3294,12 +3294,12 @@ class ProjectConfigTests(Tmp):
         # Review MEDIUM: the repository names the skill, so it must not also supply it. Catches: a
         # lookup that finds the repository's own .claude/skills/<name>, one that follows a user-level
         # symlink back into the repository, and a CLI that says "ok" for a skill nobody installed.
-        from console_kit import projectcfg as PC
+        from overture import projectcfg as PC
         user = self.dir / "userconfig"
         proj = self.dir / "proj"
         (proj / ".claude/skills/refine").mkdir(parents=True)
         (proj / ".claude/skills/refine/SKILL.md").write_text("repo-supplied: do something else\n")
-        (proj / ".console-kit.json").write_text(json.dumps({"next_step": {"refine": "refine", "drill": "tool:dig"}}))
+        (proj / ".overture.json").write_text(json.dumps({"next_step": {"refine": "refine", "drill": "tool:dig"}}))
         with self.assertRaisesRegex(PC.ConfigError, "not an installed user skill"):
             PC.resolve_skill("refine", proj, user)
         (user / "skills/refine").mkdir(parents=True)
@@ -3311,13 +3311,13 @@ class ProjectConfigTests(Tmp):
         self.assertEqual(PC.resolve_skill("tool:dig", proj, user), (plug / "SKILL.md").resolve())
         # The onboarding default names the plugin's own skill; the repository's same-named folder
         # still never stands in for it, and the user's plain `refine` is still what `refine` means.
-        ours = user / "plugins/cache/console-kit/console-kit/0.0.0/skills/refine"
+        ours = user / "plugins/cache/overture/overture/0.0.0/skills/refine"
         ours.mkdir(parents=True)
         (ours / "SKILL.md").write_text("the plugin's refine\n")
-        self.assertEqual(PC.resolve_skill("console-kit:refine", proj, user), (ours / "SKILL.md").resolve())
+        self.assertEqual(PC.resolve_skill("overture:refine", proj, user), (ours / "SKILL.md").resolve())
         self.assertEqual(PC.resolve_skill("refine", proj, user), (user / "skills/refine/SKILL.md").resolve())
         with self.assertRaisesRegex(PC.ConfigError, "not an installed user skill"):
-            PC.resolve_skill("console-kit:drill", proj, user)
+            PC.resolve_skill("overture:drill", proj, user)
         (user / "skills/sneaky").symlink_to(proj / ".claude/skills/refine")
         with self.assertRaisesRegex(PC.ConfigError, "resolves into the project"):
             PC.resolve_skill("sneaky", proj, user)
@@ -3433,7 +3433,7 @@ class VisualMarkdownTests(Tmp):
     def test_a_hostile_title_is_inert_in_the_index_and_the_doc(self):
         # Catches: escaping only "|" (the old code): the title became a javascript: link and, in the
         # doc, a heading carrying a second "# h" and an inline <b>.
-        from console_kit import visuals as VIS
+        from overture import visuals as VIS
         rec = {"item": "LANE.1", "seq": 1, "ts": "2026-09-30T00:00:00Z", "title": self.EVIL, "format": "html",
                "request": "a" * 24, "sha256": "b" * 64,
                "path": "visuals/LANE.1/aaaaaaaa-bbbbbbbbbbbb.html", "doc_path": "visuals/LANE.1/aaaaaaaa-bbbbbbbbbbbb.md"}
@@ -3469,7 +3469,7 @@ class VisualFileTests(Tmp):
     """0.8.1: visuals are stored under STATE/visuals/ and exported into an agent's worktree."""
 
     def rec(self, content=b"<p>hi</p>", **over):
-        from console_kit import visuals as VIS
+        from overture import visuals as VIS
         sha = hashlib.sha256(content).hexdigest()
         rel, doc = VIS.paths("LANE.1", "a" * 24, "html", sha)
         r = {"id": "c" * 24, "seq": 1, "ts": "2026-09-30T00:00:00Z", "item": "LANE.1", "request": "a" * 24,
@@ -3479,14 +3479,14 @@ class VisualFileTests(Tmp):
         return r
 
     def doc(self, r):
-        from console_kit import visuals as VIS
+        from overture import visuals as VIS
         return VIS.doc_markdown(r["title"], r["item"], r["format"], r["path"].rsplit("/", 1)[1], r["text"], "draw")
 
     def test_the_store_is_under_state_jailed_idempotent_and_reads_check_the_hash(self):
         # Catches: an overwrite of a different file, a write or read through a symlink (the file
         # or a folder on the way), a file shown after someone edited it, and a record whose path
         # names a file other than the one its request and hash give.
-        from console_kit import visuals as VIS
+        from overture import visuals as VIS
         state = self.dir / "state"
         state.mkdir(mode=0o700)           # the server makes STATE before anything is stored
         r = self.rec()
@@ -3524,7 +3524,7 @@ class VisualFileTests(Tmp):
 
     def test_a_0_8_0_record_names_where_its_file_was_and_reads_once_moved(self):
         # Catches: a 0.8.1 server that silently loses a 0.8.0 visual, or reads it from the checkout.
-        from console_kit import visuals as VIS
+        from overture import visuals as VIS
         state = self.dir / "state"
         old = self.rec(path="architect/visuals/LANE.1/aaaaaaaa-" + self.rec()["sha256"][:12] + ".html",
                        doc_path="architect/visuals/LANE.1/aaaaaaaa-" + self.rec()["sha256"][:12] + ".md")
@@ -3539,7 +3539,7 @@ class VisualFileTests(Tmp):
     def test_export_writes_skips_identical_refuses_different_and_keeps_a_hand_index(self):
         # Catches: an export that overwrites a file it did not write, one that is not idempotent,
         # one that follows a symlink out of the destination, and an INDEX.md someone wrote clobbered.
-        from console_kit import visuals as VIS
+        from overture import visuals as VIS
         dest = self.dir / "wt"
         dest.mkdir()
         r = self.rec()
@@ -3594,7 +3594,7 @@ class VisualFileTests(Tmp):
         # folder swapped for a symlink between the check and the write sends the visual and its doc
         # wherever the symlink points (v0.8.1 writes both into `outside`).
         from unittest import mock
-        from console_kit import visuals as VIS
+        from overture import visuals as VIS
         state, outside = self.dir / "state", self.dir / "outside"
         state.mkdir(mode=0o700)
         outside.mkdir()
@@ -3619,7 +3619,7 @@ class VisualFileTests(Tmp):
         # symlink just before a mkdir creates the folder outside the state (v0.8.1 makes
         # outside/LANE.1, then refuses: the folder is already there).
         from unittest import mock
-        from console_kit import visuals as VIS
+        from overture import visuals as VIS
         state, outside = self.dir / "state", self.dir / "outside"
         state.mkdir(mode=0o700)
         outside.mkdir()
@@ -3636,7 +3636,7 @@ class VisualFileTests(Tmp):
 
     def test_a_symlink_already_in_the_walk_is_refused_by_name(self):
         # Keeps every 0.8.1 refusal: a symlinked folder on the way, and a file where a folder must be.
-        from console_kit import visuals as VIS
+        from overture import visuals as VIS
         state, outside = self.dir / "state", self.dir / "outside"
         state.mkdir(mode=0o700)
         outside.mkdir()
@@ -3669,7 +3669,7 @@ class GitReadOnlyTests(Tmp):
         # Catches: a plain `git status` in the service checkout, which refreshes the index's stat
         # cache and rewrites .git/index (a write into the tree the deploy fast-forwards), and a
         # fix that sets only one of the two (a git started by an alias or hook reads the env).
-        from console_kit import tags as T
+        from overture import tags as T
         g = T._Git(self.dir)
         seen = self.calls(lambda: (g.head(), g.edited_at("specs/a.md", (1, 1), "f" * 40)))
         seen += self.calls(lambda: A.History(self.dir).versions("specs/a.md"))
@@ -3681,7 +3681,7 @@ class GitReadOnlyTests(Tmp):
 
     def test_git_status_through_tags_leaves_the_index_untouched(self):
         # Catches the same, measured: with a stale stat cache, plain `git status` rewrites .git/index.
-        from console_kit import tags as T
+        from overture import tags as T
         if subprocess.run(["git", "--version"], capture_output=True).returncode != 0:
             self.skipTest("git is not installed")
         env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
@@ -3703,7 +3703,7 @@ class AgentNamesFileTests(Tmp):
     """0.8.2: the names sidecar beside the store (names.py)."""
 
     def test_a_name_is_a_short_plain_token_and_nothing_else(self):
-        from console_kit import names as N
+        from overture import names as N
         for good in ("agent-6", "a", "review-bot", "x" * 32, "a1-b2-c3"):
             self.assertIsNone(N.problem(good), good)
         for bad in ("Agent-6", "agent 6", "agent_6", "6agent", "-a", "a-", "a--b", "x" * 33, "a\n", "",
@@ -3713,7 +3713,7 @@ class AgentNamesFileTests(Tmp):
 
     def test_the_first_name_stays_and_a_bad_file_is_refused_by_line(self):
         # Catches: a retry that renames a record, and a hand-edited names file read as if it were good.
-        from console_kit import names as N
+        from overture import names as N
         names = N.Names(self.dir)
         self.assertTrue(names.add("a" * 24, "agent-6"))
         self.assertFalse(names.add("a" * 24, "agent-7"))
@@ -3733,7 +3733,7 @@ class AgentNamesFileTests(Tmp):
                     N.Names(self.dir)
 
     def test_named_returns_the_record_itself_when_unnamed(self):
-        from console_kit import names as N
+        from overture import names as N
         r = {"id": "d" * 24, "type": "message"}
         self.assertIs(N.named(r, {}), r)
         self.assertIs(N.named(r, None), r)
@@ -3741,7 +3741,7 @@ class AgentNamesFileTests(Tmp):
         self.assertNotIn("agent", r)                   # the store's record is never changed
 
 
-# -- 0.8.4: `/console-kit:as NAME` names the session (owner-approved) --------------------------
+# -- 0.8.4: `/overture:as NAME` names the session (owner-approved) --------------------------
 
 
 SID5, SID6 = "0120efbe-7f88-40cf-831b-b18e5a678fdf", "1e5d962e-a2b8-43ad-8a1f-afd0be23414c"
@@ -3756,7 +3756,7 @@ class SessionNameTests(_Steward):
 
     def env(self, agent=None, **extra):
         e = super().env(agent, **extra)
-        for k in ("CONSOLE_KIT_SESSION", "CLAUDE_ENV_FILE"):
+        for k in ("OVERTURE_SESSION", "CLAUDE_ENV_FILE"):
             if k not in extra:
                 e.pop(k, None)
         return e
@@ -3818,18 +3818,18 @@ class SessionNameTests(_Steward):
 
     def test_a_valid_name_is_recorded_for_this_session_and_nothing_else_is(self):
         self.register("--steward", "agent-5")
-        for other in ("hello", "please run /console-kit:as agent-5", "/console-kit:asagent-5", "/console-kit:ask x"):
+        for other in ("hello", "please run /overture:as agent-5", "/overture:asagent-5", "/overture:ask x"):
             with self.subTest(prompt=other):
                 self.assertIsNone(self.prompt(other))
         self.assertFalse(self.file.exists())           # an ordinary prompt writes nothing
-        note = self.prompt("/console-kit:as agent-5")
+        note = self.prompt("/overture:as agent-5")
         self.assertIn("this session is now agent-5", note)
         self.assertIn("this session is the steward", note)
         self.assertEqual([(r["session"], r["agent"]) for r in self.lines()], [(SID5, "agent-5")])
         self.assertRegex(self.lines()[0]["ts"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\Z")
-        self.assertIn("already agent-5", self.prompt("  /console-kit:as agent-5 \n"))
+        self.assertIn("already agent-5", self.prompt("  /overture:as agent-5 \n"))
         self.assertEqual(len(self.lines()), 1)          # the same name again appends nothing
-        note = self.prompt("/console-kit:as agent-6", sid=SID6)
+        note = self.prompt("/overture:as agent-6", sid=SID6)
         self.assertIn("this session is not it", note)
         self.assertEqual(len(self.lines()), 2)
 
@@ -3839,10 +3839,10 @@ class SessionNameTests(_Steward):
         for bad in ("Agent-5", "agent 5", "agent_5", "agent", "owner", "x" * 33, "agent-5\nagent-6", "a--b",
                     "../etc", '"agent-5"'):
             with self.subTest(name=bad):
-                note = self.prompt("/console-kit:as " + bad)
+                note = self.prompt("/overture:as " + bad)
                 if note is not None:
                     self.assertIn("nothing recorded", note)
-        self.assertIn("Say the name", self.prompt("/console-kit:as"))
+        self.assertIn("Say the name", self.prompt("/overture:as"))
         self.assertFalse(self.file.exists())
 
     def test_nothing_is_recorded_outside_a_registered_project_or_without_a_session_id(self):
@@ -3851,12 +3851,12 @@ class SessionNameTests(_Steward):
         outside = self.dir / "outside"
         outside.mkdir()
         out = self.run_hook(self.NAMER, {"session_id": SID5, "cwd": str(outside),
-                                         "prompt": "/console-kit:as agent-5"}, CLAUDE_PROJECT_DIR=str(outside))
+                                         "prompt": "/overture:as agent-5"}, CLAUDE_PROJECT_DIR=str(outside))
         self.assertIn("not registered", out["additionalContext"])
         self.register("--steward", "agent-5")
         for sid in (None, "", "../x", "a b", 5):
             with self.subTest(sid=sid):
-                self.assertIn("no session id", self.prompt("/console-kit:as agent-5", sid=sid))
+                self.assertIn("no session id", self.prompt("/overture:as agent-5", sid=sid))
         for stdin in ("", "not json", "[1]", json.dumps({"prompt": 5})):
             with self.subTest(stdin=stdin):
                 self.assertIsNone(self.run_hook(self.NAMER, stdin))
@@ -3867,12 +3867,12 @@ class SessionNameTests(_Steward):
         self.register()
         old = os.umask(0o022)
         try:
-            self.prompt("/console-kit:as agent-5")
+            self.prompt("/overture:as agent-5")
         finally:
             os.umask(old)
         self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)
         os.chmod(self.file, 0o644)                      # a file loosened by hand is tightened on the next write
-        self.prompt("/console-kit:as agent-6")
+        self.prompt("/overture:as agent-6")
         self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)
         hook = self.hook_module()
         for n in range(1500):                           # ~130 KB of lines if nothing ever compacted
@@ -3895,19 +3895,19 @@ class SessionNameTests(_Steward):
     # -- the question hook -------------------------------------------------------------------
 
     def test_ask_guard_allows_the_session_named_steward_and_blocks_the_others(self):
-        # Catches: a guard that still reads only CONSOLE_KIT_AGENT, and one that trusts any session's line.
+        # Catches: a guard that still reads only OVERTURE_AGENT, and one that trusts any session's line.
         self.register("--steward", "agent-5")
         self.assertIsNotNone(self.ask(SID5))                        # not named yet: blocked
-        self.assertIn("/console-kit:as agent-5", self.ask(SID5))    # ...and told how to name it
-        self.prompt("/console-kit:as agent-5", sid=SID5)
-        self.prompt("/console-kit:as agent-6", sid=SID6)
+        self.assertIn("/overture:as agent-5", self.ask(SID5))    # ...and told how to name it
+        self.prompt("/overture:as agent-5", sid=SID5)
+        self.prompt("/overture:as agent-6", sid=SID6)
         self.assertIsNone(self.ask(SID5))
         why = self.ask(SID6)
         self.assertIsNotNone(why)
         self.assertIn("--as agent-6", why)
         self.assertIsNotNone(self.ask("f" * 36))                    # a session nobody named
         self.assertIsNotNone(self.ask(SID6, agent="agent-5"))       # the session's own name beats the variable
-        self.prompt("/console-kit:as agent-5", sid=SID6)             # the last line for a session wins
+        self.prompt("/overture:as agent-5", sid=SID6)             # the last line for a session wins
         self.assertIsNone(self.ask(SID6))
 
     def test_the_environment_fallback_still_works(self):
@@ -3923,7 +3923,7 @@ class SessionNameTests(_Steward):
         self.file.write_text(json.dumps({"agent": "agent-6", "session": SID5, "ts": "t"}) + "\n"
                              + '{"agent": "agent-5", "session": "' + SID5)          # a cut-short last line
         self.assertIsNotNone(self.ask(SID5))                        # it says agent-6 ...
-        self.prompt("/console-kit:as agent-5", sid=SID5)             # ... until the user says otherwise
+        self.prompt("/overture:as agent-5", sid=SID5)             # ... until the user says otherwise
         self.assertIsNone(self.ask(SID5))
         tail = self.file.read_text().splitlines()[-1]
         self.assertEqual(json.loads(tail)["agent"], "agent-5")      # the new line was not glued to the cut one
@@ -3931,46 +3931,46 @@ class SessionNameTests(_Steward):
         os.mkfifo(self.file)                                        # must not hang: the timeout is the detector
         self.assertIsNone(self.ask(SID5, agent="agent-5"))
         self.assertIsNotNone(self.ask(SID5))
-        self.assertIn("not a regular file", self.prompt("/console-kit:as agent-5"))
+        self.assertIn("not a regular file", self.prompt("/overture:as agent-5"))
 
     # -- agent.py, fold.py -------------------------------------------------------------------
 
-    def test_agent_py_resolves_its_name_through_console_kit_session(self):
+    def test_agent_py_resolves_its_name_through_overture_session(self):
         self.register("--steward", "agent-5")
-        self.prompt("/console-kit:as agent-5", sid=SID5)
-        self.prompt("/console-kit:as agent-6", sid=SID6)
+        self.prompt("/overture:as agent-5", sid=SID5)
+        self.prompt("/overture:as agent-6", sid=SID6)
 
         def run(sid, *a, agent=None):
             return subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(self.state), *a],
-                                  env=self.env(agent, CONSOLE_KIT_SESSION=sid), capture_output=True, text=True,
+                                  env=self.env(agent, OVERTURE_SESSION=sid), capture_output=True, text=True,
                                   timeout=60)
         r = run(SID6, "watch", "--timeout", "0.1")
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertIn("this session (agent-6)", r.stderr)
-        self.assertIn("/console-kit:as agent-5", r.stderr)
+        self.assertIn("/overture:as agent-5", r.stderr)
         self.assertEqual(run(SID5, "watch", "--timeout", "0.1").returncode, 3)
         self.assertEqual(run(SID6, "--as", "agent-5", "watch", "--timeout", "0.1").returncode, 3)   # --as first
         self.assertEqual(run("f" * 36, "watch", "--timeout", "0.1", agent="agent-5").returncode, 3)  # env fallback
         self.assertEqual(run(SID6, "watch", "--timeout", "0.1", agent="agent-5").returncode, 1)     # session first
 
-    def test_fold_resolves_its_name_through_console_kit_session(self):
+    def test_fold_resolves_its_name_through_overture_session(self):
         self.register("--steward", "agent-5")
-        self.prompt("/console-kit:as agent-6", sid=SID6)
+        self.prompt("/overture:as agent-6", sid=SID6)
         (self.project / "work" / "locked").mkdir(parents=True)
         (self.project / "work" / "adapter.py").write_text(FoldLockPathTests.ADAPTER)
         args = [sys.executable, str(KIT / "fold.py"), "--root", str(self.project), "fold", "--locked",
                 "work/locked", "--ledger", "work/folded.txt", "--adapter", "work/adapter.py", "--dry-run"]
-        r = subprocess.run(args, env=self.env(CONSOLE_KIT_SESSION=SID6), capture_output=True, text=True, timeout=60)
+        r = subprocess.run(args, env=self.env(OVERTURE_SESSION=SID6), capture_output=True, text=True, timeout=60)
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertIn("this session (agent-6)", r.stderr)
-        self.prompt("/console-kit:as agent-5", sid=SID6)
-        r = subprocess.run(args, env=self.env(CONSOLE_KIT_SESSION=SID6), capture_output=True, text=True, timeout=60)
+        self.prompt("/overture:as agent-5", sid=SID6)
+        r = subprocess.run(args, env=self.env(OVERTURE_SESSION=SID6), capture_output=True, text=True, timeout=60)
         self.assertNotIn("refused", r.stderr)
 
     def test_the_hook_and_the_kit_read_the_file_alike(self):
         # The hook may import nothing from the kit, so it keeps its own reader. Catches: the two drifting.
-        from console_kit import names as N
-        from console_kit import sessions as SN
+        from overture import names as N
+        from overture import sessions as SN
         hook = self.hook_module()
         self.assertEqual((hook.SESSIONS_FILE, hook.SESSION_ENV, hook.SESSION_ID.pattern, hook.MAX_SESSIONS,
                           hook.KEEP_SESSIONS), (SN.FILE, SN.ENV, SN.SESSION_ID.pattern, SN.MAX_FILE, SN.KEEP))
@@ -4019,7 +4019,7 @@ class SessionNameTests(_Steward):
             with self.subTest(size=size):
                 self.fill(size, last=(SID5, "agent-5"))
                 self.assertIsNotNone(self.ask(SID5))    # the reader refuses an oversized file: no name
-                note = self.prompt("/console-kit:as agent-5")
+                note = self.prompt("/overture:as agent-5")
                 self.assertIn("agent-5", note)
                 self.assertNotIn("nothing recorded", note)
                 self.assertLessEqual(self.file.stat().st_size, 64 << 10)
@@ -4049,11 +4049,11 @@ class SessionNameTests(_Steward):
                 f.write_text(before)
                 self.run_hook(self.START, {"session_id": SID5, "cwd": str(self.project), "source": "startup",
                                            "hook_event_name": "SessionStart"}, CLAUDE_ENV_FILE=str(f))
-                self.assertEqual(f.read_text(), after + f"export CONSOLE_KIT_SESSION={SID5}\n")
+                self.assertEqual(f.read_text(), after + f"export OVERTURE_SESSION={SID5}\n")
 
     def test_a_symlinked_sessions_file_is_refused_by_reader_and_writer(self):
         # Review LOW: the writer refused a symlink but the readers followed one.
-        from console_kit import sessions as SN
+        from overture import sessions as SN
         self.register("--steward", "agent-5")
         hook = self.hook_module()
         target = self.dir / "elsewhere.jsonl"
@@ -4062,7 +4062,7 @@ class SessionNameTests(_Steward):
         self.assertIsNone(hook.session_name(self.state, SID5))
         self.assertIsNone(SN.lookup(self.state, SID5))
         self.assertIsNotNone(self.ask(SID5))
-        self.assertIn("nothing recorded", self.prompt("/console-kit:as agent-6"))
+        self.assertIn("nothing recorded", self.prompt("/overture:as agent-6"))
         self.assertEqual(json.loads(target.read_text())["agent"], "agent-5")   # never written through
 
     # -- SessionStart --------------------------------------------------------------------------
@@ -4079,10 +4079,10 @@ class SessionNameTests(_Steward):
     def test_session_start_exports_the_session_id_and_says_when_it_is_not_named(self):
         self.register("--steward", "agent-5")
         note, exported = self.start()
-        self.assertEqual(exported, f"export CONSOLE_KIT_SESSION={SID5}\n")
+        self.assertEqual(exported, f"export OVERTURE_SESSION={SID5}\n")
         self.assertIn("This session is not named", note)
-        self.assertIn("/console-kit:as NAME", note)
-        self.prompt("/console-kit:as agent-5")
+        self.assertIn("/overture:as NAME", note)
+        self.prompt("/overture:as agent-5")
         note, _ = self.start()
         self.assertIn("this session is the steward, agent-5", note)
         self.assertNotIn("not named", note)
@@ -4098,7 +4098,7 @@ class SessionNameTests(_Steward):
         self.register()
         note, exported = self.start()
         self.assertNotIn("not named", note)
-        self.assertEqual(exported, f"export CONSOLE_KIT_SESSION={SID5}\n")
+        self.assertEqual(exported, f"export OVERTURE_SESSION={SID5}\n")
 
 
 # -- K1: slim reads (todo, view --item, --since, the skills) -------------------------------
@@ -4445,7 +4445,7 @@ class CostSidecarTests(unittest.TestCase):
     FORK_A, FORK_B = "a" * 24, "b" * 24
 
     def setUp(self):
-        from console_kit import costs as C
+        from overture import costs as C
         self.C = C
         self.tmp = tempfile.TemporaryDirectory()
         t = Path(os.path.realpath(self.tmp.name))
@@ -4456,7 +4456,7 @@ class CostSidecarTests(unittest.TestCase):
         self.root.mkdir()
         self.state = t / "state"
         self.state.mkdir()
-        self.reg = self.cfg / "console-kit" / "projects.json"
+        self.reg = self.cfg / "overture" / "projects.json"
         R.register(self.root, self.state, KIT, path=self.reg)
         self.main = C.slug_of(str(self.root))
         self.sibling = self.main + "-foo"         # a project named `proj-foo`: a prefix match would take it
@@ -4470,15 +4470,15 @@ class CostSidecarTests(unittest.TestCase):
         self.want = {}
         A, B = self.FORK_A, self.FORK_B
         # M1: the description beyond its leading tag carries the sentinel; it must never be kept or returned.
-        self.seat("S1", "a1", f"ck-fork:{A} ux seat " + "x" * 40 + self.SENTINEL, "console-kit:ux",
+        self.seat("S1", "a1", f"ck-fork:{A} ux seat " + "x" * 40 + self.SENTINEL, "overture:ux",
                   [(100, 50, 1000, 10), (200, 0, 2000, 20)])
-        self.seat("S1", "a2", f"ck-fork:{A} architect seat", "console-kit:architect", [(300, 0, 500, 30)])
-        self.seat("S1", "b1", f"ck-fork:{B} ux seat", "console-kit:ux", [(7000, 0, 7000, 70)])
+        self.seat("S1", "a2", f"ck-fork:{A} architect seat", "overture:architect", [(300, 0, 500, 30)])
+        self.seat("S1", "b1", f"ck-fork:{B} ux seat", "overture:ux", [(7000, 0, 7000, 70)])
         self.seat("S1", "gp", "review the diff", "general-purpose", [(900, 0, 900, 90)])
         # Matched by role name or a fork's own words, never by the tag: unattributed.
-        self.seat("S1", "f85", "F85 fork: ux seat", "console-kit:ux", [(40, 0, 40, 4)])
-        self.seat("S2", "a3", f"ck-fork:{A} analyst seat", "console-kit:analyst", [(11, 1, 111, 1)], slug=self.lane)
-        self.seat("S9", "x1", f"ck-fork:{A} ux seat", "console-kit:ux", [(5000, 0, 5000, 500)],
+        self.seat("S1", "f85", "F85 fork: ux seat", "overture:ux", [(40, 0, 40, 4)])
+        self.seat("S2", "a3", f"ck-fork:{A} analyst seat", "overture:analyst", [(11, 1, 111, 1)], slug=self.lane)
+        self.seat("S9", "x1", f"ck-fork:{A} ux seat", "overture:ux", [(5000, 0, 5000, 500)],
                   slug=self.sibling)
 
     def tearDown(self):
@@ -4509,7 +4509,7 @@ class CostSidecarTests(unittest.TestCase):
 
     def run_cli(self, *args):
         env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg), "CLAUDE_CONFIG_DIR": str(self.claude)}
-        env.pop("CONSOLE_KIT_AGENT", None)
+        env.pop("OVERTURE_AGENT", None)
         return subprocess.run([sys.executable, str(KIT / "agent.py"), "--state", str(self.state), *args],
                               capture_output=True, text=True, env=env, timeout=60)
 
@@ -4551,7 +4551,7 @@ class CostSidecarTests(unittest.TestCase):
 import sys, threading
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from console_kit import server as SV
+from overture import server as SV
 d, state = Path(sys.argv[2]), Path(sys.argv[3])
 (d / "page.html").write_text("<!doctype html><html><body></body></html>\n")
 class A:
@@ -4663,7 +4663,7 @@ print(code)
         # Catches: a collector that keeps or returns the whole description (AC2.4 names only its leading tag).
         meta = self.projects / self.main / "S1" / "subagents" / "agent-a1.meta.json"
         got = self.C.meta_of(meta)
-        self.assertEqual(got, ("console-kit:ux", self.FORK_A))
+        self.assertEqual(got, ("overture:ux", self.FORK_A))
         self.assertNotIn(self.SENTINEL, repr(got))
         # A tag past the first TAG_SPAN characters is not a leading tag.
         self.assertIsNone(self.C.fork_of(" " * self.C.TAG_SPAN + f"ck-fork:{self.FORK_A}"))
@@ -4716,7 +4716,7 @@ print(code)
         own = self.projects / self.main
         (own / "S7").symlink_to(self.projects / self.sibling / "S9")
         sub = own / "S1" / "subagents"
-        (sub / "agent-lnk.meta.json").write_text(json.dumps({"agentType": "console-kit:ux",
+        (sub / "agent-lnk.meta.json").write_text(json.dumps({"agentType": "overture:ux",
                                                              "description": f"ck-fork:{self.FORK_A} ux"}))
         (sub / "agent-lnk.jsonl").symlink_to(self.projects / self.sibling / "S9" / "subagents" / "agent-x1.jsonl")
         got, stats = self.C.collect(self.state, registry=self.reg, projects_dir=self.projects)
@@ -4794,7 +4794,7 @@ OLD_BOOT = r'''
 import sys, threading
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from console_kit import server as SV
+from overture import server as SV
 d, state = Path(sys.argv[2]), Path(sys.argv[3])
 d.mkdir(parents=True, exist_ok=True)
 (d / "page.html").write_text("<!doctype html><html><body></body></html>\n")
@@ -4848,25 +4848,25 @@ class ServerAddTests(unittest.TestCase):
         self.root.mkdir()
         self.state = t / "state"
         self.state.mkdir()
-        self.reg = self.cfg / "console-kit" / "projects.json"
-        self.sfile = self.cfg / "console-kit" / "server.json"
+        self.reg = self.cfg / "overture" / "projects.json"
+        self.sfile = self.cfg / "overture" / "server.json"
         R.register(self.root, self.state, KIT, path=self.reg)
         # The repository's config names a project and a token: both must be ignored (AC3.1's trap).
-        (self.root / ".console-kit.json").write_text(json.dumps({"project": "hijack", "token": "ck1_planted"}))
+        (self.root / ".overture.json").write_text(json.dumps({"project": "hijack", "token": "ck1_planted"}))
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def add(self, name="alpha", *extra, state=None, host="alpha.example.com", port="4801"):
         env = {**os.environ, "XDG_CONFIG_HOME": str(self.cfg)}
-        env.pop("CONSOLE_KIT_AGENT", None)
+        env.pop("OVERTURE_AGENT", None)
         args = ["--state", str(state or self.state), "server", "add", name, "--hostname", host, "--aud", "a" * 64,
                 "--port", port, "--team-domain", self.TEAM, *extra]
         return subprocess.run([sys.executable, str(KIT / "agent.py"), *args], capture_output=True, text=True,
                               env=env, cwd=self.root, timeout=60)
 
     def test_ac31_refusals_and_the_repo_config_is_ignored(self):
-        # Catches: a project name read from `.console-kit.json`, and any refusal that still writes.
+        # Catches: a project name read from `.overture.json`, and any refusal that still writes.
         other = Path(self.tmp.name) / "unregistered"
         other.mkdir()
         refused = [
@@ -4931,8 +4931,8 @@ class ServerAddTests(unittest.TestCase):
             self.assertIn(str(self.state), note, hook)               # it still found this project's console
 
     def test_one_reader_shared_by_the_cost_collector_and_unknown_keys_ignored(self):
-        from console_kit import costs as C
-        from console_kit import serverfile as SF
+        from overture import costs as C
+        from overture import serverfile as SF
         self.assertEqual(self.add("alpha", "--slug", "lane-one", "--slug", "lane-two").returncode, 0)
         doc = json.loads(self.sfile.read_text())
         doc["projects"]["alpha"]["token_sha256"] = "f" * 64              # what K4 will add
@@ -4952,12 +4952,12 @@ class MultiStoreTests(unittest.TestCase):
     TEAM = "team.example.cloudflareaccess.com"
 
     def setUp(self):
-        from console_kit import multiserver as MS
-        from console_kit import serverfile as SF
+        from overture import multiserver as MS
+        from overture import serverfile as SF
         self.MS, self.SF = MS, SF
         self.tmp = tempfile.TemporaryDirectory()
         self.t = Path(os.path.realpath(self.tmp.name))
-        self.reg = self.t / "cfg" / "console-kit" / "projects.json"
+        self.reg = self.t / "cfg" / "overture" / "projects.json"
         self.sfile = self.reg.parent / "server.json"
         self.p = {}
         for i, name in enumerate(("alpha", "beta")):
@@ -4983,7 +4983,7 @@ class MultiStoreTests(unittest.TestCase):
 
     def test_ac34_a_store_object_per_project(self):
         # Catches: one shared Store whose index holds both files (breaks store.py's one-writer rule).
-        from console_kit.store import Store
+        from overture.store import Store
         ms = self.server()
         self.assertEqual(ms.served(), ["alpha", "beta"])
         stores = ms.stores()
@@ -5077,7 +5077,7 @@ class MultiStoreTests(unittest.TestCase):
     def test_a_held_root_is_found_by_its_configured_path_never_by_resolving_it(self):
         # Catches: looking the held descriptor up by realpath(root) on each read, which lets a root path swapped
         # for a symlink to ANOTHER held root read that project's tree.
-        from console_kit import rootfs as RF
+        from overture import rootfs as RF
         a, b = self.t / "held-a", self.t / "held-b"
         for d, text in ((a, "A-OWN"), (b, "B-OWN")):
             d.mkdir()
@@ -5118,13 +5118,13 @@ class PrsFromGhTests(Tmp):
         return row
 
     def build(self, open_rows, recent_rows, days=30):
-        from console_kit import prs as PR
+        from overture import prs as PR
         return PR.from_gh({"nameWithOwner": "octo/repo"}, open_rows, recent_rows, days)
 
     def test_a_fake_gh_output_becomes_the_closed_shape_open_first_then_newest_done(self):
         # Catches: reading the wrong gh field, losing the draft flag, a merge commit on a PR that never merged,
         # and an order that puts a merged PR above an open one.
-        from console_kit import prs as PR
+        from overture import prs as PR
         body = self.build(
             [self.gh_row(3), self.gh_row(5, isDraft=True, mergeCommit={"oid": "c" * 40},
                                          statusCheckRollup=[{"__typename": "CheckRun", "status": "QUEUED",
@@ -5149,7 +5149,7 @@ class PrsFromGhTests(Tmp):
         self.assertEqual([(p["number"], p["state"]) for p in body["prs"]], [(7, "open")])
 
     def test_check_rollup(self):
-        from console_kit import prs as PR
+        from overture import prs as PR
         run = lambda status, conclusion="": {"__typename": "CheckRun", "status": status, "conclusion": conclusion}
         ctx = lambda state: {"__typename": "StatusContext", "state": state}
         for checks, want in (([], "none"), (None, "none"), ([run("COMPLETED", "SUCCESS")], "success"),
@@ -5164,7 +5164,7 @@ class PrsFromGhTests(Tmp):
 
     def test_malformed_gh_output_is_named_never_guessed(self):
         # Catches: a gh too old to have a field read as "no checks" or "no author" instead of refused.
-        from console_kit import prs as PR
+        from overture import prs as PR
         row = self.gh_row(1)
         del row["statusCheckRollup"]
         for open_rows, recent, repo, needle in (([row], [], {"nameWithOwner": "octo/repo"}, "statusCheckRollup"),
@@ -5179,7 +5179,7 @@ class PrsFromGhTests(Tmp):
 
     def test_a_hostile_title_is_carried_as_text_and_only_a_github_link_passes(self):
         # The parser does not sanitize text (the page renders it as text); it is the URL that is pinned.
-        from console_kit import prs as PR
+        from overture import prs as PR
         hostile = '<img src=x onerror="alert(1)"></a><script>alert(2)</script>'
         body = self.build([self.gh_row(1, title=hostile, headRefName="x\"><b>y")], [])
         self.assertIsNone(PR.snapshot_problem(body))
@@ -5188,14 +5188,14 @@ class PrsFromGhTests(Tmp):
         self.assertIn("url must be https://github.com/octo/repo/pull/1", PR.snapshot_problem(bad))
 
     def test_an_over_cap_gh_output_is_refused_by_name_not_truncated(self):
-        from console_kit import prs as PR
+        from overture import prs as PR
         body = self.build([self.gh_row(1, title="t" * (PR.MAX_TITLE + 1))], [])
         self.assertEqual(body["prs"][0]["title"], "t" * (PR.MAX_TITLE + 1))
         self.assertIn(f"title is over {PR.MAX_TITLE}", PR.snapshot_problem(body))
 
     def test_the_gh_command_lines(self):
         import datetime as dt
-        from console_kit import prs as PR
+        from overture import prs as PR
         repo, opened, recent = PR.gh_lists(30, 50, today=dt.date(2026, 10, 1))
         self.assertEqual(repo, ["repo", "view", "--json", "nameWithOwner"])
         self.assertEqual(opened[:6], ["pr", "list", "--state", "open", "--limit", "50"])
@@ -5204,7 +5204,7 @@ class PrsFromGhTests(Tmp):
             self.assertEqual(argv[argv.index("--json") + 1], PR.GH_FIELDS)
 
     def test_store_and_load_round_trip(self):
-        from console_kit import prs as PR
+        from overture import prs as PR
         state = self.dir / "state"
         state.mkdir()
         self.assertEqual(PR.load(state), {"pushed": False, "note": PR.NOT_PUSHED})
@@ -5217,7 +5217,7 @@ class PrsFromGhTests(Tmp):
     def test_the_gh_door_starts_nothing_once_closed(self):
         # Catches: a gh call that goes around the seam, or a closed seam that still tries.
         from unittest import mock
-        from console_kit import gitseam as G
+        from overture import gitseam as G
         was = G._OPEN
         self.addCleanup(setattr, G, "_OPEN", was)
         G.close()

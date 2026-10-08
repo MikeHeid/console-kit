@@ -1,11 +1,11 @@
 ---
 name: playbook
-description: Use when the user wants to run a named playbook on this project's console — a codified multi-step delegation (round, visual, chat). The playbook files live under .console-kit/playbooks/<slug>.json. This skill lists what is available, confirms which to run, and dispatches it through the console's agent socket; each step then arrives in the owner's inbox like any other delegation.
+description: Use when the user wants to run a named playbook on this project's console — a codified multi-step delegation (round, visual, chat). The playbook files live under .overture/playbooks/<slug>.json. This skill lists what is available, confirms which to run, and dispatches it through the console's agent socket; each step then arrives in the owner's inbox like any other delegation.
 ---
 
 # Run a named playbook
 
-A playbook is a short JSON file at `.console-kit/playbooks/<slug>.json`
+A playbook is a short JSON file at `.overture/playbooks/<slug>.json`
 that lists steps the owner wants fired as one:
 
 - `round` — start a deliberation on an item.
@@ -43,7 +43,7 @@ firings**.
   playbook is a complete, named unit; running it is one tap, and the
   server fans the steps out itself.
 - **Never run a playbook that is not already a file.** If a slug the
-  user names has no file under `.console-kit/playbooks/`, say so and
+  user names has no file under `.overture/playbooks/`, say so and
   stop. Writing a new playbook file is a project-code change the owner
   reviews and commits, not an in-session move.
 - **Never retry a failing playbook automatically.** Each playbook run
@@ -60,7 +60,7 @@ firings**.
 2. **Confirm the run.** Say the playbook's step count and the kinds in
    it so the user knows what fan-out they're approving.
 3. **Dispatch.** Run:
-       python3 ~/.local/share/console-kit/kit/agent.py --state <STATE> playbook <slug>
+       python3 ~/.local/share/overture/kit/agent.py --state <STATE> playbook <slug>
    `<STATE>` is the registry's state path for this project; the
    SessionStart banner names it. The agent flag (`--as`) is this
    session's name if one was given.

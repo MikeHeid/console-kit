@@ -1,6 +1,6 @@
 ---
 name: deliberate
-description: Work through one decision with the owner - frame what depends on it, lay out two to four options with their real costs, recommend one with a star, and name what would change the recommendation. Use when the user types /console-kit:deliberate (with a question, or "open" to list the undecided items), or when an owner decision needs laying out before it is made.
+description: Work through one decision with the owner - frame what depends on it, lay out two to four options with their real costs, recommend one with a star, and name what would change the recommendation. Use when the user types /overture:deliberate (with a question, or "open" to list the undecided items), or when an owner decision needs laying out before it is made.
 ---
 
 # Deliberate: lay a decision out so the owner only picks
@@ -14,7 +14,7 @@ decide.
 
 This skill reads, and never assumes, the project's layout:
 
-1. `.console-kit.json`'s `specs_dir`, if set, is where its specs live.
+1. `.overture.json`'s `specs_dir`, if set, is where its specs live.
 2. The project's `CLAUDE.md` or README, which usually names its decision log,
    findings register and spec folder.
 3. Otherwise the **App Architect convention**, if the project uses it: an

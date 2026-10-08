@@ -294,7 +294,7 @@ class MultiAgentHandler(SV.AgentHandler):
 
     def do_GET(self) -> None:
         if self.path == "/health":    # no token: the server's own liveness, naming no project (§3.5)
-            return self._send(200, {"ok": True, "server": "console-kit", "version": SV.__version__})
+            return self._send(200, {"ok": True, "server": "overture", "version": SV.__version__})
         if self._project() is not None:
             super().do_GET()
 
@@ -344,7 +344,7 @@ def _agent_server(ms: "MultiServer", path: Path) -> SV.UnixHTTPServer:
     if len(os.fsencode(path)) > SV.SOCKET_PATH_MAX:
         raise SystemExit(f"the agent socket path {path} is over {SV.SOCKET_PATH_MAX} bytes, the limit a Unix "
                          f"socket path has (108 bytes on Linux, including the terminator). It sits beside "
-                         f"server.json, so shorten XDG_CONFIG_HOME (the console-kit folder under it), or pass "
+                         f"server.json, so shorten XDG_CONFIG_HOME (the overture folder under it), or pass "
                          f"--socket with a shorter path")
     parent = path.parent
     try:

@@ -1,6 +1,6 @@
 """Triggers: HTTP calls (webhooks, 0.12.0) and scheduled clock ticks (cron, 0.15.0) that fire a named playbook.
 
-A trigger is defined in `.console-kit/triggers.json`:
+A trigger is defined in `.overture/triggers.json`:
 
     {
       "triggers": {
@@ -16,7 +16,7 @@ must satisfy BOTH gates:
 
 1. **Cloudflare Access** — configured on the Access application to accept a
    service token (`CF-Access-Client-Id` + `CF-Access-Client-Secret`) in addition
-   to interactive logins. The console-kit never sees the Access headers; the
+   to interactive logins. The overture never sees the Access headers; the
    tunnel validates them.
 2. **Per-trigger bearer token** — the caller sends `Authorization: Bearer <token>`
    (or `X-Console-Trigger-Token: <token>`). The server hashes the received
@@ -46,7 +46,7 @@ from pathlib import Path
 from . import rootfs as RF
 from .registry import RegistryError, read_regular
 
-FILE = ".console-kit/triggers.json"
+FILE = ".overture/triggers.json"
 MAX_FILE = 32 * 1024
 MAX_TRIGGERS = 64
 MAX_BODY = 256 * 1024
@@ -126,7 +126,7 @@ class Store:
 
 
 def load(root: Path) -> dict[str, Trigger]:
-    """Read `.console-kit/triggers.json` and return every well-formed trigger, keyed by name.
+    """Read `.overture/triggers.json` and return every well-formed trigger, keyed by name.
 
     Returns {} when the file is absent. A single malformed trigger raises TriggerError NAMING the first
     problem, so the server refuses to start half-configured. The playbook name is NOT resolved here;

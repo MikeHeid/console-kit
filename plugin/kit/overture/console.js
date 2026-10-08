@@ -1652,7 +1652,7 @@
       const order = ['awaiting_you', 'unlocked', 'stale', 'locked', 'superseded', 'withdrawn'];
       qs.sort((a, b) => order.indexOf(a.state) - order.indexOf(b.state));
 
-      // Dashboard section links: `.console-kit.json` can map this item to one or more #anchors on the host page.
+      // Dashboard section links: `.overture.json` can map this item to one or more #anchors on the host page.
       const sectionLinks = renderSectionLinks(itemId);
       if (sectionLinks) body.appendChild(sectionLinks);
       body.appendChild(renderItemTools(itemId));
@@ -2207,7 +2207,7 @@
       'An agent answers with a Mermaid diagram or a static HTML mock and a short doc. The console keeps it and ' +
       'shows it here, a mock only inside a sandbox that runs no script. ' + (where
         ? 'An agent can land it in the repository under ' + where + '/ by a pull request.'
-        : 'This project sets no visuals_dir in .console-kit.json, so it stays in the console and is not landed ' +
+        : 'This project sets no visuals_dir in .overture.json, so it stays in the console and is not landed ' +
           'in the repository.')]));
     const noteId = id + '-note';
     const text = el('textarea', { className: 'ck-textarea', rows: '3', id: noteId,
@@ -2236,7 +2236,7 @@
   // Collapsed by default: expanding sets the iframe src, so a page that never opens it costs nothing.
   // Re-rendered under the live loop keeps the diagram fresh when a question is answered or added.
   const openCharts = new Set();      // which items currently show the flowchart; survives re-renders
-  // Dashboard section chips for an item, driven by `.console-kit.json`'s `sections` map. Returns null when the
+  // Dashboard section chips for an item, driven by `.overture.json`'s `sections` map. Returns null when the
   // item has none mapped. The link uses target="_top" to break out of the console panel's docked frame.
   function renderSectionLinks(itemId) {
     const cfg = view && view.config;
@@ -2383,7 +2383,7 @@
     ]);
     if (!playbooks.length) {
       playbookRow.appendChild(el('span', { className: 'ck-muted' },
-        [' (no playbooks under .console-kit/playbooks/*.json)']));
+        [' (no playbooks under .overture/playbooks/*.json)']));
     }
     body.appendChild(playbookRow);
 
@@ -2416,7 +2416,7 @@
       if (kind === 'playbook') {
         if (!playbookSel.value) {
           send.disabled = false;
-          status.textContent = 'Add a JSON file under .console-kit/playbooks/ to run one.'; status.hidden = false; return;
+          status.textContent = 'Add a JSON file under .overture/playbooks/ to run one.'; status.hidden = false; return;
         }
         result = await apiPost('/playbook', { name: playbookSel.value }, 'playbook-' + playbookSel.value + '-' + Date.now());
       } else {
@@ -2543,7 +2543,7 @@
       body.appendChild(list);
     } else if (!triggers.length) {
       body.appendChild(el('p', { className: 'ck-muted' },
-        ['Add .console-kit/triggers.json to arm webhook or cron triggers.']));
+        ['Add .overture/triggers.json to arm webhook or cron triggers.']));
     }
 
     wrap.appendChild(body);
@@ -4925,7 +4925,7 @@
       if (you > prev.awaiting_you) bits.push((you - prev.awaiting_you) + ' new awaiting you');
       if (stale > prev.stale) bits.push((stale - prev.stale) + ' newly stale');
       try {
-        const n = new Notification((row.project || row.name) + ' · console-kit', {
+        const n = new Notification((row.project || row.name) + ' · overture', {
           body: bits.join(' · '),
           tag: 'ck-portfolio-' + row.name,
           silent: false
@@ -5018,7 +5018,7 @@
     for (const p of peers) grid.appendChild(renderPortfolioCard(p, false));
     if (!self && !peers.length) {
       grid.appendChild(el('p', { className: 'ck-muted' },
-        ['No peers configured. Add some in .console-kit/portfolio.json and ',
+        ['No peers configured. Add some in .overture/portfolio.json and ',
          el('code', {}, ['agent.py portfolio-token']),
          ' for setup.']));
     }
@@ -5875,7 +5875,7 @@
   }
 
   // Owner, 2026-10-01: "version number should be in footer". The running kit's version, as the server that
-  // served this page knows it (`console_kit.__version__`, the value /health reports), never typed in here.
+  // served this page knows it (`overture.__version__`, the value /health reports), never typed in here.
   // It shares the usage footer's bar, which already makes room for itself, and keeps that bar on when usage
   // is off or has nothing to say. A page served by no kit server (no version in its config) gets none.
   function kitVersion() {
@@ -5894,7 +5894,7 @@
     }
     if (!footerEl) {
       footerEl = el('div', { className: 'ck-footer', role: 'contentinfo',
-                             'aria-label': 'Console kit version, Claude usage and account' }, []);
+                             'aria-label': 'Overture version, Claude usage and account' }, []);
       document.body.appendChild(footerEl);
       root.classList.add('ck-footer-on');
     }
@@ -5911,7 +5911,7 @@
       parts.push('Claude usage: ' + usage.usage_problem);
     }
     if (usage.account) parts.push(usage.account);
-    if (version) parts.push('console-kit ' + version);
+    if (version) parts.push('overture ' + version);
     footerEl.textContent = parts.join(' · ');
     footerEl.setAttribute('data-stale', stale ? 'true' : 'false');
     // The host page gets room for the footer at whatever height it wrapped to.
@@ -6010,7 +6010,7 @@
   // Initialize
   function init() {
     // Read config from injected script
-    const configEl = document.getElementById('console-kit-config');
+    const configEl = document.getElementById('overture-config');
     if (configEl) {
       try {
         config = JSON.parse(configEl.textContent);
