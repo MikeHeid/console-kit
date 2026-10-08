@@ -4666,9 +4666,13 @@
     };
     kindSel.addEventListener('change', refilter);
     itemSel.addEventListener('change', refilter);
+    const digestBtn = el('button', { type: 'button', className: 'ck-btn ck-feed-digest',
+      title: 'Copy today\'s locked rulings as Markdown' }, ['⤓ Export today']);
+    digestBtn.addEventListener('click', () => openDigest('today'));
     body.appendChild(el('div', { className: 'ck-feed-filters' }, [
       el('label', { for: 'ck-feed-kind', className: 'ck-field-label' }, ['Show']), kindSel,
-      el('label', { for: 'ck-feed-item', className: 'ck-field-label' }, ['on']), itemSel]));
+      el('label', { for: 'ck-feed-item', className: 'ck-field-label' }, ['on']), itemSel,
+      digestBtn]));
     body.appendChild(list);
     const key = feedState.kind + '|' + feedState.item;
     if (feedState.events && feedState.key === key) fillFeedList(list);
@@ -4677,6 +4681,90 @@
     body.appendChild(el('p', { className: 'ck-muted ck-feed-foot' }, [
       'Folds happen in the repository, not in the console\'s store, so they are not listed here. Pull ' +
       'requests, open and recently merged or closed, are in the PRs tab.']));
+  }
+
+  // Fetch today's locks (and anything else needed to describe them) from the Feed, format as
+  // Markdown, and present them in a modal with Copy + Close. Server-side the Feed is already
+  // the newest-first stream over the Store, so a window of 200 covers a very busy day.
+  async function openDigest(window) {
+    if (document.getElementById('ck-digest')) return;
+    const dlg = el('div', { id: 'ck-digest', className: 'ck-digest', role: 'dialog',
+      'aria-modal': 'true', 'aria-label': 'Export rulings' });
+    const h = el('h2', {}, ['Today\'s rulings · Markdown']);
+    const ta = el('textarea', { className: 'ck-digest-text', readonly: 'readonly', rows: '18',
+      spellcheck: 'false' });
+    ta.value = 'Loading…';
+    const copyBtn = el('button', { type: 'button', className: 'ck-btn ck-btn-primary' }, ['Copy']);
+    const closeBtn = el('button', { type: 'button', className: 'ck-btn' }, ['Close']);
+    copyBtn.addEventListener('click', () => {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(ta.value)
+            .then(() => announce('Copied ' + ta.value.length + ' chars.'),
+                  () => { ta.select(); announce('Could not copy; the text is selected.'); });
+          return;
+        }
+      } catch (e) { /* fall through */ }
+      ta.select();
+      announce('The text is selected — press Ctrl+C to copy.');
+    });
+    closeBtn.addEventListener('click', closeDigest);
+    dlg.appendChild(h);
+    dlg.appendChild(ta);
+    dlg.appendChild(el('div', { className: 'ck-digest-actions' }, [copyBtn, closeBtn]));
+    dlg.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closeDigest(); } });
+    dlg.addEventListener('click', e => { if (e.target === dlg) closeDigest(); });
+    document.body.appendChild(dlg);
+    requestAnimationFrame(() => ta.focus());
+    try {
+      const url = config.api + '/feed?kind=lock&limit=200';
+      const resp = await fetch(url, { credentials: 'same-origin' });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'HTTP ' + resp.status);
+      ta.value = buildDigestMarkdown(data.events || [], window);
+      ta.select();
+    } catch (e) {
+      ta.value = 'Could not load the Feed: ' + (e.message || 'network error');
+    }
+  }
+  function closeDigest() {
+    const dlg = document.getElementById('ck-digest');
+    if (dlg) dlg.remove();
+  }
+
+  function buildDigestMarkdown(events, window) {
+    const sinceMs = window === 'today' ? startOfTodayMs() : 0;
+    const locks = events.filter(ev => ev.kind === 'lock' && ev.ts && Date.parse(ev.ts) >= sinceMs);
+    if (!locks.length) return '# No rulings locked ' + (window === 'today' ? 'today' : 'in this window') + '.\n';
+    const byItem = {};
+    for (const ev of locks) {
+      const key = ev.item || 'other';
+      if (!byItem[key]) byItem[key] = [];
+      byItem[key].push(ev);
+    }
+    const today = new Date();
+    const header = '# Rulings — ' + today.toISOString().slice(0, 10) + '\n\n'
+                 + 'From ' + ((config && config.project) || 'this console') + ' · '
+                 + locks.length + ' lock' + (locks.length === 1 ? '' : 's') + ' across '
+                 + Object.keys(byItem).length + ' item' + (Object.keys(byItem).length === 1 ? '' : 's') + '.\n\n';
+    const sections = Object.keys(byItem).sort().map(id => {
+      const title = (items && items[id] && items[id].title) ? ' · ' + items[id].title : '';
+      const rows = byItem[id]
+        .sort((a, b) => a.ts.localeCompare(b.ts))
+        .map(ev => {
+          const relock = ev.relock ? ' (re-lock)' : '';
+          const when = ev.ts ? new Date(ev.ts).toISOString().slice(11, 16) + ' UTC' : '';
+          return '- **' + (ev.qid || '?') + '**' + relock + ' — ' + when;
+        }).join('\n');
+      return '## ' + id + title + '\n\n' + rows;
+    }).join('\n\n');
+    return header + sections + '\n';
+  }
+
+  function startOfTodayMs() {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
   }
 
   function fillFeedList(list) {

@@ -1425,3 +1425,32 @@ the log (as long as the trigger still exists).
 - A playbook step that no longer passes its `when` predicate is
   skipped as usual; the Delegate-bar-style surface shows ran vs.
   skipped counts, with the first skip's reason.
+
+## Export today's rulings as Markdown (0.28.0)
+
+The Feed tab's filter row gains a **⤓ Export today** button that
+opens a modal with every ruling locked since local midnight as
+Markdown, ready to paste into a standup, a weekly review or a
+sprint retro.
+
+Shape of the output:
+
+    # Rulings — 2026-10-08
+
+    From <project> · N locks across M items.
+
+    ## AB-7 · <item title>
+
+    - **AB-7/Q1** — 09:14 UTC
+    - **AB-7/Q2** (re-lock) — 11:02 UTC
+
+    ## XX-9 · …
+
+- Browser-only: reads `/api/feed?kind=lock&limit=200`, filters by
+  `ts >= start-of-today-local`, groups by item, sorts within an
+  item by time.
+- The modal has **Copy** (clipboard write; falls back to selecting
+  the text if the browser refuses), **Close**, and the standard
+  Esc / backdrop close.
+- Nothing is sent anywhere else — the generated Markdown stays in
+  this browser until the owner pastes it.
