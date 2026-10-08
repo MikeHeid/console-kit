@@ -1396,6 +1396,44 @@
       body.appendChild(el('p', { style: 'color: var(--c-fg-muted); text-align: center; padding: 20px;' },
         ['No pending items.']));
     }
+
+    // Snoozed section at the bottom: collapsible, lists every live snooze with a one-click "unsnooze".
+    const snoozedBlock = renderSnoozedSection();
+    if (snoozedBlock) body.appendChild(snoozedBlock);
+  }
+
+  function renderSnoozedSection() {
+    const m = snoozedMap();
+    const keys = Object.keys(m);
+    if (!keys.length) return null;
+    const rows = keys.map(k => {
+      const bar = k.indexOf('#');
+      return { key: k, project: k.slice(0, bar), qid: k.slice(bar + 1), until: m[k].until, note: m[k].note || '' };
+    }).sort((a, b) => a.until - b.until);
+    const wrap = el('details', { className: 'ck-snoozed-section' });
+    wrap.appendChild(el('summary', { className: 'ck-snoozed-summary' },
+      ['Snoozed', el('span', { className: 'ck-muted' }, [' · ' + rows.length])]));
+    const ul = el('ul', { className: 'ck-snoozed-list' });
+    for (const r of rows) {
+      const left = Math.max(0, (r.until - Date.now()) / 60000);
+      const when = left < 60 ? Math.round(left) + ' min'
+                 : left < 60 * 24 ? Math.round(left / 60) + ' h' : Math.round(left / 60 / 24) + ' d';
+      const li = el('li', { className: 'ck-snoozed-row' }, [
+        el('span', { className: 'ck-priority-project' }, [r.project || 'this']),
+        el('span', { className: 'ck-priority-qid' }, [' · ' + r.qid]),
+        el('span', { className: 'ck-muted' }, [' · wakes in ' + when]),
+      ]);
+      const unsnooze = el('button', { type: 'button', className: 'ck-btn ck-snooze-unsnooze' }, ['Unsnooze']);
+      unsnooze.addEventListener('click', () => {
+        setSnooze(r.project, r.qid, 0);
+        announce('Unsnoozed ' + r.qid + '.');
+        renderPanel();
+      });
+      li.appendChild(unsnooze);
+      ul.appendChild(li);
+    }
+    wrap.appendChild(ul);
+    return wrap;
   }
 
   // What waits on the owner about a stale ruling, said on its row: a steward's proposal or advice.
@@ -4937,6 +4975,74 @@
     return card;
   }
 
+  // Snooze: a per-qid timestamp held in this browser's localStorage. When `now < until`, the
+  // question is hidden from the Priority ribbon and shown under a collapsible section at the
+  // Inbox bottom. Peer qids may be snoozed too (the hash is the same qid namespace per peer,
+  // keyed by project to avoid collisions).
+  function snoozedMap() {
+    const raw = memGet('snoozed') || {};
+    const now = Date.now();
+    let changed = false;
+    for (const k of Object.keys(raw)) {
+      const v = Number(raw[k] && raw[k].until);
+      if (!Number.isFinite(v) || v <= now) { delete raw[k]; changed = true; }
+    }
+    if (changed) memSet('snoozed', raw);
+    return raw;
+  }
+  function snoozeKey(project, qid) { return (project || '_') + '#' + qid; }
+  function isSnoozed(project, qid) {
+    const m = snoozedMap();
+    return !!(m[snoozeKey(project, qid)] && m[snoozeKey(project, qid)].until > Date.now());
+  }
+  function setSnooze(project, qid, untilMs, note) {
+    const m = snoozedMap();
+    if (!untilMs) delete m[snoozeKey(project, qid)];
+    else m[snoozeKey(project, qid)] = { until: untilMs, note: note || '' };
+    memSet('snoozed', m);
+  }
+  const SNOOZE_PRESETS = [
+    ['1h', () => Date.now() + 60 * 60 * 1000, 'in 1 hour'],
+    ['til tmrw', () => tomorrowAt9(), 'until tomorrow 9am'],
+    ['1w', () => Date.now() + 7 * 24 * 60 * 60 * 1000, 'for 1 week']
+  ];
+  function tomorrowAt9() {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    d.setHours(9, 0, 0, 0);
+    return d.getTime();
+  }
+
+  function renderSnoozeMenu(project, qid) {
+    const wrap = el('span', { className: 'ck-snooze' });
+    const btn = el('button', { type: 'button', className: 'ck-snooze-btn',
+      title: 'Snooze — hide until later', 'aria-label': 'Snooze ' + qid }, ['⌛']);
+    const menu = el('div', { className: 'ck-snooze-menu', hidden: 'hidden' });
+    for (const [label, when, verbose] of SNOOZE_PRESETS) {
+      const b = el('button', { type: 'button', className: 'ck-snooze-opt' },
+        [label, el('span', { className: 'ck-muted' }, [' · ' + verbose])]);
+      b.addEventListener('click', e => {
+        e.stopPropagation();
+        setSnooze(project, qid, when(), label);
+        announce('Snoozed ' + qid + ' ' + verbose + '.');
+        menu.hidden = true;
+        renderPanel();
+      });
+      menu.appendChild(b);
+    }
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      menu.hidden = !menu.hidden;
+      if (!menu.hidden) {
+        const close = ev => { if (!wrap.contains(ev.target)) { menu.hidden = true; document.removeEventListener('click', close, true); } };
+        setTimeout(() => document.addEventListener('click', close, true), 0);
+      }
+    });
+    wrap.appendChild(btn);
+    wrap.appendChild(menu);
+    return wrap;
+  }
+
   // Collect this console's awaiting-you questions as a {project, qid, item, text, ts, isSelf, url}
   // list; combined with peer peeks it feeds the cross-project priority ribbon.
   function selfAwaitingRows() {
@@ -4972,7 +5078,8 @@
     if (!portfolioState.data && !portfolioState.loading && !portfolioState.error) {
       try { loadPortfolio(null); } catch (e) { /* ignore */ }
     }
-    const all = self.concat(peerRows).filter(r => r.ts);
+    const combined = self.concat(peerRows).filter(r => r.ts);
+    const all = combined.filter(r => !isSnoozed(r.project, r.qid));
     if (!all.length) return null;
     all.sort((a, b) => a.ts.localeCompare(b.ts));   // oldest-first = most urgent
     const top = all.slice(0, 6);
@@ -4995,7 +5102,8 @@
         el('span', { className: 'ck-priority-project' }, [r.project]),
         el('span', { className: 'ck-priority-qid' }, [' · ' + r.qid]),
         r.text ? el('span', { className: 'ck-priority-text' }, [' · ' + r.text]) : null,
-        el('span', { className: 'ck-priority-when ck-muted' }, [' · ' + relTime(r.ts)])
+        el('span', { className: 'ck-priority-when ck-muted' }, [' · ' + relTime(r.ts)]),
+        renderSnoozeMenu(r.project, r.qid)
       ].filter(Boolean));
       const activate = () => {
         if (r.isSelf) {

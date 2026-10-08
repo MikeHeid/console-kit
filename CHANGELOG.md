@@ -1386,3 +1386,23 @@ for a portfolio row. The shortcut-help overlay lists this.
 Nothing crosses to another browser or another owner — the hash is
 only interpreted inside the same console. Peers still require
 their own Access login, same as before.
+
+## Snooze a question (0.26.0)
+
+Not every awaiting question is answerable right now. A small ⌛
+button on each Priority-ribbon row offers three snooze presets:
+
+- **1h** — one hour from now.
+- **til tmrw** — tomorrow at 9am local time.
+- **1w** — one week from now.
+
+A snoozed question leaves the Priority ribbon immediately and
+reappears when its time comes. The Inbox tab bottom carries a
+collapsible **Snoozed · N** section listing every live snooze
+with its wake time and a one-click **Unsnooze** button.
+
+Snoozes live in this browser's `localStorage` keyed by
+`<project>#<qid>`, so a snooze made in one window does not reach
+another and a private window may refuse it — the UX works
+without storage. Expired entries are pruned on read; no server
+work is involved.
