@@ -1826,6 +1826,29 @@ rolled-up count tail:
   still unaffected: the kit only writes when the project did
   not.
 
+## Markdown rendering for `md` fragments (1.13.0)
+
+The fragment viewer now **renders** Markdown fragments
+(`md` / `markdown` / `mkd` / `mdown`) with real headings,
+lists, bold, italic, inline code, blockquotes, horizontal
+rules, and `[text](https://…)` links. A **Raw** button toggles
+to the preformatted source; other-language fragments (`py`,
+`js`, `json`, …) still open preformatted.
+
+- Hand-rolled renderer, no library. Every element is built
+  with `document.createElement`; **no HTML pass-through**, so
+  a `<script>` or `<img onerror>` in the body cannot inject.
+- Supported block structures: `# ## ### #### ##### ######`,
+  `- * +` lists, `1. 2.` lists, `>` blockquotes, `---` rules,
+  ``` ``` ``` fenced code blocks, paragraphs that fold adjacent
+  lines.
+- Supported inline: `` `code` ``, `**bold**` / `__bold__`,
+  `*italic*` / `_italic_`, `[label](url)` (http(s) only — other
+  schemes render as literal text).
+- The viewer defaults to **rendered** for Markdown and raw for
+  everything else; the toggle re-paints the same body container.
+- Copy still copies the **raw** body regardless of what's shown.
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent
