@@ -45,6 +45,12 @@ MAX_DESCRIPTION = 400
 NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}\Z")
 _KINDS = ("round", "visual", "chat")
 
+# 0.20.0: `when` predicate kinds. A step may carry an optional `when` object that gates it at run time.
+# The set is CLOSED — no eval, no user expressions — so a bad config fails at load, not at a firing.
+_STATES = ("awaiting_you", "unlocked", "locked", "stale")
+_WHEN_KINDS = ("item_has_state", "item_exists", "project_has_state", "has_section", "not")
+_MAX_WHEN_DEPTH = 3
+
 
 class PlaybookError(ValueError):
     pass
@@ -148,7 +154,101 @@ def _check_step(playbook: str, index: int, step: object) -> dict:
     elif kind == "visual":
         if not text.strip():
             raise PlaybookError(f"{where}: a visual step needs a non-empty text (brief)")
+    if "when" in step:
+        out["when"] = _check_when(where, step["when"], depth=0)
     return out
+
+
+def _check_when(where: str, when: object, depth: int) -> dict:
+    """0.20.0: validate a `when` predicate. Closed-set kinds; a `not` nests another at most _MAX_WHEN_DEPTH deep."""
+    if depth > _MAX_WHEN_DEPTH:
+        raise PlaybookError(f"{where}.when: nested more than {_MAX_WHEN_DEPTH} levels (likely a loop)")
+    if not isinstance(when, dict):
+        raise PlaybookError(f"{where}.when: must be an object")
+    kind = when.get("kind")
+    if kind not in _WHEN_KINDS:
+        raise PlaybookError(f"{where}.when: kind must be one of {', '.join(_WHEN_KINDS)}")
+    if kind == "not":
+        inner = when.get("of")
+        if inner is None:
+            raise PlaybookError(f"{where}.when: 'not' needs an 'of' predicate")
+        if set(when) - {"kind", "of"}:
+            raise PlaybookError(f"{where}.when: 'not' takes only 'of'")
+        return {"kind": "not", "of": _check_when(where + ".of", inner, depth + 1)}
+    if kind == "item_has_state":
+        item = when.get("item")
+        if not isinstance(item, str) or not S.ITEM_ID.match(item):
+            raise PlaybookError(f"{where}.when.item: must be an item id")
+        state = when.get("state")
+        if state not in _STATES:
+            raise PlaybookError(f"{where}.when.state: must be one of {', '.join(_STATES)}")
+        n = when.get("min", 1)
+        if not isinstance(n, int) or n < 1 or n > 1000:
+            raise PlaybookError(f"{where}.when.min: must be an integer between 1 and 1000")
+        if set(when) - {"kind", "item", "state", "min"}:
+            raise PlaybookError(f"{where}.when: unknown field in item_has_state")
+        return {"kind": "item_has_state", "item": item, "state": state, "min": n}
+    if kind == "item_exists":
+        item = when.get("item")
+        if not isinstance(item, str) or not S.ITEM_ID.match(item):
+            raise PlaybookError(f"{where}.when.item: must be an item id")
+        if set(when) - {"kind", "item"}:
+            raise PlaybookError(f"{where}.when: unknown field in item_exists")
+        return {"kind": "item_exists", "item": item}
+    if kind == "project_has_state":
+        state = when.get("state")
+        if state not in _STATES:
+            raise PlaybookError(f"{where}.when.state: must be one of {', '.join(_STATES)}")
+        n = when.get("min", 1)
+        if not isinstance(n, int) or n < 1 or n > 1000:
+            raise PlaybookError(f"{where}.when.min: must be an integer between 1 and 1000")
+        if set(when) - {"kind", "state", "min"}:
+            raise PlaybookError(f"{where}.when: unknown field in project_has_state")
+        return {"kind": "project_has_state", "state": state, "min": n}
+    # has_section
+    name = when.get("name")
+    if not isinstance(name, str) or not name:
+        raise PlaybookError(f"{where}.when.name: must be a non-empty string")
+    if set(when) - {"kind", "name"}:
+        raise PlaybookError(f"{where}.when: unknown field in has_section")
+    return {"kind": "has_section", "name": name}
+
+
+def evaluate_when(when: dict | None, view: dict, items: dict) -> tuple[bool, str]:
+    """0.20.0: evaluate a step's `when`. Returns (passes, reason). `when is None` passes trivially.
+
+    `view` is the shape `Console.payload()['view']`; `items` is the current item register. Looking at
+    state goes through `view.questions[*].state` (the same labels the Inbox renders).
+    """
+    if when is None:
+        return (True, "")
+    kind = when["kind"]
+    if kind == "not":
+        inner_ok, inner_reason = evaluate_when(when["of"], view, items)
+        return (not inner_ok, f"not({inner_reason or 'ok'})")
+    if kind == "item_exists":
+        ok = when["item"] in items
+        return (ok, "" if ok else f"item {when['item']!r} not in register")
+    if kind == "has_section":
+        sections = ((view or {}).get("config") or {}).get("sections") or {}
+        ok = when["name"] in sections
+        return (ok, "" if ok else f"section {when['name']!r} not configured")
+    questions = (view or {}).get("questions") or {}
+    want_state = when["state"]
+    want_min = when["min"]
+    if kind == "item_has_state":
+        want_item = when["item"]
+        if want_item not in items:
+            return (False, f"item {want_item!r} not in register")
+        n = sum(1 for q in questions.values()
+                if (q.get("question") or {}).get("item") == want_item
+                and (q.get("state") or "unlocked") == want_state)
+        ok = n >= want_min
+        return (ok, "" if ok else f"{want_item} has {n} {want_state}, need {want_min}")
+    # project_has_state
+    n = sum(1 for q in questions.values() if (q.get("state") or "unlocked") == want_state)
+    ok = n >= want_min
+    return (ok, "" if ok else f"project has {n} {want_state}, need {want_min}")
 
 
 def step_body(step: dict) -> dict:

@@ -1219,3 +1219,44 @@ console at a glance and alerts the OS when a sibling needs them.
 - **Caching + timeouts**: peer fetches are capped at 4 s and cached
   in-process for 5 s, so one slow peer never blocks the aggregator;
   the browser also polls softly (30 s) while the tab is open.
+
+## Playbook branching with `when` predicates (0.20.0)
+
+A playbook step may now carry an optional **`when`** object. The
+server evaluates it against the current view and item register at the
+start of the firing; a step whose `when` does not pass is skipped with
+`{index, why: "when:<reason>"}`, and the rest still run as owner
+messages. One playbook can now be the "backlog triage" for every
+state the project might be in.
+
+The predicate set is closed — no eval, no user expressions, no
+file-system or network reach — so a bad config fails at load, not at a
+firing:
+
+- `project_has_state` — the project has at least `min` questions in
+  one of `awaiting_you`, `unlocked`, `locked`, `stale`.
+- `item_has_state` — the same, scoped to one item id.
+- `item_exists` — a specific item is in the register.
+- `has_section` — a `.console-kit.json` section is configured.
+- `not` — negates another predicate (nested up to three levels so a
+  typo cannot build a loop).
+
+Example — a release-safety playbook that only drafts the chat
+heads-up when there is unanswered work:
+
+    {
+      "description": "Pre-release triage.",
+      "steps": [
+        {"kind": "chat", "text": "Any blockers in the air?",
+         "when": {"kind": "project_has_state", "state": "awaiting_you", "min": 1}},
+        {"kind": "round", "item": "RELEASE-7", "mode": "tighten",
+         "text": "Confirm the rollout gates.",
+         "when": {"kind": "not", "of": {"kind": "project_has_state", "state": "awaiting_you", "min": 1}}}
+      ]
+    }
+
+A trigger (webhook or cron) and the Delegate bar and the
+`/console-kit:playbook` slash command all go through the same
+`run_playbook`, so the `when` behaviour is the same wherever a
+playbook fires. The browser's Delegate bar shows which steps were
+skipped in the firing's result row, with the predicate reason.
