@@ -165,10 +165,14 @@ store's record. `visual-export` applies the same rules to the destination.
 
 ## The page
 
-The server serves one HTML page (`CONSOLE_PAGE`) and injects the console into
-it. Give each item a `<details id="item-ID"><summary>…</summary></details>` and
-the console adds a button to open that item's questions. The Inbox works on
-any page.
+The server serves the HTML page the owner **snapshotted** (`agent.py
+page-snapshot --path …`): a frozen commit stored in STATE, not the file at
+`CONSOLE_PAGE` in the working tree. Legacy `CONSOLE_PAGE`/`--page` flags are
+ignored since the Q28 ruling; onboarding writes a starter page and
+`page-snapshot` is step 7 of the next-steps list. The server injects the
+console into whatever the snapshot carries. Give each item a
+`<details id="item-ID"><summary>…</summary></details>` and the console adds a
+button to open that item's questions. The Inbox works on any page.
 
 ## A live board (0.9.3)
 

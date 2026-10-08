@@ -10,6 +10,18 @@ You need Python 3.11 or newer, `systemd --user` (Linux or WSL2) to keep the
 server running, and `cloudflared` with a Cloudflare account to reach it from
 outside.
 
+**WSL2 users:** run `loginctl enable-linger $USER` **once** on first install
+so `systemd --user` units keep running after you close every terminal (the
+default is to tear them down with your last session). WSL itself can still
+stop when no Windows process uses it; a `wsl.exe -d <distro> echo ok` from a
+Windows shell wakes it on demand.
+
+**After plugin install or upgrade,** Claude's SessionStart hooks only load
+the next time a session starts: open a fresh session (or `claude` CLI
+invocation) to see the install-notice banner and the owner-console
+SessionStart note. New skills and committee agents are available at once; it's
+the hooks that need a session restart.
+
 ## 1. Add the plugin to Claude (Desktop or CLI)
 
 Claude installs plugins from a **marketplace**, and the unzipped folder is one.
