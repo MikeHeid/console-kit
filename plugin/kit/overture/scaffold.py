@@ -115,7 +115,8 @@ def _page_write(current: str, project_name: str, wanted: tuple[str, ...]) -> tup
     present = _present_sections(current)
     missing = tuple(s for s in wanted if s not in present)
     skipped = tuple(s for s in wanted if s in present)
-    if not missing and current.strip():
+    needs_shape = _needs_body_shape(current)
+    if not missing and current.strip() and not needs_shape:
         return None, (), skipped
     if not current.strip():
         return _new_page(project_name, wanted), wanted, ()
@@ -123,10 +124,37 @@ def _page_write(current: str, project_name: str, wanted: tuple[str, ...]) -> tup
     additions = "\n".join(_section_block(s, project_name) for s in missing)
     needle = "</body>"
     if needle in current:
-        new = current.replace(needle, additions + "\n" + needle, 1)
+        new = current.replace(needle, additions + "\n" + needle, 1) if additions else current
     else:
-        new = current.rstrip() + "\n" + additions + "\n"
+        new = (current.rstrip() + "\n" + additions + "\n") if additions else current
+    # 1.11.0: a scaffolded page MUST carry `<body data-live-shape="…">` for the live loop to find
+    # it. If a project added sections to a hand-made page that lacks the attribute, add it now.
+    if needs_shape:
+        new = _add_body_shape(new)
     return new, missing, skipped
+
+
+_BODY_TAG = re.compile(r"(<body\b)([^>]*)>", re.IGNORECASE)
+
+
+def _needs_body_shape(page: str) -> bool:
+    """True when the page has a `<body>` tag but no `data-live-shape` attribute on it."""
+    m = _BODY_TAG.search(page)
+    if m is None:
+        return False
+    return "data-live-shape" not in m.group(2).lower()
+
+
+def _add_body_shape(page: str) -> str:
+    """Insert `data-live-shape="{BOARD_SHAPE}"` into the `<body>` tag. No-op when already present or absent."""
+    def _rewrite(m: re.Match) -> str:
+        attrs = m.group(2)
+        if "data-live-shape" in attrs.lower():
+            return m.group(0)
+        # Always a space between `<body` and the new attribute; keep remaining attrs verbatim
+        # (they already start with their own whitespace when non-empty).
+        return f'{m.group(1)} data-live-shape="{BOARD_SHAPE}"{attrs}>'
+    return _BODY_TAG.sub(_rewrite, page, count=1)
 
 
 def _present_sections(page: str) -> set[str]:
