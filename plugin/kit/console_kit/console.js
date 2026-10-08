@@ -4832,10 +4832,14 @@
 
   function renderPortfolioCard(row, isSelf) {
     const ok = !row || row.ok !== false;
+    const health = portfolioHealth(row);
     const card = el('div', { className: 'ck-portfolio-card' + (isSelf ? ' ck-portfolio-self' : '') +
       (ok ? '' : ' ck-portfolio-err-card'), tabindex: '0',
+      dataHealth: health,
       'aria-label': 'Project ' + (row.project || row.name || '?') + (isSelf ? ' (this console)' : '') });
     const head = el('div', { className: 'ck-portfolio-head' }, [
+      el('span', { className: 'ck-portfolio-dot', dataHealth: health,
+        title: portfolioHealthTitle(health, row), 'aria-label': 'Status: ' + health }, []),
       el('span', { className: 'ck-portfolio-name' }, [String(row.project || row.name || '?')]),
       isSelf ? el('span', { className: 'ck-portfolio-tag' }, ['this']) : null
     ].filter(Boolean));
@@ -4859,6 +4863,22 @@
       vis ? renderTally('◫vis', vis, 'visual') : null
     ].filter(Boolean));
     card.appendChild(tallies);
+    const peek = Array.isArray(row.peek) ? row.peek : [];
+    if (peek.length) {
+      const list = el('ul', { className: 'ck-portfolio-peek', 'aria-label': 'Top awaiting questions' });
+      for (const p of peek) {
+        if (!p || !p.qid) continue;
+        const li = el('li', { className: 'ck-portfolio-peek-row' }, [
+          el('span', { className: 'ck-portfolio-peek-qid' }, [String(p.qid)]),
+          el('span', { className: 'ck-portfolio-peek-text' },
+            [p.text ? ' · ' + p.text : '']),
+          el('span', { className: 'ck-portfolio-peek-when ck-muted' },
+            [p.ts ? ' · ' + relTime(p.ts) : ''])
+        ]);
+        list.appendChild(li);
+      }
+      card.appendChild(list);
+    }
     const foot = el('div', { className: 'ck-portfolio-foot' }, [
       el('span', { className: 'ck-portfolio-when' },
         [row.last_activity_at ? ('active ' + relTime(row.last_activity_at)) : 'no activity yet']),
@@ -4875,6 +4895,27 @@
       card.style.cursor = 'pointer';
     }
     return card;
+  }
+
+  // The traffic-light dot per peer. green: no awaiting; yellow: oldest within 1h; orange: within 24h;
+  // red: older than 24h; grey: the peer errored. Based on the server's oldest_awaiting_at timestamp.
+  function portfolioHealth(row) {
+    if (!row || row.ok === false) return 'err';
+    if (!Number(row.awaiting_you || 0)) return 'ok';
+    const old = row.oldest_awaiting_at && Date.parse(row.oldest_awaiting_at);
+    if (!old || Number.isNaN(old)) return 'warn';
+    const hrs = (Date.now() - old) / 3_600_000;
+    if (hrs < 1) return 'warn';
+    if (hrs < 24) return 'late';
+    return 'overdue';
+  }
+  function portfolioHealthTitle(health, row) {
+    if (health === 'err') return row && row.error ? row.error : 'peer unreachable';
+    if (health === 'ok') return 'nothing awaiting';
+    const ts = row && row.oldest_awaiting_at ? ' (oldest ' + relTime(row.oldest_awaiting_at) + ')' : '';
+    if (health === 'warn') return 'awaiting under 1h' + ts;
+    if (health === 'late') return 'awaiting over 1h' + ts;
+    return 'awaiting over 24h' + ts;
   }
 
   function renderTally(label, n, kind) {

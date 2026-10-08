@@ -1314,3 +1314,26 @@ playbook row (the same call the Delegate bar makes).
 
 ↑/↓ walk the results, Enter runs the selected row, Esc or a click on
 the backdrop closes.
+
+## Portfolio peek + status LED (0.23.0)
+
+A peer card now carries real triage context, not just counts, so the
+owner can see what is awaiting across every project without opening
+every tab.
+
+- **Peek**: the top three `awaiting_you` questions per peer, newest
+  first — qid plus the first 60 characters of the question text and
+  a relative time. The server includes it in `/api/portfolio-slim`,
+  and the aggregator shapes it defensively (bounded to 3 entries,
+  120 chars each) before letting it reach the home browser.
+- **Status LED** per card:
+  - **green** — nothing awaiting;
+  - **yellow** — awaiting under an hour;
+  - **orange** — awaiting over an hour;
+  - **red** — awaiting over 24 hours;
+  - **grey/red-outline** — the peer is unreachable.
+  The dot's title gives the oldest-awaiting age.
+- The peek is `peek: [{qid, item, ts, text}]` on the slim shape; the
+  text is already the owner's view, so showing it here is the same
+  trust boundary as the question itself. The home console still
+  never sees locked answers or chat content.

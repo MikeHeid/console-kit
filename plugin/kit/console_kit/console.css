@@ -1772,3 +1772,30 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   border-radius: 0 0 var(--radius-sm) var(--radius-sm);
   background: var(--c-surface);
 }
+
+/* Portfolio: status LED + peek rows (0.23.0). */
+.ck-portfolio-dot {
+  display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--c-border); flex-shrink: 0;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .2) inset;
+}
+.ck-portfolio-dot[data-health="ok"]       { background: #3fb950; }
+.ck-portfolio-dot[data-health="warn"]     { background: #d29922; }
+.ck-portfolio-dot[data-health="late"]     { background: #db6d28; }
+.ck-portfolio-dot[data-health="overdue"]  { background: #f85149; }
+.ck-portfolio-dot[data-health="err"]      { background: var(--c-blocked); }
+.ck-portfolio-head { gap: 6px; align-items: center; }
+.ck-portfolio-peek {
+  list-style: none; padding: 0; margin: 4px 0 0;
+  display: flex; flex-direction: column; gap: 3px; font-size: 12px;
+  color: var(--c-fg); border-top: 1px dashed var(--c-border); padding-top: 6px;
+}
+.ck-portfolio-peek-row {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ck-portfolio-peek-qid {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--c-accent); font-size: 11px;
+}
+.ck-portfolio-peek-text { color: var(--c-fg); }
+.ck-portfolio-peek-when { font-size: 11px; }
