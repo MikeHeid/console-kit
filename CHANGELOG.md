@@ -1760,6 +1760,29 @@ every item — no `board()` code needed.
   render time from `items.json`'s existing shape; no snapshot
   change needed.
 
+## Clickable refs in agent text (1.10.0)
+
+A dotted-number mention like `1.2` or `1.2.1` in agent-authored
+text (chat replies, round messages, follow-ups, locked notes,
+sheet view, cluster cards) now renders as a clickable pill that
+opens that item.
+
+- **Only real refs link.** The browser builds a reverse map
+  `ref → id` from the current items view and matches on exact
+  equality. A dotted number that nobody has as a ref stays
+  plain.
+- **Guards against false positives.** A character class
+  blocks the lookbehind/lookahead when the token is adjacent to
+  letters, digits, dot, underscore, hyphen, or slash — so
+  `AB-1`, `x_1.2`, `0.9.3`, `path/1.2`, `1.2.html` never
+  wrongly link.
+- **Keyboard reachable.** The pill is a real `<button>`;
+  Tab-focus and Enter open the item like any other focusable
+  row.
+- Browser-only; same `renderAgentText` entry point as the
+  fragment viewer, so every surface that already shows agent
+  text picks this up automatically.
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent

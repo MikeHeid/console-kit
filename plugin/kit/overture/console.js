@@ -296,17 +296,53 @@
     target.textContent = '';
     if (!text) return;
     const parts = extractFragments(String(text));
-    if (parts.length === 1 && parts[0].kind === 'text') {
-      target.textContent = parts[0].body;
-      return;
-    }
     for (const p of parts) {
       if (p.kind === 'text') {
-        if (p.body) target.appendChild(document.createTextNode(p.body));
+        if (p.body) appendTextWithRefs(target, p.body);
       } else {
         target.appendChild(renderFragmentButton(p));
       }
     }
+  }
+
+  // Dotted-number ref linking: a token like "1.2" or "1.2.1" that matches an item's ref
+  // becomes a clickable chip inline. Only exact matches become links; partial / parenthesised /
+  // version-looking numbers (e.g. "0.9.3", "16.0.1") stay plain unless they match a real ref.
+  const REF_TOKEN = /(?<![A-Za-z0-9._\-/])([1-9][0-9]*(?:\.[1-9][0-9]*)*)(?![A-Za-z0-9._\-/])/g;
+
+  function appendTextWithRefs(target, body) {
+    // Build a reverse map ref -> item id once per call; costs an O(items) walk, keeps the output simple.
+    const byRef = {};
+    const map = items || {};
+    for (const id of Object.keys(map)) {
+      const r = (map[id] || {}).ref;
+      if (typeof r === 'string' && r) byRef[r] = id;
+    }
+    REF_TOKEN.lastIndex = 0;
+    let last = 0;
+    let m;
+    while ((m = REF_TOKEN.exec(body)) !== null) {
+      const itemId = byRef[m[1]];
+      if (!itemId) continue;
+      if (m.index > last) target.appendChild(document.createTextNode(body.slice(last, m.index)));
+      target.appendChild(renderRefLink(m[1], itemId));
+      last = REF_TOKEN.lastIndex;
+    }
+    if (last === 0) {
+      target.appendChild(document.createTextNode(body));
+      return;
+    }
+    if (last < body.length) target.appendChild(document.createTextNode(body.slice(last)));
+  }
+
+  function renderRefLink(ref, itemId) {
+    const btn = el('button', { type: 'button', className: 'ck-ref-link',
+      title: 'Open ' + itemId, 'aria-label': 'Open item ' + itemId + ' (ref ' + ref + ')' }, [ref]);
+    btn.addEventListener('click', e => {
+      e.preventDefault(); e.stopPropagation();
+      openPanel(itemId, 'item');
+    });
+    return btn;
   }
 
   function extractFragments(text) {

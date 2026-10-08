@@ -2047,3 +2047,17 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   border: 1px solid var(--c-border);
   vertical-align: baseline;
 }
+
+/* Inline ref link (1.10.0): a dotted-number mention like "1.2" in agent text renders as a chip that
+   opens that item. Only mentions matching a real item ref become links. */
+.ck-ref-link {
+  display: inline; margin: 0 1px; padding: 1px 6px;
+  border: 1px solid var(--c-border); border-radius: 999px;
+  background: var(--c-surface-alt); color: var(--c-accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.95em; cursor: pointer; vertical-align: baseline;
+}
+.ck-ref-link:hover, .ck-ref-link:focus-visible {
+  border-color: var(--c-accent); background: var(--c-accent); color: var(--c-accent-fg);
+  outline: none;
+}
