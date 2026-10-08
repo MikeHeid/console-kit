@@ -1285,3 +1285,32 @@ Rules the layer follows:
   browser-level binding wins without conflict.
 
 No server changes; the whole layer is in `console.js` and `console.css`.
+
+## Command palette (0.22.0)
+
+**Ctrl+K / Cmd+K** on any page opens a search box over every surface
+the console knows about. One keystroke, type a few characters, press
+Enter.
+
+- **Items** — type an id or title fragment; Enter opens the item panel.
+- **Questions** — their qid plus the first slice of the text; Enter
+  opens the owning item.
+- **Playbooks** — their slug plus description or step count; Enter runs
+  the playbook (same path as the Delegate bar; `when` predicates still
+  gate each step).
+- **Peers** — portfolio cards by their project name; Enter opens the
+  peer's console in a new tab.
+- **Tabs** — hop to Inbox, Feed, PRs, Favorite, Portfolio, Chat.
+- **Actions** — close the panel, open this help, focus the Delegate
+  bar (same bindings as the shortcut layer, so the palette is a
+  mouse-and-touch alternative).
+
+The filter is a case-insensitive subsequence match ranked by how
+early the query lands in the label; ties break by kind priority
+(item → question → playbook → peer → tab → action) so typing an id
+wins. The palette is browser-only: no new server routes, nothing
+sent on a filter — only one `/api/playbook` POST when you Enter a
+playbook row (the same call the Delegate bar makes).
+
+↑/↓ walk the results, Enter runs the selected row, Esc or a click on
+the backdrop closes.

@@ -776,6 +776,13 @@
 
   let shortcutGpfx = 0;
   function handleShortcut(e) {
+    // Cmd+K / Ctrl+K opens the command palette. Captured before the ctrl/meta skip
+    // so it works everywhere, including inside a text input — the standard app shortcut.
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'k' || e.key === 'K')) {
+      e.preventDefault();
+      openPalette();
+      return;
+    }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     const t = e.target;
     const tag = t && t.tagName;
@@ -831,6 +838,7 @@
       role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Keyboard shortcuts' });
     dlg.appendChild(el('h2', { className: 'ck-shortcut-h' }, ['Keyboard shortcuts']));
     const rows = [
+      ['Ctrl/Cmd + K', 'Open the command palette'],
       ['g i', 'Open Inbox tab'], ['g f', 'Open Feed tab'], ['g p', 'Open PRs tab'],
       ['g s', 'Open Favorite tab'], ['g o', 'Open Portfolio tab'], ['g c', 'Open Chat tab'],
       ['g b', 'Close panel (back to board)'],
@@ -858,6 +866,173 @@
   function closeShortcutHelp() {
     const dlg = document.getElementById('ck-shortcut-help');
     if (dlg) dlg.remove();
+  }
+
+  // Command palette: one search box over items, playbooks, peers, tabs, actions.
+  // Fuzzy filter is a simple case-insensitive subsequence; ranking favours start-of-label hits
+  // and then prefers item > question > playbook > peer > tab > action, so a typed id wins.
+  const PALETTE_KINDS_ORDER = ['item', 'question', 'playbook', 'peer', 'tab', 'action'];
+  let paletteState = { items: [], idx: 0, query: '', open: false };
+
+  function buildPaletteCommands() {
+    const cmds = [];
+    const tabs = [['inbox', 'Inbox', 'g i'], ['feed', 'Feed', 'g f'], ['prs', 'PRs', 'g p'],
+                  ['favorite', 'Favorite', 'g s'], ['portfolio', 'Portfolio', 'g o'], ['chat', 'Chat', 'g c']];
+    for (const [id, label, hint] of tabs) cmds.push({ kind: 'tab', id, label, hint });
+    for (const id of Object.keys(items || {})) {
+      const it = items[id] || {};
+      cmds.push({ kind: 'item', id, label: id + (it.title ? ' · ' + it.title : ''), hint: 'open' });
+    }
+    const qs = (view && view.questions) || {};
+    for (const qid of Object.keys(qs)) {
+      const q = qs[qid] && qs[qid].question;
+      if (!q || !q.item) continue;
+      cmds.push({ kind: 'question', id: qid, label: qid + (q.text ? ' · ' + q.text.slice(0, 60) : ''),
+        hint: (qs[qid].state || 'unlocked'), item: q.item });
+    }
+    for (const pb of (view && view.playbooks) || []) {
+      cmds.push({ kind: 'playbook', id: pb.name, label: 'Playbook: ' + pb.name,
+        hint: pb.description ? pb.description.slice(0, 60) : (pb.steps + ' step' + (pb.steps === 1 ? '' : 's')) });
+    }
+    const peers = (portfolioState.data && portfolioState.data.peers) || [];
+    for (const p of peers) {
+      if (!p || !p.name) continue;
+      cmds.push({ kind: 'peer', id: p.name, label: 'Peer: ' + (p.project || p.name),
+        hint: p.ok === false ? (p.error || 'unreachable') : (p.url || '') });
+    }
+    cmds.push({ kind: 'action', id: 'close-panel', label: 'Close panel', hint: 'g b' });
+    cmds.push({ kind: 'action', id: 'show-shortcuts', label: 'Show keyboard shortcuts', hint: '?' });
+    cmds.push({ kind: 'action', id: 'open-delegate', label: 'Focus Delegate bar', hint: '.' });
+    return cmds;
+  }
+
+  function filterPalette(cmds, query) {
+    const q = (query || '').trim().toLowerCase();
+    if (!q) {
+      return cmds.slice().sort(byPaletteKind).slice(0, 40);
+    }
+    const scored = [];
+    for (const c of cmds) {
+      const lab = c.label.toLowerCase();
+      let score;
+      if (lab.startsWith(q)) score = 0;
+      else if (lab.includes(q)) score = 1;
+      else if (subsequence(lab, q)) score = 2;
+      else continue;
+      scored.push({ c, score });
+    }
+    scored.sort((a, b) => a.score - b.score
+      || PALETTE_KINDS_ORDER.indexOf(a.c.kind) - PALETTE_KINDS_ORDER.indexOf(b.c.kind)
+      || a.c.label.length - b.c.label.length);
+    return scored.slice(0, 40).map(s => s.c);
+  }
+  function byPaletteKind(a, b) {
+    return PALETTE_KINDS_ORDER.indexOf(a.kind) - PALETTE_KINDS_ORDER.indexOf(b.kind)
+      || a.label.localeCompare(b.label);
+  }
+  function subsequence(hay, needle) {
+    let i = 0; for (const ch of hay) if (ch === needle[i]) i++; return i === needle.length;
+  }
+
+  function openPalette() {
+    if (document.getElementById('ck-palette')) return;
+    paletteState = { items: filterPalette(buildPaletteCommands(), ''), idx: 0, query: '', open: true };
+    const dlg = el('div', { id: 'ck-palette', className: 'ck-palette',
+      role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Command palette' });
+    const input = el('input', { className: 'ck-palette-input', type: 'text',
+      placeholder: 'Jump to item, playbook, peer, tab, action…',
+      'aria-label': 'Search command palette', autocomplete: 'off', spellcheck: 'false' });
+    const list = el('ul', { className: 'ck-palette-list', role: 'listbox' });
+    const foot = el('div', { className: 'ck-palette-foot ck-muted' },
+      ['↑↓ walk · Enter run · Esc close']);
+    dlg.appendChild(input);
+    dlg.appendChild(list);
+    dlg.appendChild(foot);
+    document.body.appendChild(dlg);
+    paintPalette(list);
+    input.addEventListener('input', () => {
+      paletteState.query = input.value;
+      paletteState.items = filterPalette(buildPaletteCommands(), input.value);
+      paletteState.idx = 0;
+      paintPalette(list);
+    });
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { e.preventDefault(); closePalette(); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); paletteState.idx = Math.min(paletteState.items.length - 1, paletteState.idx + 1); paintPalette(list); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); paletteState.idx = Math.max(0, paletteState.idx - 1); paintPalette(list); return; }
+      if (e.key === 'Enter') { e.preventDefault(); runPaletteSelected(); return; }
+    });
+    dlg.addEventListener('click', e => { if (e.target === dlg) closePalette(); });
+    requestAnimationFrame(() => input.focus());
+  }
+
+  function paintPalette(list) {
+    list.textContent = '';
+    const items = paletteState.items || [];
+    if (!items.length) {
+      list.appendChild(el('li', { className: 'ck-palette-empty ck-muted' }, ['no match']));
+      return;
+    }
+    items.forEach((c, i) => {
+      const li = el('li', { className: 'ck-palette-row' + (i === paletteState.idx ? ' ck-palette-row-sel' : ''),
+        role: 'option', 'aria-selected': i === paletteState.idx ? 'true' : 'false', dataKind: c.kind });
+      li.appendChild(el('span', { className: 'ck-palette-kind', dataKind: c.kind }, [c.kind]));
+      li.appendChild(el('span', { className: 'ck-palette-label' }, [c.label]));
+      if (c.hint) li.appendChild(el('span', { className: 'ck-palette-hint ck-muted' }, [c.hint]));
+      li.addEventListener('click', () => { paletteState.idx = i; runPaletteSelected(); });
+      list.appendChild(li);
+    });
+  }
+
+  function runPaletteSelected() {
+    const c = paletteState.items[paletteState.idx];
+    if (!c) return;
+    closePalette();
+    if (c.kind === 'tab') {
+      if (panelEl.getAttribute('data-open') !== 'true') openPanel(null, 'inbox');
+      currentMode = 'inbox';
+      currentTab = c.id;
+      renderPanel();
+      return;
+    }
+    if (c.kind === 'item') { openPanel(c.id, 'item'); return; }
+    if (c.kind === 'question') { openPanel(c.item, 'item'); return; }
+    if (c.kind === 'playbook') {
+      apiPost('/playbook', { name: c.id }, 'palette-pb-' + c.id + '-' + Date.now())
+        .then(r => {
+          if (r && r.error) announce('Playbook not run: ' + r.error);
+          else if (r && Array.isArray(r.skipped) && r.skipped.length)
+            announce((r.records || []).length + ' step(s) ran; ' + r.skipped.length + ' skipped.');
+          else announce('Playbook ran.');
+        })
+        .catch(e => announce('Playbook error: ' + (e.message || 'network')));
+      return;
+    }
+    if (c.kind === 'peer') {
+      const peer = ((portfolioState.data && portfolioState.data.peers) || []).find(p => p && p.name === c.id);
+      if (peer && peer.url) { try { window.open(peer.url, '_blank', 'noopener'); } catch (e) {} }
+      return;
+    }
+    if (c.kind === 'action') {
+      if (c.id === 'close-panel') { if (panelEl.getAttribute('data-open') === 'true') closePanel(); return; }
+      if (c.id === 'show-shortcuts') { openShortcutHelp(); return; }
+      if (c.id === 'open-delegate') {
+        if (panelEl.getAttribute('data-open') !== 'true') openPanel(null, 'inbox');
+        const bar = panelEl.querySelector('.ck-delegate-bar');
+        if (bar) {
+          if (!bar.open) bar.open = true;
+          const input = bar.querySelector('input, textarea, select');
+          if (input) requestAnimationFrame(() => input.focus());
+        }
+        return;
+      }
+    }
+  }
+
+  function closePalette() {
+    const dlg = document.getElementById('ck-palette');
+    if (dlg) dlg.remove();
+    paletteState.open = false;
   }
 
   // Focus trapping inside panel

@@ -1731,3 +1731,44 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 }
 .ck-shortcut-list dd { margin: 0; color: var(--c-fg); }
 .ck-shortcut-close { padding: 4px 10px; }
+
+/* Command palette (Cmd+K / Ctrl+K): one search box with a scrollable results list. */
+.ck-palette {
+  position: fixed; inset: 0; z-index: 1001;
+  display: grid; align-content: start; justify-items: center; padding-top: 10vh;
+  background: rgba(0, 0, 0, .35);
+}
+.ck-palette > * { width: min(600px, 92vw); }
+.ck-palette-input {
+  padding: 10px 14px; font-size: 15px; border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  border: 1px solid var(--c-border); border-bottom: 0;
+  background: var(--c-surface); color: var(--c-fg);
+}
+.ck-palette-input:focus { outline: 2px solid var(--c-accent); outline-offset: -2px; }
+.ck-palette-list {
+  list-style: none; margin: 0; padding: 4px 0;
+  max-height: 60vh; overflow: auto;
+  border: 1px solid var(--c-border); background: var(--c-surface);
+}
+.ck-palette-row {
+  display: grid; grid-template-columns: 72px 1fr auto; gap: 10px;
+  align-items: center; padding: 6px 12px; cursor: pointer;
+}
+.ck-palette-row:hover, .ck-palette-row-sel { background: var(--c-surface-alt); }
+.ck-palette-kind {
+  text-align: center; font-size: 10px; text-transform: uppercase; letter-spacing: .5px;
+  color: var(--c-fg-muted); background: var(--c-surface);
+  border: 1px solid var(--c-border); padding: 1px 6px; border-radius: 999px;
+}
+.ck-palette-kind[data-kind="item"] { color: var(--c-accent); border-color: var(--c-accent); }
+.ck-palette-kind[data-kind="playbook"] { color: var(--c-fg); }
+.ck-palette-kind[data-kind="peer"] { color: var(--c-fg); }
+.ck-palette-label { font-size: 13px; color: var(--c-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ck-palette-hint { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
+.ck-palette-empty { padding: 12px; text-align: center; }
+.ck-palette-foot {
+  padding: 6px 12px; font-size: 11px;
+  border: 1px solid var(--c-border); border-top: 0;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  background: var(--c-surface);
+}
