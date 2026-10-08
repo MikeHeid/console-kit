@@ -1,5 +1,18 @@
 # console-kit
 
+> **Console-kit is the self-hosted owner-operator layer for AI software
+> development: one web cockpit, behind your own Cloudflare Access, that
+> unifies every AI-coding project you run — Portfolio and cross-project
+> Priority ribbon, Playbooks and Triggers with branching and replay,
+> Command palette and deep links for owner speed, and a full audit
+> trail from trigger log to Markdown export. In a market of AI
+> assistants that generate code, console-kit is the trust-first
+> control plane — SHA-256 secret drift checks, sandboxed-iframe
+> visuals with no CDN, closed-set predicate validation, signed
+> releases — that keeps a single operator in command of what gets
+> shipped across many projects without surrendering oversight to a
+> third-party SaaS.
+
 **Answer your agents' questions from a web page.** An agent working in a
 project asks you structured questions: options, a recommended pick (★), what
 each costs, and the evidence behind it. You answer from any browser, behind
