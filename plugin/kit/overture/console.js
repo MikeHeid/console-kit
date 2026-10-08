@@ -1628,6 +1628,7 @@
         itemData ? ' — ' + itemData.title : ''
       ]),
       renderStarButton('item:' + itemId, 'this item'),
+      renderThemeToggle(),
       el('button', {
         className: 'ck-close-btn',
         type: 'button',
@@ -3340,11 +3341,46 @@
     const header = el('div', { className: 'ck-header' }, [
       el('button', { className: 'ck-back-btn', type: 'button', 'aria-label': backLabel }, ['← Back']),
       el('span', { className: 'ck-title' }, titleChildren),
+      renderThemeToggle(),
       el('button', { className: 'ck-close-btn', type: 'button', 'aria-label': 'Close panel' }, ['×'])
     ]);
     header.querySelector('.ck-back-btn').addEventListener('click', onBack);
     header.querySelector('.ck-close-btn').addEventListener('click', closePanel);
     return header;
+  }
+
+  // Theme: 'auto' follows OS prefers-color-scheme; 'light' or 'dark' pins. Persists per project
+  // in localStorage; applied by setting document.documentElement.dataset.theme, which the CSS
+  // already keys off (:root[data-theme="light"|"dark"], else prefers-color-scheme).
+  const THEME_MODES = ['auto', 'light', 'dark'];
+  const THEME_GLYPH = { auto: '◐', light: '☀', dark: '☾' };
+  const THEME_LABEL = { auto: 'Theme: auto (OS)', light: 'Theme: light', dark: 'Theme: dark' };
+  function themeMode() {
+    const v = memGet('theme');
+    return THEME_MODES.includes(v) ? v : 'auto';
+  }
+  function applyTheme() {
+    const m = themeMode();
+    if (m === 'auto') delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = m;
+  }
+  function cycleTheme() {
+    const cur = themeMode();
+    const next = THEME_MODES[(THEME_MODES.indexOf(cur) + 1) % THEME_MODES.length];
+    memSet('theme', next);
+    applyTheme();
+    announce(THEME_LABEL[next] + '.');
+    renderPanel();
+  }
+  function renderThemeToggle() {
+    const m = themeMode();
+    const btn = el('button', {
+      className: 'ck-theme-toggle', type: 'button',
+      title: THEME_LABEL[m] + ' — click to cycle',
+      'aria-label': THEME_LABEL[m]
+    }, [THEME_GLYPH[m]]);
+    btn.addEventListener('click', cycleTheme);
+    return btn;
   }
 
   // Open the answers sheet for an item and all under it, or (itemId null) the whole console.
@@ -6058,6 +6094,7 @@
         config = null;
       }
     }
+    applyTheme();
     createPanel();
     document.addEventListener('keydown', onRoundKey);
     panelEl.addEventListener('focusout', onPanelFocusOut);

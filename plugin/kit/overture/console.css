@@ -1940,3 +1940,13 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 }
 .ck-inbox-chip[data-state="awaiting_you"][aria-pressed="true"] { color: var(--c-accent); }
 .ck-inbox-chip[data-state="stale"][aria-pressed="true"]        { color: var(--c-blocked); border-color: var(--c-blocked); }
+
+/* Theme toggle (1.2.0): three-way cycle auto / light / dark; glyph announces current state. */
+.ck-theme-toggle {
+  margin-left: 6px; padding: 2px 8px; font-size: 14px; line-height: 1;
+  border: 1px solid var(--c-border); border-radius: 999px;
+  background: var(--c-surface); color: var(--c-fg-muted); cursor: pointer;
+}
+.ck-theme-toggle:hover, .ck-theme-toggle:focus-visible {
+  background: var(--c-surface-alt); color: var(--c-fg); outline: none;
+}

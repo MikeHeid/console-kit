@@ -1517,3 +1517,19 @@ project's `localStorage`, so the choice sticks per project and
 per browser without ever reaching the server. Chips mirror the
 Portfolio-card tally glyphs and the Priority ribbon's compact
 header, so one visual language carries the whole triage layer.
+
+## Theme toggle (1.2.0)
+
+A compact theme button in every panel header cycles **auto → light
+→ dark**:
+
+- `◐ auto` — follows the OS `prefers-color-scheme` (the default).
+- `☀ light` — pins the light Primer palette.
+- `☾ dark` — pins the dark Primer palette.
+
+The CSS already carried both palettes; the toggle adds the user
+override. Choice is held in this project's `localStorage` and
+applied by setting `document.documentElement.dataset.theme`, which
+the `console-fallbacks` layer keys off. A screen reader hears the
+new state (`announce` fires on cycle); the button's `title`
+tooltip names the current mode.
