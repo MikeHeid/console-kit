@@ -202,9 +202,28 @@ def _fetch_slim_http(peer: Peer, secret: str) -> dict:
     # Normalise and keep only known keys so no peer content leaks into the home console.
     row: dict = {"name": peer.name, "url": peer.url, "ok": True}
     for k in ("project", "items", "awaiting_you", "unlocked", "locked", "stale",
-              "visuals_waiting", "last_activity_at"):
+              "visuals_waiting", "last_activity_at", "oldest_awaiting_at"):
         if k in doc:
             row[k] = doc[k]
+    # The peek list is a bounded sequence of {qid, item, ts, text}; drop anything else so a bad
+    # peer cannot smuggle extra fields through the aggregator (0.23.0).
+    peek = doc.get("peek")
+    if isinstance(peek, list):
+        safe: list[dict] = []
+        for entry in peek[:3]:
+            if not isinstance(entry, dict):
+                continue
+            qid = entry.get("qid"); item = entry.get("item")
+            ts = entry.get("ts");   text = entry.get("text")
+            if not isinstance(qid, str) or not isinstance(item, str):
+                continue
+            if not isinstance(text, str):
+                text = ""
+            if len(text) > 120:
+                text = text[:120]
+            safe.append({"qid": qid, "item": item,
+                         "ts": ts if isinstance(ts, str) else "", "text": text})
+        row["peek"] = safe
     return row
 
 

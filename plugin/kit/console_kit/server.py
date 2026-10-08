@@ -1365,26 +1365,48 @@ class Console:
     def portfolio_slim(self) -> dict:
         """0.19.0: a small JSON summary of THIS console, for a home console's portfolio aggregator.
 
-        Never includes owner content — just counts + the last-activity timestamp.
+        Never includes owner content apart from a short peek: the top 3 awaiting-you qids plus the first
+        60 chars of each question's text (0.23.0). That is enough to triage across projects without
+        opening every tab, and the text already left the asker's agent, so showing it here is the same
+        trust surface as the question itself.
         """
         payload = self.payload()
         view = payload.get("view") or {}
         items = payload.get("items") or {}
         awaiting_you = unlocked = locked = stale = 0
         last_ts: str | None = None
-        for q in (view.get("questions") or {}).values():
+        oldest_awaiting: str | None = None
+        awaiting_rows: list[tuple[str, str, dict]] = []  # (ts, qid, record)
+        for qid, q in (view.get("questions") or {}).items():
             s = q.get("state") or "unlocked"
             if s == "awaiting_you": awaiting_you += 1
             elif s == "unlocked": unlocked += 1
             elif s == "locked": locked += 1
             elif s == "stale": stale += 1
-            ts = (q.get("question") or {}).get("ts")
-            if isinstance(ts, str) and (last_ts is None or ts > last_ts):
-                last_ts = ts
+            qr = q.get("question") or {}
+            ts = qr.get("ts")
+            if isinstance(ts, str):
+                if last_ts is None or ts > last_ts:
+                    last_ts = ts
+                if s == "awaiting_you":
+                    awaiting_rows.append((ts, qid, qr))
+                    if oldest_awaiting is None or ts < oldest_awaiting:
+                        oldest_awaiting = ts
         visuals_waiting = len((view.get("waiting_visuals") or []))
+        # Peek: the 3 most recent awaiting-you questions, each with the qid, item, state, and a text slice.
+        awaiting_rows.sort(key=lambda row: row[0], reverse=True)
+        peek: list[dict] = []
+        for ts, qid, qr in awaiting_rows[:3]:
+            text = qr.get("text") or ""
+            if not isinstance(text, str):
+                text = ""
+            if len(text) > 80:
+                text = text[:80].rstrip() + "…"
+            peek.append({"qid": qid, "item": qr.get("item") or "", "ts": ts, "text": text})
         return {"project": self.cfg.project, "items": len(items),
                 "awaiting_you": awaiting_you, "unlocked": unlocked, "locked": locked, "stale": stale,
-                "visuals_waiting": visuals_waiting, "last_activity_at": last_ts}
+                "visuals_waiting": visuals_waiting, "last_activity_at": last_ts,
+                "oldest_awaiting_at": oldest_awaiting, "peek": peek}
 
     def portfolio(self) -> dict:
         """0.19.0: aggregate this console's slim view with every configured peer's.
