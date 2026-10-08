@@ -990,7 +990,9 @@
     for (const [id, label, hint] of tabs) cmds.push({ kind: 'tab', id, label, hint });
     for (const id of Object.keys(items || {})) {
       const it = items[id] || {};
-      cmds.push({ kind: 'item', id, label: id + (it.title ? ' · ' + it.title : ''), hint: 'open' });
+      const refPrefix = it.ref ? it.ref + ' · ' : '';
+      cmds.push({ kind: 'item', id, label: refPrefix + id + (it.title ? ' · ' + it.title : ''),
+                  hint: 'open', ref: it.ref || '' });
     }
     const qs = (view && view.questions) || {};
     for (const qid of Object.keys(qs)) {
@@ -1021,10 +1023,14 @@
       return cmds.slice().sort(byPaletteKind).slice(0, 40);
     }
     const scored = [];
+    // A pure dotted-number query (e.g. "1.2") is treated as a ref lookup — exact wins over startswith.
+    const isRefLookup = /^[1-9][0-9]*(\.[1-9][0-9]*)*$/.test(q);
     for (const c of cmds) {
       const lab = c.label.toLowerCase();
       let score;
-      if (lab.startsWith(q)) score = 0;
+      if (isRefLookup && c.ref === q) score = -1;             // exact ref match: top of the list
+      else if (isRefLookup && c.ref && c.ref.startsWith(q + '.')) score = 0;   // "1" matches "1.2" descendants
+      else if (lab.startsWith(q)) score = 0;
       else if (lab.includes(q)) score = 1;
       else if (subsequence(lab, q)) score = 2;
       else continue;
@@ -1368,6 +1374,7 @@
         const row = el('div', { className: 'ck-inbox-item ck-inbox-item-visual', tabindex: '0',
           'aria-label': 'New visual on ' + it + (itemData ? ', ' + itemData.title : '') }, [
           el('span', { className: 'ck-q-state', dataState: 'visual' }, ['◫ ', vs.length === 1 ? 'drawn' : vs.length + ' drawn']),
+          renderItemRefTag(it),
           el('span', { className: 'ck-inbox-item-id' }, [it]),
           el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : '']),
           renderStarButton('item:' + it, 'this item')
@@ -1455,6 +1462,7 @@
         const itemData = items[it];
         const row = el('div', { className: 'ck-inbox-item ck-inbox-item-answered', tabindex: '0' }, [
           el('span', { className: 'ck-q-state', dataState: 'locked' }, [GLYPH.locked || '✓', ' locked']),
+          renderItemRefTag(it),
           el('span', { className: 'ck-inbox-item-id' }, [it]),
           el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : '']),
           renderStarButton('item:' + it, 'this item')
@@ -1483,6 +1491,7 @@
           el('span', { className: 'ck-q-state', dataState: agentActive(itemId) ? 'agent_active' : 'awaiting_agent' }, [
             GLYPH.awaiting_agent, ' ' + agentWords(itemId)
           ]),
+          renderItemRefTag(itemId),
           el('span', { className: 'ck-inbox-item-id' }, [itemId]),
           el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : ''])
         ]);
@@ -1568,6 +1577,7 @@
       el('span', { className: 'ck-q-state', dataState: q.state }, [
         GLYPH[q.state] || '', ' ', q.state.replace('_', ' ')
       ]),
+      renderItemRefTag(q.question.item),
       el('span', { className: 'ck-inbox-item-id' }, [q.question.item]),
       el('span', { className: 'ck-inbox-item-qnum', title: qid }, ['Q' + qNum(qid)]),
       el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : '']),
@@ -1666,6 +1676,7 @@
     btn.addEventListener('click', () => openLooseRound(c));
     const card = el('div', { className: 'ck-cluster', dataCluster: c.id }, [
       el('div', { className: 'ck-cluster-head' }, [
+        renderItemRefTag(c.item),
         el('span', { className: 'ck-inbox-item-id' }, [c.item]),
         ' ' + n + ' questions from ' + c.agent + ' · asked ' + relTime(c.qs[n - 1].question.ts)]),
       btn
@@ -5323,6 +5334,19 @@
     return card;
   }
 
+  // Per-item dotted-number ref assigned by the server (see refs.py). Returns "" when
+  // the item has no ref yet (older project, auto_ref off, or the ref didn't come down in this view).
+  function itemRef(id) {
+    const data = items && items[id];
+    const ref = data && typeof data.ref === 'string' ? data.ref : '';
+    return ref;
+  }
+  function renderItemRefTag(id) {
+    const r = itemRef(id);
+    if (!r) return null;
+    return el('span', { className: 'ck-item-ref', title: 'Item ref ' + r }, [r]);
+  }
+
   // Inbox filter chips: per-state toggles over this project's localStorage. Default: all on.
   // Four states cover the full Inbox: awaiting_you (rounds + loose Q), unlocked (open with a
   // draft), stale, locked (Recently answered footers).
@@ -5561,6 +5585,7 @@
       const itemData = items && items[id];
       const header = el('div', { className: 'ck-inbox-item ck-favorite-item', tabindex: '0' }, [
         el('span', { className: 'ck-star ck-star-on', 'aria-label': 'Starred item' }, ['★']),
+        renderItemRefTag(id),
         el('span', { className: 'ck-inbox-item-id' }, [id]),
         el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : ''])
       ]);

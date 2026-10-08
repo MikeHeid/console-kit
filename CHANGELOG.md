@@ -1716,6 +1716,25 @@ numbers do not drift or collide across pushes.
   along with the browser surfaces (ref beside each title in the
   Inbox, Priority ribbon and command palette).
 
+## Numbered item refs — phase 2 (1.8.0)
+
+Browser surfaces for the refs that 1.7.0 taught the kit to assign.
+
+- **Ref pill beside every item id.** New visual rows, cluster
+  cards, loose rows, favorites item headers all show the item's
+  ref as a small accent-coloured pill (`1.2`) before the id.
+  Items without a ref (older project, auto_ref off) render as
+  before — the pill is omitted, not blank.
+- **Command palette shows the ref.** An item's row label now
+  starts with its ref: `1.2 · AB-2 · <title>`.
+- **Palette search by ref.** Typing a dotted-number query (`1.2`)
+  treats it as a ref lookup: exact matches rank first,
+  descendants of a prefix (`1` matches `1.1`, `1.2`, …) rank
+  next. Non-ref queries still filter by label as before.
+- Browser-only; no server changes beyond what 1.7.0 already
+  carries. `item-move` (the move-vs-alias open question) stays
+  deferred.
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent
