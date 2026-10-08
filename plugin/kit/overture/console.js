@@ -385,6 +385,8 @@
     return btn;
   }
 
+  const MD_LANGS = new Set(['md', 'markdown', 'mkd', 'mdown']);
+
   function openFragmentViewer(frag) {
     if (document.getElementById('ck-frag-view')) return;
     const dlg = el('div', { id: 'ck-frag-view', className: 'ck-frag-view', role: 'dialog',
@@ -393,11 +395,24 @@
       el('span', { 'aria-hidden': 'true' }, [FRAG_LANG_ICON[frag.lang] || '📄', ' ']),
       el('code', {}, [frag.name || frag.lang])
     ]);
-    const pre = el('pre', { className: 'ck-frag-body', dataLang: frag.lang,
-      tabindex: '0' });
-    pre.textContent = frag.body;
+    const isMd = MD_LANGS.has(frag.lang);
+    const body = el('div', { className: 'ck-frag-body', dataLang: frag.lang, tabindex: '0' });
+    const paintRendered = () => { body.textContent = ''; body.classList.add('ck-frag-rendered'); renderMarkdown(body, frag.body); };
+    const paintRaw = () => { body.textContent = ''; body.classList.remove('ck-frag-rendered'); const pre = el('pre', { className: 'ck-frag-raw' }); pre.textContent = frag.body; body.appendChild(pre); };
     const copyBtn = el('button', { type: 'button', className: 'ck-btn ck-btn-primary' }, ['Copy']);
     const closeBtn = el('button', { type: 'button', className: 'ck-btn' }, ['Close']);
+    const toggleBtn = isMd ? el('button', { type: 'button', className: 'ck-btn', 'aria-pressed': 'true' },
+      ['Raw']) : null;
+    let rendered = isMd;
+    if (toggleBtn) {
+      toggleBtn.addEventListener('click', () => {
+        rendered = !rendered;
+        toggleBtn.textContent = rendered ? 'Raw' : 'Rendered';
+        toggleBtn.setAttribute('aria-pressed', rendered ? 'true' : 'false');
+        (rendered ? paintRendered : paintRaw)();
+      });
+    }
+    (rendered ? paintRendered : paintRaw)();
     copyBtn.addEventListener('click', () => {
       try {
         if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -407,18 +422,132 @@
           return;
         }
       } catch (e) { /* fall through */ }
-      const r = document.createRange(); r.selectNodeContents(pre);
+      const r = document.createRange(); r.selectNodeContents(body);
       const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
       announce('Selected — press Ctrl+C to copy.');
     });
     closeBtn.addEventListener('click', closeFragmentViewer);
     dlg.appendChild(h);
-    dlg.appendChild(pre);
-    dlg.appendChild(el('div', { className: 'ck-frag-actions' }, [copyBtn, closeBtn]));
+    dlg.appendChild(body);
+    const actions = [copyBtn];
+    if (toggleBtn) actions.push(toggleBtn);
+    actions.push(closeBtn);
+    dlg.appendChild(el('div', { className: 'ck-frag-actions' }, actions));
     dlg.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closeFragmentViewer(); } });
     dlg.addEventListener('click', e => { if (e.target === dlg) closeFragmentViewer(); });
     document.body.appendChild(dlg);
     requestAnimationFrame(() => closeBtn.focus());
+  }
+
+  // Minimal safe Markdown-to-DOM renderer. Blocks: # / ## / ### headings, ordered / unordered
+  // lists, fenced ```code``` blocks (preformatted), blockquotes, horizontal rules, paragraphs.
+  // Inline: **bold**, _italic_ or *italic*, `code`, [text](url). Everything else is literal text.
+  // No HTML pass-through — the DOM is built with document.createElement so a malicious payload in
+  // the body cannot inject script, iframe, or attributes.
+  function renderMarkdown(target, text) {
+    const lines = String(text || '').split('\n');
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      // Fenced code block
+      const fence = line.match(/^```([A-Za-z0-9+_.-]*)\s*$/);
+      if (fence) {
+        const codeLines = [];
+        i++;
+        while (i < lines.length && !/^```\s*$/.test(lines[i])) { codeLines.push(lines[i]); i++; }
+        if (i < lines.length) i++;
+        const pre = el('pre', { className: 'ck-md-code' });
+        pre.textContent = codeLines.join('\n');
+        target.appendChild(pre);
+        continue;
+      }
+      // Headings
+      const h = line.match(/^(#{1,6})\s+(.*)$/);
+      if (h) {
+        const tag = 'h' + h[1].length;
+        target.appendChild(renderMdInline(el(tag, {}), h[2]));
+        i++; continue;
+      }
+      // Blockquote
+      if (/^>\s?/.test(line)) {
+        const quoteLines = [];
+        while (i < lines.length && /^>\s?/.test(lines[i])) { quoteLines.push(lines[i].replace(/^>\s?/, '')); i++; }
+        target.appendChild(renderMdInline(el('blockquote', {}), quoteLines.join(' ')));
+        continue;
+      }
+      // Horizontal rule
+      if (/^(---|___|\*\*\*)\s*$/.test(line)) { target.appendChild(el('hr', {})); i++; continue; }
+      // Unordered list
+      if (/^\s*[-*+]\s+/.test(line)) {
+        const ul = el('ul', { className: 'ck-md-ul' });
+        while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) {
+          const li = renderMdInline(el('li', {}), lines[i].replace(/^\s*[-*+]\s+/, ''));
+          ul.appendChild(li);
+          i++;
+        }
+        target.appendChild(ul); continue;
+      }
+      // Ordered list
+      if (/^\s*\d+\.\s+/.test(line)) {
+        const ol = el('ol', { className: 'ck-md-ol' });
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+          const li = renderMdInline(el('li', {}), lines[i].replace(/^\s*\d+\.\s+/, ''));
+          ol.appendChild(li);
+          i++;
+        }
+        target.appendChild(ol); continue;
+      }
+      // Blank line
+      if (/^\s*$/.test(line)) { i++; continue; }
+      // Paragraph: coalesce consecutive non-structural lines
+      const paraLines = [];
+      while (i < lines.length && !/^\s*$/.test(lines[i])
+             && !/^(#{1,6})\s+/.test(lines[i]) && !/^```/.test(lines[i])
+             && !/^\s*[-*+]\s+/.test(lines[i]) && !/^\s*\d+\.\s+/.test(lines[i])
+             && !/^>\s?/.test(lines[i]) && !/^(---|___|\*\*\*)\s*$/.test(lines[i])) {
+        paraLines.push(lines[i]); i++;
+      }
+      target.appendChild(renderMdInline(el('p', { className: 'ck-md-p' }), paraLines.join(' ')));
+    }
+  }
+
+  // Inline markdown: builds a DOM subtree from text runs. Order of application matters because
+  // regex scans are left-to-right; code spans are consumed first so markup inside code stays literal.
+  function renderMdInline(parent, text) {
+    const INLINE = /(`[^`]+`)|(\[[^\]]+\]\([^)]+\))|(\*\*[^*]+\*\*)|(__[^_]+__)|(\*[^*\s][^*]*\*)|(_[^_\s][^_]*_)/;
+    let rest = String(text || '');
+    while (rest) {
+      const m = rest.match(INLINE);
+      if (!m) { parent.appendChild(document.createTextNode(rest)); break; }
+      if (m.index > 0) parent.appendChild(document.createTextNode(rest.slice(0, m.index)));
+      const token = m[0];
+      if (token.startsWith('`')) {
+        const code = el('code', { className: 'ck-md-icode' });
+        code.textContent = token.slice(1, -1);
+        parent.appendChild(code);
+      } else if (token.startsWith('[')) {
+        const close = token.indexOf(']');
+        const label = token.slice(1, close);
+        const url = token.slice(close + 2, -1);
+        if (/^https?:\/\//.test(url)) {
+          const a = el('a', { href: url, target: '_blank', rel: 'noopener noreferrer' });
+          a.textContent = label;
+          parent.appendChild(a);
+        } else {
+          parent.appendChild(document.createTextNode(token));   // non-http: show literally
+        }
+      } else if (token.startsWith('**') || token.startsWith('__')) {
+        const b = el('strong', {});
+        b.textContent = token.slice(2, -2);
+        parent.appendChild(b);
+      } else {
+        const i = el('em', {});
+        i.textContent = token.slice(1, -1);
+        parent.appendChild(i);
+      }
+      rest = rest.slice(m.index + token.length);
+    }
+    return parent;
   }
   function closeFragmentViewer() {
     const dlg = document.getElementById('ck-frag-view');
