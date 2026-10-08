@@ -1500,3 +1500,20 @@ Then start the user service:
 
 The hook will remind you if you forget — once per installed
 version, and it goes quiet after.
+
+## Inbox filter chips (1.1.0)
+
+The Inbox tab opens with a row of four toggle chips above the
+sections, so a dense inbox can be trimmed to what you want to look
+at right now:
+
+- **? you** — rounds + loose questions awaiting the owner.
+- **~ unl** — questions with a draft answer that is not locked yet.
+- **! stale** — rulings whose cited evidence has moved.
+- **○ lock** — the "Recently answered" footers that nest under each item.
+
+All chips are on by default. Each chip's state is held in this
+project's `localStorage`, so the choice sticks per project and
+per browser without ever reaching the server. Chips mirror the
+Portfolio-card tally glyphs and the Priority ribbon's compact
+header, so one visual language carries the whole triage layer.

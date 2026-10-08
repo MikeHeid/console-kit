@@ -1244,6 +1244,8 @@
     // configured. Nothing to show when there's no awaiting work anywhere.
     const ribbon = renderPriorityRibbon();
     if (ribbon) body.appendChild(ribbon);
+    const F = inboxFilters();
+    body.appendChild(renderInboxFilterChips());
     // 0.8.19: a map of every item (collapsible, lazy). Clicking a node opens that item.
     if (items && Object.keys(items).length > 1) body.appendChild(renderProjectMap());
     // 0.8.19: items whose visuals arrived since the last look, so a drawn flowchart is impossible to miss.
@@ -1288,7 +1290,7 @@
         loose.push(q);
       }
     }
-    if (rounds.size) {
+    if (rounds.size && F.awaiting_you) {
       body.appendChild(el('div', { className: 'ck-section-heading' }, ['Rounds to answer']));
       const list = el('div', { className: 'ck-inbox-list' });
       for (const fid of rounds.keys()) list.appendChild(renderRoundCard(fid));
@@ -1309,21 +1311,22 @@
     }
     const footerShown = new Set();
 
-    if (loose.length) {
+    const looseKept = loose.filter(q => F[q.state]);
+    if (looseKept.length) {
       body.appendChild(el('div', { className: 'ck-section-heading' }, ['Questions for you']));
       const list = el('div', { className: 'ck-inbox-list' });
-      const clusters = looseClusters(loose);
+      const clusters = looseClusters(looseKept);
       const inCluster = new Set(clusters.flatMap(c => c.qs.map(q => q.question.qid)));
       // Walk in the order that produced the inbox; after the last row for an item, append its "N answered".
       const emit = (itemId, node) => {
         list.appendChild(node);
-        if (!footerShown.has(itemId) && rulingsByItem[itemId] && rulingsByItem[itemId].length) {
+        if (F.locked && !footerShown.has(itemId) && rulingsByItem[itemId] && rulingsByItem[itemId].length) {
           list.appendChild(renderAnsweredFooter(itemId, rulingsByItem[itemId]));
           footerShown.add(itemId);
         }
       };
       for (const c of clusters) emit(c.item, renderClusterCard(c));
-      for (const q of loose) if (!inCluster.has(q.question.qid)) emit(q.question.item, looseRow(q));
+      for (const q of looseKept) if (!inCluster.has(q.question.qid)) emit(q.question.item, looseRow(q));
       body.appendChild(list);
     }
 
@@ -1337,7 +1340,7 @@
         return Number.isFinite(t) && (now - t) <= RECENT_MS;
       }))
       .sort();
-    if (recentlyAnswered.length) {
+    if (recentlyAnswered.length && F.locked) {
       body.appendChild(el('div', { className: 'ck-section-heading' }, ['Recently answered']));
       const list = el('div', { className: 'ck-inbox-list' });
       for (const it of recentlyAnswered) {
@@ -5089,6 +5092,43 @@
       card.style.cursor = 'pointer';
     }
     return card;
+  }
+
+  // Inbox filter chips: per-state toggles over this project's localStorage. Default: all on.
+  // Four states cover the full Inbox: awaiting_you (rounds + loose Q), unlocked (open with a
+  // draft), stale, locked (Recently answered footers).
+  const INBOX_STATES = ['awaiting_you', 'unlocked', 'stale', 'locked'];
+  function inboxFilters() {
+    const v = memGet('inbox-filters');
+    const defaults = { awaiting_you: true, unlocked: true, stale: true, locked: true };
+    return (v && typeof v === 'object') ? { ...defaults, ...v } : defaults;
+  }
+  function setInboxFilter(state, on) {
+    const f = inboxFilters();
+    f[state] = !!on;
+    memSet('inbox-filters', f);
+  }
+  function renderInboxFilterChips() {
+    const f = inboxFilters();
+    const wrap = el('div', { className: 'ck-inbox-filters', role: 'toolbar',
+      'aria-label': 'Filter Inbox by question state' });
+    const label = (st) => ({
+      awaiting_you: '? you',
+      unlocked: '~ unl',
+      stale: '! stale',
+      locked: '○ lock'
+    })[st];
+    for (const st of INBOX_STATES) {
+      const on = !!f[st];
+      const chip = el('button', { type: 'button', className: 'ck-inbox-chip',
+        dataState: st, 'aria-pressed': on ? 'true' : 'false' }, [label(st)]);
+      chip.addEventListener('click', () => {
+        setInboxFilter(st, !on);
+        renderPanel();
+      });
+      wrap.appendChild(chip);
+    }
+    return wrap;
   }
 
   // Snooze: a per-qid timestamp held in this browser's localStorage. When `now < until`, the
