@@ -839,6 +839,7 @@
     dlg.appendChild(el('h2', { className: 'ck-shortcut-h' }, ['Keyboard shortcuts']));
     const rows = [
       ['Ctrl/Cmd + K', 'Open the command palette'],
+      ['Alt + Enter', 'Copy a shareable link to the selected palette row'],
       ['g i', 'Open Inbox tab'], ['g f', 'Open Feed tab'], ['g p', 'Open PRs tab'],
       ['g s', 'Open Favorite tab'], ['g o', 'Open Portfolio tab'], ['g c', 'Open Chat tab'],
       ['g b', 'Close panel (back to board)'],
@@ -944,7 +945,7 @@
       'aria-label': 'Search command palette', autocomplete: 'off', spellcheck: 'false' });
     const list = el('ul', { className: 'ck-palette-list', role: 'listbox' });
     const foot = el('div', { className: 'ck-palette-foot ck-muted' },
-      ['↑↓ walk · Enter run · Esc close']);
+      ['↑↓ walk · Enter run · Alt+Enter copy link · Esc close']);
     dlg.appendChild(input);
     dlg.appendChild(list);
     dlg.appendChild(foot);
@@ -960,6 +961,7 @@
       if (e.key === 'Escape') { e.preventDefault(); closePalette(); return; }
       if (e.key === 'ArrowDown') { e.preventDefault(); paletteState.idx = Math.min(paletteState.items.length - 1, paletteState.idx + 1); paintPalette(list); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); paletteState.idx = Math.max(0, paletteState.idx - 1); paintPalette(list); return; }
+      if (e.key === 'Enter' && e.altKey) { e.preventDefault(); copyPaletteLink(); return; }
       if (e.key === 'Enter') { e.preventDefault(); runPaletteSelected(); return; }
     });
     dlg.addEventListener('click', e => { if (e.target === dlg) closePalette(); });
@@ -1035,6 +1037,35 @@
     paletteState.open = false;
   }
 
+  // Shape a shareable link for the selected row (deep link, same browser or another).
+  // Peers already carry a full URL; local rows get this console's URL + a hash fragment
+  // the hash parser recognises.
+  function linkForCommand(c) {
+    const here = location.origin + location.pathname;
+    if (!c) return null;
+    if (c.kind === 'tab') return here + '#' + c.id;
+    if (c.kind === 'item') return here + '#item=' + encodeURIComponent(c.id);
+    if (c.kind === 'question') return here + '#qid=' + encodeURIComponent(c.id);
+    if (c.kind === 'peer') {
+      const peer = ((portfolioState.data && portfolioState.data.peers) || []).find(p => p && p.name === c.id);
+      return (peer && peer.url) || null;
+    }
+    return null;
+  }
+  function copyPaletteLink() {
+    const c = paletteState.items[paletteState.idx];
+    const link = linkForCommand(c);
+    if (!link) { announce('Nothing to copy for this row.'); return; }
+    const done = ok => announce(ok ? 'Link copied.' : 'Could not copy; link: ' + link);
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(link).then(() => done(true), () => done(false));
+        return;
+      }
+    } catch (e) { /* fall through */ }
+    done(false);
+  }
+
   // Focus trapping inside panel
   function trapFocus(e) {
     if (panelEl.getAttribute('data-open') !== 'true') return;
@@ -1067,6 +1098,8 @@
     panelEl.setAttribute('aria-label', mode === 'inbox' ? 'Inbox' : 'Console: ' + (itemId || ''));
     applyDock();
     renderPanel();
+    if (mode === 'inbox') syncLocationHash(currentTab);
+    else if (mode === 'item' && itemId) syncLocationHash('item=' + encodeURIComponent(itemId));
     // Fix #2: Focus the close button reliably after render
     requestAnimationFrame(() => {
       const closeBtn = panelEl.querySelector('.ck-close-btn');
@@ -1095,6 +1128,7 @@
     applyDock();
     // Default-open stays dismissed for the session once the owner closes it.
     try { sessionStorage.setItem('ck-inbox-closed', '1'); } catch (e) { /* storage blocked */ }
+    syncLocationHash('');
     // Back to what opened it; when that was the strip, it is the strip again.
     if (lastFocused && lastFocused.focus && document.contains(lastFocused)) lastFocused.focus();
   }
@@ -1193,6 +1227,7 @@
   function selectTab(id) {
     currentTab = id;
     renderPanel();
+    if (currentMode === 'inbox') syncLocationHash(id);
     const t = panelEl.querySelector('#ck-tab-' + id);
     if (t) t.focus();
   }
@@ -5774,19 +5809,74 @@
     bindPageProposal();   // before the board: a stale bar offers the dialog only once it is bound
     fetchView().then(() => {
       if (config && config.api) liveLoop();
-      // Inbox default open: on a docked (wide) screen, open the Inbox after the first fetch so a landing
-      // owner sees waiting rows without clicking. Narrow screens stay collapsed (the panel is an overlay
-      // there and would hide the dashboard). Reading list.sessionStorage.ck-inbox-closed lets the owner
-      // close it once and have that stick for the session.
-      try {
-        const closedThisSession = sessionStorage.getItem('ck-inbox-closed') === '1';
-        if (isDocked() && !closedThisSession && panelEl.getAttribute('data-open') !== 'true') {
-          openPanel(null, 'inbox');
-        }
-      } catch (e) { /* storage blocked — fall through */ }
+      // Deep link in the URL hash wins over the "open the Inbox by default" rule.
+      const linked = applyLocationHash();
+      if (!linked) {
+        try {
+          const closedThisSession = sessionStorage.getItem('ck-inbox-closed') === '1';
+          if (isDocked() && !closedThisSession && panelEl.getAttribute('data-open') !== 'true') {
+            openPanel(null, 'inbox');
+          }
+        } catch (e) { /* storage blocked — fall through */ }
+      }
     });
+    window.addEventListener('hashchange', () => applyLocationHash());
     startBoard();
     startUsage();
+  }
+
+  // Deep links. The URL hash activates one view on load (and on an in-page back/forward):
+  //   #inbox | #feed | #prs | #favorite | #portfolio | #chat   — open the panel on that tab
+  //   #item=<id>                                               — open the item panel
+  //   #qid=<id>/Q<n>                                           — open the owning item
+  // Anything else is ignored. applyLocationHash returns true when it did something.
+  function applyLocationHash() {
+    const raw = (location.hash || '').replace(/^#/, '');
+    if (!raw) return false;
+    const parts = raw.split('&');
+    let kv = {};
+    for (const p of parts) {
+      const i = p.indexOf('=');
+      if (i < 0) kv[p] = true; else kv[p.slice(0, i)] = decodeURIComponent(p.slice(i + 1));
+    }
+    const bare = parts[0] && parts[0].indexOf('=') < 0 ? parts[0] : null;
+    if (bare && TABS.some(t => t[0] === bare)) {
+      currentTab = bare;
+      if (panelEl.getAttribute('data-open') !== 'true') openPanel(null, 'inbox');
+      currentMode = 'inbox';
+      renderPanel();
+      return true;
+    }
+    if (kv.item) {
+      if (items && Object.prototype.hasOwnProperty.call(items, kv.item)) {
+        openPanel(kv.item, 'item');
+        return true;
+      }
+    }
+    if (kv.qid) {
+      const qs = (view && view.questions) || {};
+      const q = qs[kv.qid];
+      if (q && q.question && q.question.item && items && Object.prototype.hasOwnProperty.call(items, q.question.item)) {
+        openPanel(q.question.item, 'item');
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Keep the URL hash in sync with what the owner is looking at. Uses replaceState so each nav
+  // is one hash write, not a history entry per click (which would make Back feel broken).
+  let hashSyncSuspended = false;
+  function syncLocationHash(frag) {
+    if (hashSyncSuspended) return;
+    try {
+      const next = frag ? '#' + frag : location.pathname + location.search;
+      if (frag ? location.hash !== '#' + frag : location.hash) {
+        hashSyncSuspended = true;
+        history.replaceState(null, '', next);
+        setTimeout(() => { hashSyncSuspended = false; }, 0);
+      }
+    } catch (e) { /* some browsers refuse replaceState with a hash — ignore */ }
   }
 
   // Public API
