@@ -2693,6 +2693,11 @@
       body.appendChild(renderForks(itemId));
       body.appendChild(renderVisuals(itemId));
 
+      // Tickets : a fold listing child tickets grouped by status, with a
+      // create-ticket form. Opened by Launch Idea when it spawns tickets; opened by
+      // the operator for ad-hoc bugs / research notes on this item.
+      body.appendChild(renderTicketsFold(itemId));
+
       // Thread
       body.appendChild(renderThread(itemId));
     }
@@ -4503,6 +4508,583 @@
   function dropLocksNotOnShow() { /* no-op: see above */ }
 
   // Render thread/messages
+  // ---- Launch Idea  --------------------------------------------------------
+  // Right-rail panel inside the item view. Three steps: frame → grill → spawn tickets.
+  // Not a modal; not a full takeover. Reuses attachDialogAccessibility focus plumbing
+  // from 1.24. Opened via the "Launch Idea" button on an item panel.
+  //
+  // Grilling v1 uses a static adversarial prompt set (the AI-web guru asked for 3-5
+  // questions before branches spawn). v2 (1.28) will delegate to the `grill-me` skill
+  // so an agent can author the questions against the actual item context.
+  const GRILL_PROMPTS = [
+    { key: 'user',    label: 'Who is this for, concretely? Name one person.' },
+    { key: 'wrong',   label: 'What makes you wrong about this? What would you learn in a week that kills the idea?' },
+    { key: 'scale',   label: 'What breaks at 10×? (10× users, 10× data, 10× agents, 10× time.)' },
+    { key: 'passed',  label: 'What already-known problem are you passing on by shipping this?' },
+    { key: 'anchor',  label: 'What ruling, PR, or feed event is the evidence this matters?' }
+  ];
+  const LAUNCH_IDEA_DRAFT_KEY = (itemId) => 'launch-idea:' + itemId;
+  let launchIdeaState = null;    // { itemId, step, title, pitch, grills, tickets, teardown }
+  function openLaunchIdea(itemId) {
+    if (launchIdeaState) closeLaunchIdea();
+    // Seed from any saved draft for this item.
+    const seed = (view && view.drafts && view.drafts[LAUNCH_IDEA_DRAFT_KEY(itemId)]) || '';
+    launchIdeaState = {
+      itemId, step: 1,
+      title: '', pitch: seed || '',
+      grills: Object.fromEntries(GRILL_PROMPTS.map(p => [p.key, ''])),
+      tickets: defaultLaunchTickets(itemId),
+      teardown: null
+    };
+    panelEl.classList.add('ck-with-launch');
+    renderLaunchIdea();
+  }
+  function closeLaunchIdea() {
+    const prev = launchIdeaState;
+    launchIdeaState = null;
+    panelEl.classList.remove('ck-with-launch');
+    const pane = document.getElementById('ck-launch-pane');
+    if (pane) {
+      if (prev && prev.teardown) { try { prev.teardown(); } catch (_e) {} }
+      pane.remove();
+    }
+  }
+  function defaultLaunchTickets(itemId) {
+    return [
+      { kind: 'grilling', title: '', body: '', selected: true },
+      { kind: 'research', title: '', body: '', selected: true },
+      { kind: 'task',     title: '', body: '', selected: true },
+      { kind: 'task',     title: '', body: '', selected: false }
+    ];
+  }
+  function renderLaunchIdea() {
+    let pane = document.getElementById('ck-launch-pane');
+    if (!pane) {
+      pane = el('aside', { id: 'ck-launch-pane', className: 'ck-launch-pane', role: 'region',
+        'aria-label': 'Launch Idea' });
+      panelEl.appendChild(pane);
+      launchIdeaState.teardown = attachDialogAccessibility(pane);
+    }
+    pane.textContent = '';
+    const head = el('div', { className: 'ck-launch-head' }, [
+      el('span', { className: 'ck-launch-title' }, ['✧ Launch Idea — ' + launchIdeaState.itemId]),
+      el('button', { type: 'button', className: 'ck-btn ck-btn-quiet',
+        'aria-label': 'Close Launch Idea' }, ['×'])
+    ]);
+    head.querySelector('button').addEventListener('click', closeLaunchIdea);
+    pane.appendChild(head);
+    pane.appendChild(renderLaunchSteps());
+    const body = el('div', { className: 'ck-launch-body' });
+    if (launchIdeaState.step === 1) body.appendChild(renderLaunchFrame());
+    else if (launchIdeaState.step === 2) body.appendChild(renderLaunchGrill());
+    else body.appendChild(renderLaunchSpawn());
+    pane.appendChild(body);
+  }
+  function renderLaunchSteps() {
+    const bar = el('ol', { className: 'ck-launch-steps', 'aria-label': 'Launch Idea steps' });
+    const labels = ['Frame', 'Grill', 'Spawn'];
+    for (let i = 1; i <= 3; i++) {
+      const li = el('li', {
+        className: 'ck-launch-step' + (launchIdeaState.step === i ? ' ck-launch-step-on' : ''),
+        'aria-current': launchIdeaState.step === i ? 'step' : 'false'
+      }, [el('span', { className: 'ck-launch-step-n' }, [String(i)]),
+          el('span', { className: 'ck-launch-step-label' }, [' ' + labels[i - 1]])]);
+      bar.appendChild(li);
+    }
+    return bar;
+  }
+  function renderLaunchFrame() {
+    const wrap = el('div', { className: 'ck-launch-section' });
+    wrap.appendChild(el('p', { className: 'ck-muted' },
+      ['Frame the idea. Keep it to one sentence; the detail belongs in the grill step.']));
+    const title = el('input', { type: 'text', className: 'ck-input', maxlength: '500',
+      placeholder: 'One-line idea', value: launchIdeaState.title, 'aria-label': 'Idea title' });
+    title.addEventListener('input', () => { launchIdeaState.title = title.value; });
+    const pitch = el('textarea', { className: 'ck-textarea', rows: '5',
+      placeholder: 'Why does this matter now? What outcome does success look like?',
+      maxlength: '20000', 'aria-label': 'Idea pitch' });
+    pitch.value = launchIdeaState.pitch;
+    pitch.addEventListener('input', () => {
+      launchIdeaState.pitch = pitch.value;
+      setDraft(LAUNCH_IDEA_DRAFT_KEY(launchIdeaState.itemId), pitch.value);
+    });
+    wrap.appendChild(el('label', { className: 'ck-launch-field' }, [
+      el('span', { className: 'ck-launch-field-label' }, ['Title']), title
+    ]));
+    wrap.appendChild(el('label', { className: 'ck-launch-field' }, [
+      el('span', { className: 'ck-launch-field-label' }, ['Pitch']), pitch
+    ]));
+    const next = el('button', { type: 'button', className: 'ck-btn ck-btn-primary' }, ['Grill it →']);
+    next.addEventListener('click', () => {
+      if (!launchIdeaState.title.trim()) { title.focus(); announce('Give the idea a one-line title', { tone: 'error' }); return; }
+      launchIdeaState.step = 2;
+      renderLaunchIdea();
+    });
+    wrap.appendChild(el('div', { className: 'ck-actions' }, [next]));
+    requestAnimationFrame(() => title.focus());
+    return wrap;
+  }
+  function renderLaunchGrill() {
+    const wrap = el('div', { className: 'ck-launch-section' });
+    wrap.appendChild(el('p', { className: 'ck-muted' },
+      ['Answer each adversarial question in a line or two. Weak answers surface weak ideas before you spawn work.']));
+    for (const p of GRILL_PROMPTS) {
+      const field = el('div', { className: 'ck-launch-field' });
+      field.appendChild(el('label', { className: 'ck-launch-field-label', for: 'ck-grill-' + p.key }, [p.label]));
+      const ta = el('textarea', { className: 'ck-textarea', rows: '2', id: 'ck-grill-' + p.key,
+        maxlength: '20000', 'aria-label': p.label });
+      ta.value = launchIdeaState.grills[p.key] || '';
+      ta.addEventListener('input', () => { launchIdeaState.grills[p.key] = ta.value; });
+      field.appendChild(ta);
+      wrap.appendChild(field);
+    }
+    const back = el('button', { type: 'button', className: 'ck-btn' }, ['← Reframe']);
+    back.addEventListener('click', () => { launchIdeaState.step = 1; renderLaunchIdea(); });
+    const next = el('button', { type: 'button', className: 'ck-btn ck-btn-primary' }, ['Draft tickets →']);
+    next.addEventListener('click', () => {
+      // Seed the spawn-step tickets from the frame + grills.
+      const t = launchIdeaState.title.trim() || 'idea';
+      const g = launchIdeaState.grills;
+      launchIdeaState.tickets = [
+        { kind: 'grilling', title: 'Grill: ' + t,
+          body: GRILL_PROMPTS.map(p => '## ' + p.label + '\n\n' + (g[p.key] || '(unanswered)') + '\n').join('\n'),
+          selected: true },
+        { kind: 'research', title: 'Research: who is this for and what breaks it',
+          body: 'User: ' + (g.user || '(tbd)') + '\n\nWhat breaks: ' + (g.wrong || '(tbd)') + '\n\nAt 10x: ' + (g.scale || '(tbd)'),
+          selected: !!(g.user || g.wrong || g.scale) },
+        { kind: 'task', title: t,
+          body: launchIdeaState.pitch,
+          selected: true },
+      ];
+      launchIdeaState.step = 3;
+      renderLaunchIdea();
+    });
+    wrap.appendChild(el('div', { className: 'ck-actions' }, [back, next]));
+    return wrap;
+  }
+  function renderLaunchSpawn() {
+    const wrap = el('div', { className: 'ck-launch-section' });
+    wrap.appendChild(el('p', { className: 'ck-muted' },
+      ['Pick which tickets to spawn under ', el('code', {}, [launchIdeaState.itemId]),
+       '. Edit titles and bodies inline before spawning.']));
+    for (let i = 0; i < launchIdeaState.tickets.length; i++) {
+      const t = launchIdeaState.tickets[i];
+      const card = el('div', { className: 'ck-launch-ticket', dataKind: t.kind });
+      const checkbox = el('input', { type: 'checkbox', id: 'ck-lt-' + i,
+        'aria-label': 'Spawn this ' + t.kind + ' ticket' });
+      checkbox.checked = !!t.selected;
+      checkbox.addEventListener('change', () => { t.selected = checkbox.checked; });
+      const head = el('div', { className: 'ck-launch-ticket-head' }, [
+        checkbox,
+        el('label', { for: 'ck-lt-' + i, className: 'ck-ticket-kind', dataKind: t.kind }, [TICKET_KIND_LABELS[t.kind]])
+      ]);
+      card.appendChild(head);
+      const title = el('input', { type: 'text', className: 'ck-input', value: t.title,
+        maxlength: '500', 'aria-label': 'Title' });
+      title.addEventListener('input', () => { t.title = title.value; });
+      const bodyTa = el('textarea', { className: 'ck-textarea', rows: '3',
+        maxlength: '20000', 'aria-label': 'Body' });
+      bodyTa.value = t.body;
+      bodyTa.addEventListener('input', () => { t.body = bodyTa.value; });
+      card.appendChild(title);
+      card.appendChild(bodyTa);
+      wrap.appendChild(card);
+    }
+    const back = el('button', { type: 'button', className: 'ck-btn' }, ['← Re-grill']);
+    back.addEventListener('click', () => { launchIdeaState.step = 2; renderLaunchIdea(); });
+    const spawn = el('button', { type: 'button', className: 'ck-btn ck-btn-primary' }, ['Spawn selected']);
+    spawn.addEventListener('click', async () => {
+      const picks = launchIdeaState.tickets.filter(t => t.selected && t.title.trim());
+      if (!picks.length) { announce('Pick at least one ticket with a title', { tone: 'error' }); return; }
+      spawn.disabled = true;
+      let ok = 0, errs = 0;
+      for (const t of picks) {
+        const r = await apiPost('/ticket-create',
+          { parent_item: launchIdeaState.itemId, kind: t.kind, title: t.title.trim(), body: t.body },
+          'launch-idea-' + launchIdeaState.itemId + '-' + t.kind + '-' + Date.now());
+        if (r && r.error) { errs += 1; }
+        else { ok += 1; }
+      }
+      spawn.disabled = false;
+      if (ok) announce(ok + ' ticket' + (ok === 1 ? '' : 's') + ' spawned.', { tone: 'ok' });
+      if (errs) announce(errs + ' ticket' + (errs === 1 ? '' : 's') + ' failed; see each row.', { tone: 'error', sticky: true });
+      // Clear the saved draft now that work has shipped.
+      setDraft(LAUNCH_IDEA_DRAFT_KEY(launchIdeaState.itemId), '');
+      closeLaunchIdea();
+    });
+    wrap.appendChild(el('div', { className: 'ck-actions' }, [back, spawn]));
+    return wrap;
+  }
+
+  // ---- Branch Out  --------------------------------------------------------------
+  // Smart-prompt-maker-style wizard: Describe → Questions+Answers (seeded with the
+  // six question types from the operator's reference React: audience, goals,
+  // constraints, format, style, examples) → Compile. The compiled brief can become
+  // a research ticket, a /message with intent "fork" that spawns a deliberate round,
+  // or just text to copy. Reuses the Launch Idea pane chrome and focus plumbing;
+  // only one of {launchIdea, branchOut} is open at a time.
+  //
+  // v1 ships operator-authored questions; v2 will delegate question generation to an
+  // agent-side skill so the questions are tailored to the actual item context (the
+  // pattern mirrors mattpocock's "grill me" trajectory).
+  const BRANCH_OUT_SEED = [
+    { label: 'Audience',   placeholder: 'Who is this for, specifically? What do they already know?' },
+    { label: 'Goals',      placeholder: 'What outcome does "done" look like? One sentence.' },
+    { label: 'Constraints', placeholder: 'What rules out otherwise-reasonable options? (budget, dependencies, deadlines)' },
+    { label: 'Format',     placeholder: 'How should the answer be delivered? (code, doc, chart, table, deck)' },
+    { label: 'Style/Tone', placeholder: 'Terse? Didactic? Devil\'s-advocate? Default to the project\'s own voice.' },
+    { label: 'Examples',   placeholder: 'Point at one anchor the agent can imitate or disagree with.' }
+  ];
+  const BRANCH_OUT_DRAFT_KEY = (itemId) => 'branch-out:' + itemId;
+  let branchOutState = null;    // { itemId, step, title, topic, questions: [{label, text, answer}], brief, teardown }
+  function openBranchOut(itemId) {
+    if (launchIdeaState) closeLaunchIdea();
+    if (branchOutState) closeBranchOut();
+    const seed = (view && view.drafts && view.drafts[BRANCH_OUT_DRAFT_KEY(itemId)]) || '';
+    branchOutState = {
+      itemId, step: 1,
+      title: '', topic: seed || '',
+      questions: BRANCH_OUT_SEED.map(s => ({ label: s.label, text: '', placeholder: s.placeholder, answer: '' })),
+      brief: '',
+      teardown: null
+    };
+    panelEl.classList.add('ck-with-launch');
+    renderBranchOut();
+  }
+  function closeBranchOut() {
+    const prev = branchOutState;
+    branchOutState = null;
+    panelEl.classList.remove('ck-with-launch');
+    const pane = document.getElementById('ck-launch-pane');
+    if (pane) {
+      if (prev && prev.teardown) { try { prev.teardown(); } catch (_e) {} }
+      pane.remove();
+    }
+  }
+  function renderBranchOut() {
+    let pane = document.getElementById('ck-launch-pane');
+    if (!pane) {
+      pane = el('aside', { id: 'ck-launch-pane', className: 'ck-launch-pane ck-branch-pane',
+        role: 'region', 'aria-label': 'Branch out' });
+      panelEl.appendChild(pane);
+      branchOutState.teardown = attachDialogAccessibility(pane);
+    }
+    pane.textContent = '';
+    const head = el('div', { className: 'ck-launch-head' }, [
+      el('span', { className: 'ck-launch-title' }, ['⌁ Branch out — ' + branchOutState.itemId]),
+      el('button', { type: 'button', className: 'ck-btn ck-btn-quiet',
+        'aria-label': 'Close Branch out' }, ['×'])
+    ]);
+    head.querySelector('button').addEventListener('click', closeBranchOut);
+    pane.appendChild(head);
+    pane.appendChild(renderBranchSteps());
+    const body = el('div', { className: 'ck-launch-body' });
+    if (branchOutState.step === 1) body.appendChild(renderBranchDescribe());
+    else if (branchOutState.step === 2) body.appendChild(renderBranchForm());
+    else body.appendChild(renderBranchCompile());
+    pane.appendChild(body);
+  }
+  function renderBranchSteps() {
+    const bar = el('ol', { className: 'ck-launch-steps', 'aria-label': 'Branch out steps' });
+    const labels = ['Describe', 'Dig in', 'Compile'];
+    for (let i = 1; i <= 3; i++) {
+      const li = el('li', {
+        className: 'ck-launch-step' + (branchOutState.step === i ? ' ck-launch-step-on' : ''),
+        'aria-current': branchOutState.step === i ? 'step' : 'false'
+      }, [el('span', { className: 'ck-launch-step-n' }, [String(i)]),
+          el('span', { className: 'ck-launch-step-label' }, [' ' + labels[i - 1]])]);
+      bar.appendChild(li);
+    }
+    return bar;
+  }
+  function renderBranchDescribe() {
+    const wrap = el('div', { className: 'ck-launch-section' });
+    wrap.appendChild(el('p', { className: 'ck-muted' },
+      ['Describe the topic in your own words. Specific beats vague — if a reader can\'t tell what "done" looks like, dig deeper first.']));
+    const title = el('input', { type: 'text', className: 'ck-input', maxlength: '500',
+      placeholder: 'One-line topic', value: branchOutState.title, 'aria-label': 'Topic title' });
+    title.addEventListener('input', () => { branchOutState.title = title.value; });
+    const topic = el('textarea', { className: 'ck-textarea', rows: '6',
+      placeholder: 'What are you trying to figure out? Include enough context that a thoughtful colleague could draft the right questions back to you.',
+      maxlength: '20000', 'aria-label': 'Topic description' });
+    topic.value = branchOutState.topic;
+    topic.addEventListener('input', () => {
+      branchOutState.topic = topic.value;
+      setDraft(BRANCH_OUT_DRAFT_KEY(branchOutState.itemId), topic.value);
+    });
+    wrap.appendChild(el('label', { className: 'ck-launch-field' }, [
+      el('span', { className: 'ck-launch-field-label' }, ['Title']), title
+    ]));
+    wrap.appendChild(el('label', { className: 'ck-launch-field' }, [
+      el('span', { className: 'ck-launch-field-label' }, ['Describe']), topic
+    ]));
+    const next = el('button', { type: 'button', className: 'ck-btn ck-btn-primary' }, ['Dig in →']);
+    next.addEventListener('click', () => {
+      if (branchOutState.topic.trim().length < 20) {
+        topic.focus();
+        announce('Add a bit more detail — at least 20 characters', { tone: 'error' });
+        return;
+      }
+      branchOutState.step = 2;
+      renderBranchOut();
+    });
+    wrap.appendChild(el('div', { className: 'ck-actions' }, [next]));
+    requestAnimationFrame(() => title.focus());
+    return wrap;
+  }
+  function renderBranchForm() {
+    const wrap = el('div', { className: 'ck-launch-section' });
+    wrap.appendChild(el('p', { className: 'ck-muted' },
+      ['Six question axes, seeded from the smart-prompt-maker pattern. Edit each question for THIS topic, then answer it. Blanks are skipped on compile.']));
+    for (let i = 0; i < branchOutState.questions.length; i++) {
+      const q = branchOutState.questions[i];
+      const field = el('div', { className: 'ck-launch-field ck-branch-qa' });
+      field.appendChild(el('span', { className: 'ck-launch-field-label' }, [q.label]));
+      const qInput = el('input', { type: 'text', className: 'ck-input ck-branch-q',
+        maxlength: '500', placeholder: q.placeholder, 'aria-label': q.label + ' question' });
+      qInput.value = q.text;
+      qInput.addEventListener('input', () => { q.text = qInput.value; });
+      const aTa = el('textarea', { className: 'ck-textarea ck-branch-a', rows: '2',
+        maxlength: '20000', 'aria-label': q.label + ' answer',
+        placeholder: 'Your answer…' });
+      aTa.value = q.answer;
+      aTa.addEventListener('input', () => { q.answer = aTa.value; });
+      field.appendChild(qInput);
+      field.appendChild(aTa);
+      wrap.appendChild(field);
+    }
+    const back = el('button', { type: 'button', className: 'ck-btn' }, ['← Redescribe']);
+    back.addEventListener('click', () => { branchOutState.step = 1; renderBranchOut(); });
+    const next = el('button', { type: 'button', className: 'ck-btn ck-btn-primary' }, ['Compile →']);
+    next.addEventListener('click', () => {
+      branchOutState.brief = composeBranchBrief();
+      branchOutState.step = 3;
+      renderBranchOut();
+    });
+    wrap.appendChild(el('div', { className: 'ck-actions' }, [back, next]));
+    return wrap;
+  }
+  function composeBranchBrief() {
+    const s = branchOutState;
+    const lines = [];
+    lines.push('# ' + (s.title.trim() || 'Branch out'));
+    lines.push('');
+    lines.push('**Item:** ' + s.itemId);
+    lines.push('');
+    lines.push('## Topic');
+    lines.push('');
+    lines.push(s.topic.trim());
+    lines.push('');
+    const answered = s.questions.filter(q => q.answer.trim());
+    if (answered.length) {
+      lines.push('## Deliberation');
+      lines.push('');
+      for (const q of answered) {
+        const label = q.text.trim() || q.label;
+        lines.push('### ' + label);
+        lines.push('');
+        lines.push(q.answer.trim());
+        lines.push('');
+      }
+    }
+    return lines.join('\n');
+  }
+  function renderBranchCompile() {
+    const wrap = el('div', { className: 'ck-launch-section' });
+    wrap.appendChild(el('p', { className: 'ck-muted' },
+      ['Here is the composed brief. Pick what to do with it — spawn a ticket, send it to the agent as a deliberate round, or copy for use elsewhere.']));
+    const pre = el('pre', { className: 'ck-branch-brief', tabindex: '0' });
+    pre.textContent = branchOutState.brief;
+    wrap.appendChild(pre);
+    const copyBtn = el('button', { type: 'button', className: 'ck-btn' }, ['Copy']);
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(branchOutState.brief);
+        announce('Copied', { tone: 'ok' });
+      } catch (_e) {
+        announce('Could not copy — select and copy manually', { tone: 'error' });
+      }
+    });
+    const ticketBtn = el('button', { type: 'button', className: 'ck-btn' }, ['Create research ticket']);
+    ticketBtn.addEventListener('click', async () => {
+      ticketBtn.disabled = true;
+      const r = await apiPost('/ticket-create', {
+        parent_item: branchOutState.itemId,
+        kind: 'research',
+        title: branchOutState.title.trim() || 'Branch out',
+        body: branchOutState.brief
+      }, 'branch-out-ticket-' + branchOutState.itemId + '-' + Date.now());
+      ticketBtn.disabled = false;
+      if (r && r.error) {
+        announce('Not created: ' + r.error, { tone: 'error', sticky: true });
+      } else {
+        announce('Research ticket created.', { tone: 'ok' });
+        setDraft(BRANCH_OUT_DRAFT_KEY(branchOutState.itemId), '');
+        closeBranchOut();
+      }
+    });
+    // The deliberate-round spawn: write a message with intent "fork" to the item. The
+    // steward's console-fork skill picks it up and runs a round against the brief.
+    const roundBtn = el('button', { type: 'button', className: 'ck-btn ck-btn-primary' }, ['Spawn deliberate round']);
+    roundBtn.addEventListener('click', async () => {
+      roundBtn.disabled = true;
+      const r = await apiPost('/message', {
+        item: branchOutState.itemId,
+        text: branchOutState.brief,
+        intent: 'fork',
+        mode: 'deliberate',
+        focus: 'topic'
+      }, 'branch-out-fork-' + branchOutState.itemId + '-' + Date.now());
+      roundBtn.disabled = false;
+      if (r && r.error) {
+        announce('Not sent: ' + r.error, { tone: 'error', sticky: true });
+      } else {
+        announce('Deliberate round queued.', { tone: 'ok' });
+        setDraft(BRANCH_OUT_DRAFT_KEY(branchOutState.itemId), '');
+        closeBranchOut();
+      }
+    });
+    const back = el('button', { type: 'button', className: 'ck-btn' }, ['← Edit answers']);
+    back.addEventListener('click', () => { branchOutState.step = 2; renderBranchOut(); });
+    wrap.appendChild(el('div', { className: 'ck-actions' }, [back, copyBtn, ticketBtn, roundBtn]));
+    return wrap;
+  }
+
+  // Tickets fold on an item panel . Lightweight — Overture's tickets are children
+  // of items, not a replacement; this surface renders the open and closed stacks, the
+  // blocking relationships, and a create form. No workflow engine, no custom fields.
+  const TICKET_KIND_LABELS = { task: 'Task', bug: 'Bug', research: 'Research', grilling: 'Grilling' };
+  function renderTicketsFold(itemId) {
+    const details = el('details', { className: 'ck-tickets-fold' });
+    const summary = el('summary', { className: 'ck-tickets-summary' });
+    const list = (view && view.tickets && view.tickets.by_item && view.tickets.by_item[itemId]) || [];
+    const counts = (view && view.tickets && view.tickets.counts && view.tickets.counts[itemId]) || {};
+    const openCount = (counts.open || 0) + (counts.blocked || 0);
+    summary.appendChild(el('span', { className: 'ck-tickets-h' }, ['Tickets']));
+    summary.appendChild(el('span', { className: 'ck-tickets-tally ck-muted' },
+      [openCount ? openCount + ' open' : 'none open']));
+    details.appendChild(summary);
+    const body = el('div', { className: 'ck-tickets-body' });
+    const open = list.filter(t => t.status === 'open');
+    const blocked = list.filter(t => t.status === 'blocked');
+    const closed = list.filter(t => t.status === 'closed');
+    if (open.length) {
+      body.appendChild(el('div', { className: 'ck-section-heading' }, ['Open']));
+      for (const t of open) body.appendChild(renderTicketRow(t));
+    }
+    if (blocked.length) {
+      body.appendChild(el('div', { className: 'ck-section-heading' }, ['Blocked']));
+      for (const t of blocked) body.appendChild(renderTicketRow(t));
+    }
+    if (closed.length) {
+      const d = el('details', { className: 'ck-tickets-closed' });
+      d.appendChild(el('summary', { className: 'ck-section-heading' },
+        ['Closed · ' + closed.length]));
+      for (const t of closed) d.appendChild(renderTicketRow(t));
+      body.appendChild(d);
+    }
+    body.appendChild(renderNewTicketForm(itemId));
+    details.appendChild(body);
+    return details;
+  }
+  function renderTicketRow(t) {
+    const row = el('div', { className: 'ck-ticket', dataStatus: t.status, dataKind: t.kind,
+      'aria-label': TICKET_KIND_LABELS[t.kind] + ': ' + t.title });
+    const head = el('div', { className: 'ck-ticket-head' }, [
+      el('span', { className: 'ck-ticket-kind', dataKind: t.kind }, [TICKET_KIND_LABELS[t.kind] || t.kind]),
+      el('span', { className: 'ck-ticket-id ck-muted' }, [t.id]),
+      el('span', { className: 'ck-ticket-title' }, [t.title])
+    ]);
+    row.appendChild(head);
+    if (t.body) {
+      row.appendChild(el('p', { className: 'ck-ticket-body' }, [t.body]));
+    }
+    if (Array.isArray(t.blocked_by) && t.blocked_by.length) {
+      row.appendChild(el('div', { className: 'ck-ticket-blocked ck-muted' },
+        ['Blocked by: ' + t.blocked_by.join(', ')]));
+    }
+    if (t.status !== 'closed') {
+      const actions = el('div', { className: 'ck-actions ck-ticket-actions' });
+      const close = el('button', { type: 'button', className: 'ck-btn ck-btn-danger' }, ['Close']);
+      let armed = false, armTimer = null;
+      close.addEventListener('click', async () => {
+        if (!armed) {
+          armed = true;
+          close.setAttribute('data-armed', 'true');
+          close.textContent = 'Click again to close';
+          armTimer = setTimeout(() => {
+            armed = false;
+            close.removeAttribute('data-armed');
+            close.textContent = 'Close';
+          }, 4000);
+          return;
+        }
+        if (armTimer) { clearTimeout(armTimer); armTimer = null; }
+        close.disabled = true;
+        const r = await apiPost('/ticket-close', { id: t.id }, 'ticket-close-' + t.id);
+        close.disabled = false;
+        if (r && r.error) announce('Not closed: ' + r.error, { tone: 'error', sticky: true });
+        else announce('Ticket closed.', { tone: 'ok' });
+      });
+      actions.appendChild(close);
+      row.appendChild(actions);
+    } else if (t.closed_at) {
+      row.appendChild(el('div', { className: 'ck-ticket-closed-at ck-muted' },
+        ['Closed ' + relTime(t.closed_at)]));
+    }
+    return row;
+  }
+  function renderNewTicketForm(itemId) {
+    const wrap = el('details', { className: 'ck-ticket-new' });
+    wrap.appendChild(el('summary', { className: 'ck-ticket-new-summary' }, ['+ New ticket']));
+    const form = el('div', { className: 'ck-ticket-new-body' });
+    const kindSel = el('select', { className: 'ck-ticket-kind-sel', 'aria-label': 'Ticket kind' });
+    for (const k of ['task', 'bug', 'research', 'grilling']) {
+      kindSel.appendChild(el('option', { value: k }, [TICKET_KIND_LABELS[k]]));
+    }
+    const title = el('input', { type: 'text', className: 'ck-input', placeholder: 'Title (one line)',
+      maxlength: '500', 'aria-label': 'Ticket title' });
+    const bodyTa = el('textarea', { className: 'ck-textarea', rows: '3',
+      placeholder: 'Optional body (what to look at, acceptance notes, repro steps)',
+      maxlength: '20000', 'aria-label': 'Ticket body' });
+    const err = el('p', { className: 'ck-error-msg', role: 'status', 'aria-live': 'polite' });
+    const create = el('button', { type: 'button', className: 'ck-btn ck-btn-primary' }, ['Create ticket']);
+    create.addEventListener('click', async () => {
+      const t = title.value.trim();
+      if (!t) { err.textContent = 'Title is required.'; title.focus(); return; }
+      create.disabled = true;
+      err.textContent = '';
+      const r = await apiPost('/ticket-create',
+        { parent_item: itemId, kind: kindSel.value, title: t, body: bodyTa.value },
+        'ticket-create-' + itemId + '-' + Date.now());
+      create.disabled = false;
+      if (r && r.error) {
+        err.textContent = 'Not created: ' + r.error;
+        return;
+      }
+      title.value = '';
+      bodyTa.value = '';
+      announce('Ticket created.', { tone: 'ok' });
+    });
+    const actions = el('div', { className: 'ck-actions' }, [create]);
+    form.appendChild(el('label', { className: 'ck-ticket-field' }, [
+      el('span', { className: 'ck-ticket-field-label' }, ['Kind']),
+      kindSel
+    ]));
+    form.appendChild(el('label', { className: 'ck-ticket-field' }, [
+      el('span', { className: 'ck-ticket-field-label' }, ['Title']),
+      title
+    ]));
+    form.appendChild(el('label', { className: 'ck-ticket-field' }, [
+      el('span', { className: 'ck-ticket-field-label' }, ['Body']),
+      bodyTa
+    ]));
+    form.appendChild(actions);
+    form.appendChild(err);
+    wrap.appendChild(form);
+    return wrap;
+  }
+
   function renderThread(itemId) {
     const wrap = el('div', { className: 'ck-thread' }, [
       el('div', { className: 'ck-thread-heading' }, ['Discussion'])
@@ -4842,7 +5424,19 @@
       () => renderForkForm(itemId, null));
     const [visBtn, visSlot] = disclosure('◫ Request a visual…', 'vis-' + itemId, () => renderVisualForm(itemId));
     visBtn.setAttribute('aria-label', 'Request a visual of ' + itemId);
-    wrap.appendChild(el('div', { className: 'ck-actions' }, [answersBtn, forkBtn, visBtn]));
+    // Launch Idea — the headline. Opens a right-rail panel that walks the operator
+    // through framing + grilling + ticket spawning. Entry-point for the "starting a thing"
+    // flow; the strategist's framing — ideation as entry, rulings and code as exit.
+    const launchBtn = el('button', { className: 'ck-btn ck-launch-btn', type: 'button',
+      'aria-label': 'Launch an idea under ' + itemId }, ['✧ Launch Idea']);
+    launchBtn.addEventListener('click', () => openLaunchIdea(itemId));
+    // Branch Out — a smart-prompt-maker-style wizard that drills into a topic and
+    // produces a properly-deliberated brief (either a research ticket, a fork message that
+    // spawns a deliberate round, or just text to copy). Sibling of Launch Idea; same chrome.
+    const branchBtn = el('button', { className: 'ck-btn ck-launch-btn', type: 'button',
+      'aria-label': 'Branch out on a topic under ' + itemId }, ['⌁ Branch out']);
+    branchBtn.addEventListener('click', () => openBranchOut(itemId));
+    wrap.appendChild(el('div', { className: 'ck-actions' }, [launchBtn, branchBtn, answersBtn, forkBtn, visBtn]));
     wrap.appendChild(slot);
     wrap.appendChild(visSlot);
     // Q36: while the send bar is up it is the one way to send; two controls for one signal would only differ.

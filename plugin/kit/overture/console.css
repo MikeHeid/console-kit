@@ -2568,6 +2568,261 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   border-color: color-mix(in srgb, var(--c-built, #1a7f37) 85%, black);
 }
 
+/* ========= Launch Idea pane (1.26.0) ========================================
+   Right-rail panel that walks the operator through Frame → Grill → Spawn. Sits
+   inside .ck-panel as a sibling column when the panel adds `.ck-with-launch`.
+   On narrow viewports (and docked below 900px) the pane goes full-width over
+   the panel body; on desktop docked widths it's a 380px column. */
+.ck-launch-btn {
+  background: color-mix(in srgb, var(--c-accent) 15%, var(--c-surface));
+  color: var(--c-accent);
+  border-color: var(--c-accent);
+  font-weight: 600;
+}
+.ck-launch-btn:hover,
+.ck-launch-btn:focus-visible {
+  background: var(--c-accent);
+  color: var(--c-accent-fg);
+}
+.ck-launch-pane {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 380px;
+  max-width: 100%;
+  background: var(--c-surface);
+  border-left: 1px solid var(--c-border);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  z-index: 7;
+}
+.ck-with-launch .ck-body { margin-right: 380px; }
+.ck-with-launch .ck-header { padding-right: 380px; }
+@media (max-width: 900px) {
+  .ck-launch-pane { width: 100%; }
+  .ck-with-launch .ck-body,
+  .ck-with-launch .ck-header { margin-right: 0; }
+}
+.ck-launch-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--c-border);
+}
+.ck-launch-title {
+  font-weight: 600;
+  color: var(--c-fg);
+}
+.ck-launch-steps {
+  list-style: none;
+  display: flex;
+  gap: 4px;
+  margin: 0;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--c-border-light);
+}
+.ck-launch-step {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--c-surface-alt);
+  color: var(--c-fg-muted);
+  font-size: 12px;
+}
+.ck-launch-step-on {
+  background: var(--c-accent);
+  color: var(--c-accent-fg);
+  font-weight: 600;
+}
+.ck-launch-step-n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--c-surface);
+  color: var(--c-fg);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.ck-launch-step-on .ck-launch-step-n {
+  background: var(--c-accent-fg);
+  color: var(--c-accent);
+}
+.ck-launch-body { padding: 14px; }
+.ck-launch-section { display: flex; flex-direction: column; gap: 10px; }
+.ck-launch-field { display: flex; flex-direction: column; gap: 4px; }
+.ck-launch-field-label { font-size: 13px; color: var(--c-fg-muted); }
+.ck-launch-ticket {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  margin-bottom: 10px;
+  border: 1px solid var(--c-border);
+  border-left: 3px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+}
+.ck-launch-ticket[data-kind="bug"]      { border-left-color: var(--c-blocked); }
+.ck-launch-ticket[data-kind="research"] { border-left-color: var(--c-accent); }
+.ck-launch-ticket[data-kind="grilling"] { border-left-color: var(--c-built); }
+.ck-launch-ticket-head { display: flex; align-items: center; gap: 8px; }
+
+/* Branch Out — reuses .ck-launch-pane chrome; styles only the pieces unique to it. */
+.ck-branch-pane .ck-launch-title::before { content: ''; }   /* no icon prefix doubling */
+.ck-branch-qa {
+  padding: 10px;
+  background: var(--c-surface-alt);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+}
+.ck-branch-q { font-weight: 500; }
+.ck-branch-a { margin-top: 6px; }
+.ck-branch-brief {
+  padding: 12px 14px;
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--c-fg);
+  white-space: pre-wrap;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+/* ========= Tickets fold (1.26.0) ============================================
+   Children of items — lightweight work units. Grouped by status; closed stack
+   collapsed. Create form is a nested <details> at the bottom of the fold. */
+.ck-tickets-fold {
+  margin: 16px;
+  padding: 0;
+  background: transparent;
+  border: 1px dashed var(--c-border);
+  border-radius: var(--radius-sm);
+}
+.ck-tickets-summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  font-weight: 600;
+  color: var(--c-fg);
+  min-height: 36px;
+}
+.ck-tickets-summary:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+.ck-tickets-h { margin-right: 10px; }
+.ck-tickets-tally { font-size: 12px; }
+.ck-tickets-body {
+  padding: 4px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ck-ticket {
+  padding: 8px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  border-left: 3px solid var(--c-border);
+}
+.ck-ticket[data-status="blocked"] { border-left-color: var(--c-claimed); background: var(--c-claimed-bg); }
+.ck-ticket[data-status="closed"]  { border-left-color: var(--c-fg-muted); opacity: 0.75; }
+.ck-ticket[data-kind="bug"]       { border-left-color: var(--c-blocked); }
+.ck-ticket[data-kind="research"]  { border-left-color: var(--c-accent); }
+.ck-ticket[data-kind="grilling"]  { border-left-color: var(--c-built); }
+.ck-ticket-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ck-ticket-kind {
+  display: inline-block;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-radius: 10px;
+  background: var(--c-surface-alt);
+  color: var(--c-fg-muted);
+}
+.ck-ticket-kind[data-kind="bug"]      { background: var(--c-blocked-bg); color: var(--c-blocked); }
+.ck-ticket-kind[data-kind="research"] { background: var(--c-surface-alt); color: var(--c-accent); }
+.ck-ticket-kind[data-kind="grilling"] { background: var(--c-built-bg); color: var(--c-built); }
+.ck-ticket-id { font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ck-ticket-title { font-size: 13px; color: var(--c-fg); font-weight: 500; }
+.ck-ticket-body {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--c-fg);
+  white-space: pre-wrap;
+}
+.ck-ticket-blocked { margin-top: 6px; font-size: 12px; }
+.ck-ticket-actions { margin-top: 8px; }
+.ck-ticket-closed-at { font-size: 12px; margin-top: 4px; }
+.ck-ticket-new {
+  margin-top: 8px;
+  padding: 0;
+  background: var(--c-surface-alt);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+}
+.ck-ticket-new-summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--c-fg-muted);
+  min-height: 32px;
+}
+.ck-ticket-new-summary:hover,
+.ck-ticket-new-summary:focus-visible { color: var(--c-fg); }
+.ck-ticket-new-body {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ck-ticket-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ck-ticket-field-label {
+  font-size: 12px;
+  color: var(--c-fg-muted);
+}
+.ck-ticket-kind-sel {
+  padding: 6px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-fg);
+  font-size: 13px;
+  min-height: 32px;
+}
+.ck-input {
+  padding: 8px 10px;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-fg);
+  font-size: 13px;
+  min-height: 32px;
+}
+
 /* ========= Portfolio upgrade card (1.25.0) ==================================
    The seam between "one project (free)" and "many projects (federation)". Even
    without paid tiering today, this card teaches operators the feature exists.
