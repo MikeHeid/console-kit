@@ -1876,6 +1876,24 @@ Mechanism:
 - Choice persists in `localStorage` as `skin`; it reaches
   nothing outside the browser.
 
+## PR title ref linking (1.15.0)
+
+The PRs tab's "Open" buttons already match **item ids** and
+**qids** found in a PR's title or branch; now **dotted-number
+refs** in those same strings also become open-item buttons.
+
+- A PR titled "Refactor 1.2 to use typed deps" now surfaces a
+  button labelled `1.2 · AB-2` that opens item AB-2 (whose ref
+  is `1.2`).
+- Guards are the same as 1.10.0's clickable refs in agent
+  text: lookbehind + lookahead block adjacent
+  letters/digits/dot/underscore/hyphen/slash, so a PR title
+  mentioning `v0.9.3` or `/path/1.2.html` never wrongly links.
+- Honours the existing `PR_MAX_LINKS` cap and de-duplicates
+  against id/qid matches, so a title that mentions both an id
+  and its ref produces one button, not two.
+- Browser-only; no server changes.
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent
