@@ -580,8 +580,21 @@
     while (rest) {
       const m = rest.match(INLINE);
       if (!m) { parent.appendChild(document.createTextNode(rest)); break; }
-      if (m.index > 0) parent.appendChild(document.createTextNode(rest.slice(0, m.index)));
       const token = m[0];
+      // 1.20.0: snake_case guard. An underscore-wrapped match adjacent to a word char on either
+      // side (e.g. `foo_bar_baz`) is an identifier, not italic — pass it through literally.
+      if (token.startsWith('_') && token.endsWith('_')) {
+        const prev = m.index > 0 ? rest.charAt(m.index - 1) : '';
+        const after = rest.charAt(m.index + token.length) || '';
+        if (/\w/.test(prev) || /\w/.test(after)) {
+          // Advance past this run; emit the whole literal up to and including the first underscore
+          // so the next iteration tries again on what remains.
+          parent.appendChild(document.createTextNode(rest.slice(0, m.index + 1)));
+          rest = rest.slice(m.index + 1);
+          continue;
+        }
+      }
+      if (m.index > 0) parent.appendChild(document.createTextNode(rest.slice(0, m.index)));
       if (token.startsWith('`')) {
         const code = el('code', { className: 'ck-md-icode' });
         code.textContent = token.slice(1, -1);

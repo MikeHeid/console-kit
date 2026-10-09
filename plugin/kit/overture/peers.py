@@ -137,8 +137,26 @@ def _validate(name: str, cfg: object) -> Peer:
     return Peer(name=name, url=url.rstrip("/"), client_id=client_id, token_sha256=token_sha)
 
 
+def _hash_secret(secret: str, url: str | None = None) -> str:
+    """1.20.0: hash the secret BOUND TO the peer URL.
+
+    An agent who edits `.overture/portfolio.json` to change `url` without touching `token_sha256`
+    would now fail the drift check: a different URL means a different hash. The old shape
+    `sha256(secret)` is still accepted so a user who already configured their peers doesn't need
+    to re-sign on upgrade; `load_secret` prefers the URL-bound form and falls back with a warning.
+    """
+    if url is None:
+        return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+    data = secret.encode("utf-8") + b"\x00" + url.encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
+
+
 def load_secret(state: Path, peer: Peer) -> str:
-    """Read the plaintext secret from STATE/portfolio-secrets/<peer>.json; verify its sha256 matches config."""
+    """Read the plaintext secret from STATE/portfolio-secrets/<peer>.json; verify its sha256 matches config.
+
+    1.20.0: the hash is bound to the peer URL. The old `sha256(secret)` form is still accepted
+    for backward compat, but logs a one-line stderr warning naming the peer and the fix.
+    """
     path = Path(state) / SECRETS_DIR / f"{peer.name}.json"
     try:
         st = os.stat(path, follow_symlinks=False)
@@ -159,11 +177,19 @@ def load_secret(state: Path, peer: Peer) -> str:
     secret = doc.get("client_secret") if isinstance(doc, dict) else None
     if not isinstance(secret, str) or not secret:
         raise PeersError(f'{path} must hold {{"client_secret": "..."}}')
-    got = hashlib.sha256(secret.encode("utf-8")).hexdigest()
-    if not hmac.compare_digest(got, peer.token_sha256):
-        raise PeersError(f"the secret in {path} does not match .overture/portfolio.json's token_sha256 "
-                         f"for {peer.name!r}; rotate the pair or correct the config")
-    return secret
+    bound = _hash_secret(secret, peer.url)
+    if hmac.compare_digest(bound, peer.token_sha256):
+        return secret
+    # 1.20.0 backward compat: accept the old URL-less hash but warn so the owner knows to rotate.
+    legacy = _hash_secret(secret)
+    if hmac.compare_digest(legacy, peer.token_sha256):
+        import sys as _sys
+        _sys.stderr.write(f"console peers: {peer.name}'s token_sha256 is the pre-1.20 shape "
+                          f"sha256(secret); rotate to sha256(secret + 0x00 + url) so a URL change "
+                          f"in {FILE} is caught by the drift check\n")
+        return secret
+    raise PeersError(f"the secret in {path} does not match .overture/portfolio.json's token_sha256 "
+                     f"for {peer.name!r}; rotate the pair or correct the config")
 
 
 class Aggregator:
