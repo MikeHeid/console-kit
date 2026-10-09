@@ -5866,6 +5866,23 @@
       if (item && items && Object.hasOwn(items, item) && !found.some(f => f.id === tok)) found.push({ id: tok, item: item });
       if (found.length >= PR_MAX_LINKS) break;
     }
+    // Dotted-number refs in the PR title or branch open the matching item. Guards against
+    // version strings and URLs the same way clickable refs in agent text do.
+    if (found.length < PR_MAX_LINKS && items) {
+      const byRef = {};
+      for (const id of Object.keys(items)) {
+        const r = (items[id] || {}).ref;
+        if (typeof r === 'string' && r) byRef[r] = id;
+      }
+      const REF_IN_TEXT = /(?<![A-Za-z0-9._\-/])([1-9][0-9]*(?:\.[1-9][0-9]*)*)(?![A-Za-z0-9._\-/])/g;
+      for (const m of text.matchAll(REF_IN_TEXT)) {
+        const itemId = byRef[m[1]];
+        if (!itemId) continue;
+        const label = m[1] + ' · ' + itemId;
+        if (!found.some(f => f.item === itemId)) found.push({ id: label, item: itemId });
+        if (found.length >= PR_MAX_LINKS) break;
+      }
+    }
     return found;
   }
 
