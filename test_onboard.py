@@ -89,7 +89,11 @@ class WriteTests(Base):
         self.assertEqual(cfg["fold"]["adapter"], ".overture/adapter.py")
         self.assertTrue((self.project / ".overture/adapter.py").is_file())
         self.assertIn(O.MARK.lstrip("# "), (self.project / ".overture/page.html").read_text())
-        self.assertEqual(len(out), 4, out)
+        # 1.6.1 added a line for appending .overture/console.env to .gitignore (so Claude Code's
+        # safety check doesn't block the mid-onboard commit).
+        self.assertEqual(len(out), 5, out)
+        gi = (self.project / ".gitignore").read_text()
+        self.assertIn(".overture/console.env", gi)
 
     def test_a_rerun_with_the_same_answers_changes_nothing(self):
         self.write()
@@ -97,8 +101,10 @@ class WriteTests(Base):
         out = self.write()
         self.assertEqual(out[0], f"unchanged {self.project.resolve() / '.overture/console.env'}")
         # The starters exist now, so a rerun names them for review rather than trusting a marker.
-        self.assertEqual([line.split()[1].rsplit("/", 1)[1].rstrip(":") for line in out[1:]], ["adapter.py", "page.html"])
-        self.assertTrue(all(line.startswith("REVIEW") for line in out[1:]), out)
+        # 1.6.1: a `kept .gitignore: already lists …` line also appears (idempotent gitignore append).
+        bodies = [line for line in out[1:] if not line.startswith("kept")]
+        self.assertEqual([line.split()[1].rsplit("/", 1)[1].rstrip(":") for line in bodies], ["adapter.py", "page.html"])
+        self.assertTrue(all(line.startswith("REVIEW") for line in bodies), out)
         self.assertEqual(before, {p: p.read_bytes() for p in self.project.rglob("*") if p.is_file()})
 
     def test_a_rerun_with_new_answers_rewrites_its_own_file(self):

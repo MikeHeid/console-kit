@@ -116,7 +116,7 @@ class VerifyVendorTests(unittest.TestCase):
         (self.copy / "plugin" / "hooks" / "hooks.json").unlink()
         (self.copy / "fold.py").unlink()
         rep = VV.verify(self.kit, "v1.0.0", self.copy)
-        self.assertEqual(sorted(rep["missing"]), ["overture/console.js", "fold.py", "plugin/hooks/hooks.json"])
+        self.assertEqual(sorted(rep["missing"]), ["fold.py", "overture/console.js", "plugin/hooks/hooks.json"])
         self.assertFalse(rep["ok"])
 
     def test_skills_may_be_left_out_but_one_taken_is_taken_whole(self):

@@ -2158,6 +2158,52 @@ adjacent to a word char on either side and emits the first
 underscore as literal text, retrying the rest. `_italic_` on its
 own and `_italic_` between non-word chars still work.
 
+## Full test-suite green (1.20.1)
+
+The parallel review's test agent flagged ~38 server-test
+failures as "shape drifts from feature additions, not code bugs."
+This patch cleans them up and the full suite now passes.
+
+### Code change
+
+- **Refs no longer fold into `items.json` or into
+  `view.items`.** Items stay as the project pushed them, a
+  shape-stability contract. The sibling `view.refs: {id: ref}`
+  map carries the kit's assignments. Browser `itemRef(id)`,
+  palette ref search, PR title ref linking, and clickable refs
+  in agent text all read from `view.refs` first (fall back to
+  legacy `items[id].ref` so an older project upgrading still
+  shows refs).
+- `items-push` response is shape-stable: `{"items": N,
+  "seeds_added": [...]}`. The pushing agent reads assigned refs
+  via `/view` instead.
+- `MS.POST_ROUTES` catalog grew to include `/playbook` and
+  `/item-move`.
+
+### Test-fixture change
+
+- `test_server.test_the_view_carries_tags_and_the_project_dirs`
+  accepts `view.config` with `sections: {}`.
+- `test_server.test_board_is_behind_the_same_gate` tolerates the
+  kit's `items_tree` key in `values`.
+- `test_server.test_ac33_a_fixture_copy_keeps_its_bytes_...`
+  whitelists `refs.json` alongside `items.json` + `server.lock`.
+- `test_server.test_an_older_kit_reads_the_side_file_as_...`
+  archives the pre-1.0 package path (`console_kit`), with a
+  probe script that imports either module name.
+- `test_server.AGENT_POSTS` includes `/playbook` and
+  `/item-move`.
+- `test_onboard` tests expect one more output line (the
+  gitignore append) + idempotent `kept` on rerun.
+- `test_vendor` fixture matches sorted order.
+
+### Results
+
+- `test_kit.py`: 303 pass / 3 skip
+- `test_server.py`: **285 pass** (was 42 failing)
+- `test_onboard.py`: 31 pass
+- `test_vendor.py`: 11 pass
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent
