@@ -2208,3 +2208,15 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 .ck-skin-toggle:hover, .ck-skin-toggle:focus-visible {
   background: var(--c-surface-alt); color: var(--c-fg); outline: none;
 }
+
+/* "What's new since last look" banner (1.16.0). Shown above the Priority ribbon on Inbox open. */
+.ck-new-banner {
+  margin: 8px 16px; padding: 8px 12px;
+  border: 1px solid var(--c-accent); border-radius: var(--radius-sm);
+  background: var(--c-accent-soft, var(--c-surface-alt));
+  color: var(--c-fg);
+  display: flex; align-items: center; gap: 10px; font-size: 13px;
+}
+.ck-new-dot { color: var(--c-accent); font-size: 10px; }
+.ck-new-text { flex: 1; }
+.ck-new-dismiss { padding: 3px 10px; font-size: 12px; }
