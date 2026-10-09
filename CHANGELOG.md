@@ -2495,3 +2495,91 @@ product. 1.25 names the moat and reshapes the tabs.
   `view.questions`; no new server endpoint.
 - The portfolio upgrade card renders a Copy snippet; the
   text is a constant string, no server data.
+
+## Deliberate (1.26.0)
+
+If 1.25 was *legible*, 1.26 is *deliberate*. A five-way
+advisory review (DevOps, integrations, AI web, adversarial,
+strategic) converged on reordering what was originally
+pitched as "ticket tracker" into Launch Idea as the headline
+and tickets as its lightweight downstream artifact. The
+release where **starting a thing becomes a first-class,
+auditable act.**
+
+- **Launch Idea pane.** A right-rail panel on every item that
+  walks the operator through three steps: **Frame** (one-line
+  idea + pitch), **Grill** (five adversarial questions —
+  user, failure, scale, opportunity cost, evidence), **Spawn**
+  (pick which tickets to create, edit inline, go). The pane
+  reuses `attachDialogAccessibility` (focus trap + return
+  from 1.24), persists its pitch through the existing
+  draft-autosave key so a refresh never loses the pitch, and
+  collapses on narrow viewports.
+- **Tickets as children of items.** A new `tickets.py` module
+  (sidecar `STATE/tickets.json`, atomic O_NOFOLLOW writes
+  via `atfile`) with four kinds — `task`, `bug`, `research`,
+  `grilling`. Three statuses: `open`, `blocked`, `closed`.
+  Acyclic blocking is enforced server-side. Caps: 10 000
+  tickets per project, 500-char title, 20 000-char body,
+  32 blockers per ticket, 2 MiB total on disk. Three
+  owner-door routes: `/api/ticket-create`,
+  `/api/ticket-update`, `/api/ticket-close`. Tickets are
+  owner-write only in 1.26; the agent-door open-up waits for
+  the capability-gate work.
+- **Tickets fold on every item panel.** Grouped by status
+  (open / blocked / closed-collapsed), with inline close
+  buttons that use `.ck-btn-danger` + two-click confirm.
+  Blocking shows the parent-ticket id. A `+ New ticket` fold
+  at the bottom with kind select, title, body.
+- **`grill-me` skill.** New `plugin/skills/grill-me/SKILL.md`.
+  Overture-native, inspired by mattpocock's `grill me`,
+  reshaped around Overture's existing question/answer path —
+  so every grill answered becomes a locked ruling in the
+  audit trail. Not vendored; capability-gate work for
+  third-party skills is a later release.
+- **Branch Out wizard.** A sibling of Launch Idea on every
+  item: a 3-step wizard patterned after the operator's own
+  smart-prompt-maker — Describe → Dig in → Compile. Step 2
+  seeds six adversarial axes (Audience, Goals, Constraints,
+  Format, Style/Tone, Examples) that the operator can edit
+  per-topic and answer inline. Step 3 shows the composed
+  Markdown brief and offers three outputs: **Create research
+  ticket** (seeds a research-kind ticket under the item with
+  the full brief as body), **Spawn deliberate round** (writes
+  a `message` with `intent: fork, mode: deliberate` that the
+  console-fork skill picks up), or **Copy** for use elsewhere.
+  Topic persists via the existing draft-autosave key so a
+  refresh never loses it. Reuses the Launch Idea pane chrome;
+  only one of {Launch Idea, Branch Out} is open at a time.
+- **COOP header + platform guard.** Adversarial review found
+  that an earlier brief claimed cross-origin isolation but
+  no COOP/COEP was actually set. 1.26 adds
+  `Cross-Origin-Opener-Policy: same-origin` on every response
+  (always safe, no subresource impact; COEP waits for a 1.27
+  iframe audit). The server also hard-refuses to start on
+  non-POSIX because `fcntl.flock` is used throughout — a
+  Windows run would silently fail; it now exits 2 with a
+  clear message pointing to WSL.
+
+### Trust
+
+- Tickets live under `STATE/tickets.json`, written whole and
+  atomic via `atfile.write_at` (same O_NOFOLLOW pattern as
+  `drafts.json`, `refs.json`, `items.json`). The adversarial
+  reviewer's concern was in-place JSONL edits mid-crash; the
+  write-whole-and-atomic path sidesteps that entirely.
+- Launch Idea is a browser-only wizard; the pane holds no
+  state the server does not already see. The pitch persists
+  via the existing `/api/draft` autosave; questions and
+  tickets are the only server writes.
+- Acyclic blocking is enforced on every ticket create and
+  update: a `blocked_by` closure that reaches the target id
+  is refused by name. A ticket cannot block itself.
+- The `grill-me` skill writes through the existing
+  `/question` route; nothing is added to the agent's tool
+  belt and nothing executes code.
+- COOP same-origin isolates the owner window from any
+  cross-origin opener; no subresource relationships break.
+- The platform guard refuses to start on Windows (where the
+  POSIX-only `fcntl` locks would silently no-op) rather than
+  corrupting STATE under a half-working runtime.

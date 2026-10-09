@@ -86,6 +86,7 @@ from . import pagesnap as PS
 from . import playbooks as PB
 from . import triggers as TR
 from . import prs as PR
+from . import tickets as TK
 from . import names as N
 from . import peers as PE
 from . import projectcfg as PC
@@ -109,6 +110,10 @@ OWNER_PLAYBOOK = "/api/playbook"
 OWNER_TRIGGER_REPLAY = "/api/trigger-replay"
 OWNER_ITEM_MOVE = "/api/item-move"
 OWNER_DRAFT = "/api/draft"
+# tickets — children of items; owner-only writes.
+OWNER_TICKET_CREATE = "/api/ticket-create"
+OWNER_TICKET_UPDATE = "/api/ticket-update"
+OWNER_TICKET_CLOSE = "/api/ticket-close"
 # The live console (0.7.0). A long poll: the page asks "has anything changed
 # since seq S?" and the server answers the moment something does, or after at
 # most WAIT_MAX seconds with "no". Well inside Cloudflare's 100 s response
@@ -623,6 +628,13 @@ SECURITY_HEADERS = (
     ("X-Content-Type-Options", "nosniff"),
     ("Referrer-Policy", "no-referrer"),
     ("Content-Security-Policy", "frame-ancestors 'none'"),
+    # adversarial review flagged that the brief claimed cross-origin isolation
+    # was set but no COOP header actually was. COOP: same-origin isolates the owner
+    # window from any opener (ad hoc tab opens pointing here lose the WindowProxy),
+    # which is safe for every response and adds no subresource constraints. Full
+    # COEP require-corp is a 1.27 item because it requires an iframe audit of every
+    # /api/* that embeds under /console.
+    ("Cross-Origin-Opener-Policy", "same-origin"),
 )
 
 
@@ -1068,6 +1080,14 @@ class Console:
             out["view"] = {**out["view"], "drafts": DR.as_view(DR.load(self.cfg.state)["keys"])}
         except (DR.DraftError, OSError):
             out["view"] = {**out["view"], "drafts": {}}
+        # tickets — children-of-items; same owner-door-only exposure as drafts and
+        # pr_backlinks. A failure never faults the page: empty map is harmless, a stuck
+        # ticket is better than a blank inbox.
+        try:
+            out["view"] = {**out["view"], "tickets": TK.as_view(TK.load(self.cfg.state))}
+        except (TK.TicketError, OSError) as e:
+            sys.stderr.write(f"console tickets: {type(e).__name__}: {e}\n")
+            out["view"] = {**out["view"], "tickets": {"by_item": {}, "counts": {}}}
         # Rulings → PRs backlinks. Each locked ruling has a stable qid like "A/Q1";
         # PR titles that mention a qid literally are threaded back to the question card so
         # operators can see which shipped work ties to which ruling. Owner-door only (needs
@@ -1373,6 +1393,55 @@ class Console:
             sys.stderr.write(f"console drafts: write failed: {type(e).__name__}: {e}\n")
             raise RequestError(500, "could not write drafts; see server log") from None
         return {"drafts": drafts}
+
+    # ---- Tickets  ---------------------------------------------------------
+    # Children of items. Owner-only writes for 1.26; the agent door will be opened
+    # in a later release once the capability-gate work lands. All three routes bump
+    # the live-version so an open page re-reads `view.tickets` on the next wait.
+    def ticket_create(self, body: object, by: str = "owner", agent: str | None = None) -> dict:
+        if not isinstance(body, dict) or not isinstance(body.get("nonce"), str):
+            raise RequestError(400, '/api/ticket-create takes a {"nonce", "parent_item", "kind", "title", "body"?} object')
+        try:
+            with self._lock:
+                row = TK.create(self.cfg.state, body, by, _iso_now(), agent=agent)
+        except TK.TicketError as e:
+            raise RequestError(400, str(e)) from None
+        except OSError as e:
+            sys.stderr.write(f"console tickets: create write failed: {type(e).__name__}: {e}\n")
+            raise RequestError(500, "could not write tickets; see server log") from None
+        self._bump()
+        return {"ticket": row}
+
+    def ticket_update(self, body: object) -> dict:
+        if (not isinstance(body, dict) or not isinstance(body.get("nonce"), str)
+                or not isinstance(body.get("id"), str)):
+            raise RequestError(400, '/api/ticket-update takes {"id", "nonce", "title"?, "body"?, "blocked_by"?}')
+        patch = {k: v for k, v in body.items() if k not in ("id", "nonce")}
+        try:
+            with self._lock:
+                row = TK.update(self.cfg.state, body["id"], patch, _iso_now())
+        except TK.TicketError as e:
+            raise RequestError(400, str(e)) from None
+        except OSError as e:
+            sys.stderr.write(f"console tickets: update write failed: {type(e).__name__}: {e}\n")
+            raise RequestError(500, "could not write tickets; see server log") from None
+        self._bump()
+        return {"ticket": row}
+
+    def ticket_close(self, body: object) -> dict:
+        if (not isinstance(body, dict) or not isinstance(body.get("nonce"), str)
+                or not isinstance(body.get("id"), str)):
+            raise RequestError(400, '/api/ticket-close takes {"id", "nonce"}')
+        try:
+            with self._lock:
+                row = TK.close(self.cfg.state, body["id"], _iso_now())
+        except TK.TicketError as e:
+            raise RequestError(400, str(e)) from None
+        except OSError as e:
+            sys.stderr.write(f"console tickets: close write failed: {type(e).__name__}: {e}\n")
+            raise RequestError(500, "could not write tickets; see server log") from None
+        self._bump()
+        return {"ticket": row}
 
     def item_move(self, body: object, by: str = "owner", agent: str | None = None) -> dict:
         """1.17.0: record a re-parent intent on an item's thread. 1.19.1: the writer is passed in,
@@ -3098,7 +3167,8 @@ class OwnerHandler(_Handler):
         kind = OWNER_ROUTES.get(self.path)
         if kind is None and self.path not in ("/api/relock", "/api/lock-all", "/api/page-publish",
                                               "/api/refactor", OWNER_FAVORITE, OWNER_PLAYBOOK,
-                                              OWNER_TRIGGER_REPLAY, OWNER_ITEM_MOVE, OWNER_DRAFT):
+                                              OWNER_TRIGGER_REPLAY, OWNER_ITEM_MOVE, OWNER_DRAFT,
+                                              OWNER_TICKET_CREATE, OWNER_TICKET_UPDATE, OWNER_TICKET_CLOSE):
             return self._send(404, {"error": "not found"})
         # Browsers send Origin on every POST, same-origin included, so a missing one is refused too:
         # an absent header must not read as "trusted".
@@ -3123,6 +3193,12 @@ class OwnerHandler(_Handler):
                 return self._send(200, self.console.item_move(self._body()))
             if self.path == OWNER_DRAFT:            # 1.19.0: owner-draft autosave (per-key text)
                 return self._send(200, self.console.save_draft(self._body()))
+            if self.path == OWNER_TICKET_CREATE:    # create a ticket under an item
+                return self._send(200, self.console.ticket_create(self._body(), by="owner"))
+            if self.path == OWNER_TICKET_UPDATE:    # patch a ticket's title/body/blocked_by
+                return self._send(200, self.console.ticket_update(self._body()))
+            if self.path == OWNER_TICKET_CLOSE:     # close a ticket; dependents unblock as needed
+                return self._send(200, self.console.ticket_close(self._body()))
             self._send(200, {"record": self.console.write(kind, self._body(), "owner")})
         except RequestError as e:
             self._send(e.code, {**e.extra, "error": str(e)})
@@ -3386,6 +3462,17 @@ def agent_request(sock_path: Path, method: str, path: str, body: object = None,
 
 
 def main(argv: list[str] | None = None) -> int:
+    # hard platform guard. The store, names, costs, serverfile and multiserver modules all
+    # rely on fcntl.flock for append-only locking; fcntl is POSIX-only and would ImportError (or,
+    # worse, silently no-op) on Windows. Refuse to start with a clear message instead of corrupting
+    # STATE under Win32 — adversarial review flagged this as a real risk since the dev workspace is
+    # Windows. WSL / Linux / macOS stewards are unaffected.
+    if os.name != "posix":
+        sys.stderr.write(
+            "overture: this server is POSIX-only (systemd user units + Unix sockets + fcntl locks). "
+            "Run inside WSL on Windows, or on Linux/macOS. See https://github.com/MikeHeid/overture#install.\n"
+        )
+        return 2
     ap = argparse.ArgumentParser(description="Serve the owner console behind Cloudflare Access.")
     ap.add_argument("--root", type=Path, required=True)
     ap.add_argument("--page", type=Path, default=None,
