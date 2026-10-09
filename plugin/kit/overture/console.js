@@ -37,7 +37,7 @@
   let draftTexts = {};
   const draftSaveTimers = {};
   // Keys that were cleared locally but whose server save hasn't acked yet. syncServerDrafts
-  // skips these so a view fetch between clear and ack can't resurrect the old text (1.19.1).
+  // skips these so a view fetch between clear and ack can't resurrect the old text.
   const draftClearedPending = new Set();
   const DRAFT_SAVE_DELAY_MS = 1500;
 
@@ -502,7 +502,7 @@
   function renderMarkdown(target, text) {
     // Normalise CRLF and lone CR so regex anchors behave: `.` doesn't match \r, so a CRLF heading
     // like "# Title\r" would not match the heading rule yet would be excluded by the paragraph
-    // guard — a hang (1.19.1).
+    // guard — a hang.
     const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
     let i = 0;
     while (i < lines.length) {

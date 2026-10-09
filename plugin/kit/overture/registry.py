@@ -180,6 +180,16 @@ def register(project: Path, state: Path, kit: Path, path: Path | None = None, st
             projects[r] = {**projects[r], STEWARD: name}
     projects[root] = e
     _write(p, projects)
+    # 1.19.2: a user-installed plugin before 1.0.0 reads the registry at `.config/console-kit/projects.json`.
+    # Mirror the file there so a stale pre-1.0 SessionStart hook still finds the console. The mirror is a
+    # convenience; the overture-era file is the source of truth.
+    try:
+        legacy = p.parent.parent / "console-kit" / "projects.json"
+        if "overture" in p.parts and str(legacy) != str(p):
+            legacy.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            _write(legacy, projects)
+    except OSError:
+        pass   # best effort; a missing legacy mirror does not fail registration
     return e
 
 

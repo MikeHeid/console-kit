@@ -4548,10 +4548,14 @@ class CostSidecarTests(unittest.TestCase):
                          + arch.stderr.decode(errors="replace"))
         subprocess.run(["tar", "-x", "-C", str(old)], input=arch.stdout, check=True, timeout=60)
         boot = r'''
-import sys, threading
+import sys, threading, importlib
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from overture import server as SV
+# 1.19.2: fall back to console_kit when running a pre-1.0 kit still named that way.
+try:
+    SV = importlib.import_module("overture.server")
+except ModuleNotFoundError:
+    SV = importlib.import_module("console_kit.server")
 d, state = Path(sys.argv[2]), Path(sys.argv[3])
 (d / "page.html").write_text("<!doctype html><html><body></body></html>\n")
 class A:
@@ -4791,10 +4795,15 @@ def released_single_store_tags() -> list[str]:
 
 
 OLD_BOOT = r'''
-import sys, threading
+import sys, threading, importlib
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from overture import server as SV
+# 1.19.2: the package was renamed console_kit → overture at v1.0.0, so older kits (v0.8.*)
+# still ship it under the old name. Try the new name first, fall back to the old one.
+try:
+    SV = importlib.import_module("overture.server")
+except ModuleNotFoundError:
+    SV = importlib.import_module("console_kit.server")
 d, state = Path(sys.argv[2]), Path(sys.argv[3])
 d.mkdir(parents=True, exist_ok=True)
 (d / "page.html").write_text("<!doctype html><html><body></body></html>\n")
