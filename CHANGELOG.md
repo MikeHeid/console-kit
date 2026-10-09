@@ -2088,6 +2088,36 @@ feature ship on. All fixed in this patch.
 - **`KEY_RE` anchor `$` allowed a trailing newline in a draft
   key.** Fix: `\Z`.
 
+## Test-regression patch (1.19.2)
+
+Follow-up on the parallel reviews. Full-suite agent surfaced four
+real regressions in test_kit and test_server; all fixed. The
+remaining ~38 server failures are shape drifts from feature
+additions (items_tree, auto-ref, sections, drafts) and need
+test-fixture updates in the matching test file, not code fixes.
+
+- **`triggers.load` and `peers.load` treated a missing config file
+  as a hard fault.** On a project with no `.overture/triggers.json`
+  or no `.overture/portfolio.json`, the broad `except OSError`
+  swallowed `FileNotFoundError` into a `TriggerError`/`PeersError`,
+  which `multiserver.open_project` then surfaced as a project-wide
+  refusal. One project with no triggers would 503 everything on
+  the one-server. Fix: catch `FileNotFoundError` first and return
+  `{}` — "not configured" is not an error.
+- **Old-kit regression tests (`v0.8.*`) failed to import `overture`.**
+  Pre-1.0 kits still ship the package as `console_kit`; the
+  rename sweep updated the OLD_BOOT and start-old shim scripts to
+  `from overture import server` without a fallback. Fix: both
+  shims try `overture.server` and fall back to `console_kit.server`
+  via `importlib.import_module`.
+- **`agent.py register` left pre-1.0 hooks orphaned.** The 1.0
+  rename moved the registry to `~/.config/overture/projects.json`.
+  A user who still had a pre-1.0 plugin install alongside the new
+  one saw its SessionStart hook read the empty legacy path and go
+  silent. Fix: `register()` dual-writes to
+  `~/.config/console-kit/projects.json` as a mirror. The new path
+  stays the source of truth.
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent

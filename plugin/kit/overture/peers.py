@@ -92,6 +92,8 @@ def load(root: Path) -> dict[str, Peer]:
             raw = RF.read(Path(root), FILE, MAX_FILE)
         else:
             raw = read_regular(Path(root) / FILE, MAX_FILE)
+    except FileNotFoundError:
+        return {}   # 1.19.2: no peers configured is not a fault
     except (RegistryError, RF.Refused, ValueError, OSError) as e:
         raise PeersError(str(e)) from None
     if raw is None:

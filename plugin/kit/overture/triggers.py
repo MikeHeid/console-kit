@@ -137,6 +137,10 @@ def load(root: Path) -> dict[str, Trigger]:
             raw = RF.read(Path(root), FILE, MAX_FILE)
         else:
             raw = read_regular(Path(root) / FILE, MAX_FILE)
+    except FileNotFoundError:
+        # 1.19.2: a missing .overture/triggers.json is a project with no triggers configured,
+        # not a startup fault. Catch BEFORE the broad OSError clause.
+        return {}
     except (RegistryError, RF.Refused, ValueError, OSError) as e:
         raise TriggerError(str(e)) from None
     if raw is None:
