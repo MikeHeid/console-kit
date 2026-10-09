@@ -753,6 +753,48 @@
     const v = memGet('seen');
     return typeof v === 'number' && v >= 0 ? v : null;
   }
+
+  // Fresh-counts since the panel was opened: questions, answers, visuals, chat.
+  // Uses `seenAtOpen` (frozen at open-time) rather than the live `seen` cursor so the banner
+  // keeps showing arrivals while the owner is reading, until they click "Caught up" or re-open.
+  function newSinceLast() {
+    if (!view || typeof view.seq !== 'number') return null;
+    const baseline = seenAtOpen;
+    if (!baseline || baseline >= view.seq) return null;
+    let questions = 0, answers = 0, visuals = 0, chat = 0;
+    for (const q of Object.values(view.questions || {})) {
+      if (q.question && q.question.seq > baseline && q.question.by === 'agent') questions++;
+      for (const a of (q.answers || [])) if (a.seq > baseline) answers++;
+    }
+    for (const vs of Object.values(view.visuals || {})) for (const v of vs) if (v.seq > baseline) visuals++;
+    for (const msgs of Object.values(view.threads || {})) for (const m of msgs) if (m.seq > baseline && m.by === 'agent') chat++;
+    if (!(questions + answers + visuals + chat)) return null;
+    return { questions, answers, visuals, chat };
+  }
+
+  function renderNewBanner() {
+    const n = newSinceLast();
+    if (!n) return null;
+    const parts = [];
+    if (n.questions) parts.push(n.questions + ' new question' + (n.questions === 1 ? '' : 's'));
+    if (n.answers)   parts.push(n.answers   + ' new answer' + (n.answers   === 1 ? '' : 's'));
+    if (n.visuals)   parts.push(n.visuals   + ' new visual' + (n.visuals   === 1 ? '' : 's'));
+    if (n.chat)      parts.push(n.chat      + ' new chat');
+    const bar = el('div', { className: 'ck-new-banner', role: 'status', 'aria-live': 'polite' });
+    bar.appendChild(el('span', { className: 'ck-new-dot', 'aria-hidden': 'true' }, ['●']));
+    bar.appendChild(el('span', { className: 'ck-new-text' }, ['Since you last looked: ' + parts.join(' · ')]));
+    const dismiss = el('button', { type: 'button', className: 'ck-btn ck-new-dismiss',
+      'aria-label': 'Mark everything seen' }, ['✓ Caught up']);
+    dismiss.addEventListener('click', () => {
+      // Advance both: the persisted `seen` cursor (so chip badges catch up) and the panel's
+      // open-time baseline (so the banner hides until something NEW arrives after this click).
+      if (view && typeof view.seq === 'number') memSet('seen', view.seq);
+      seenAtOpen = (view && typeof view.seq === 'number') ? view.seq : seenAtOpen;
+      renderPanel();
+    });
+    bar.appendChild(dismiss);
+    return bar;
+  }
   function unreadCount() {
     if (!view || typeof view.seq !== 'number') return 0;
     let seen = seenSeq();
@@ -1518,6 +1560,10 @@
       body.appendChild(el('p', { className: 'ck-items-note', role: 'status',
         style: 'color: var(--c-fg-muted); padding: 12px 20px;' }, [view.items_note]));
     }
+    // Fresh-since-last-look banner: counts of what has arrived since the owner's `seen` cursor.
+    // Nothing to show when the cursor is already at view.seq.
+    const banner = renderNewBanner();
+    if (banner) body.appendChild(banner);
     // Priority ribbon: the oldest awaiting-you questions across self + every peer. Lazy — the
     // portfolio fetch is kicked off here, so the ribbon fills on the next redraw if a peer is
     // configured. Nothing to show when there's no awaiting work anywhere.

@@ -1894,6 +1894,25 @@ refs** in those same strings also become open-item buttons.
   and its ref produces one button, not two.
 - Browser-only; no server changes.
 
+## "What's new since last look" banner (1.16.0)
+
+The Inbox tab opens with a dismissible banner summarising what
+has arrived since the panel opened — questions, answers,
+visuals, chat — so the owner sees the delta without scanning
+every section.
+
+- Counts the four event classes from `view.questions`,
+  `view.visuals`, `view.threads` against the `seenAtOpen`
+  baseline (frozen at the moment the panel last opened), not
+  the live `seen` cursor — so arrivals during the current
+  reading stay in the banner.
+- One click on **✓ Caught up** advances both the persisted
+  `seen` and the panel baseline, so the banner stays dismissed
+  until something arrives next.
+- Rendered inside the Inbox tab, above the Priority ribbon;
+  hidden when nothing is new.
+- Browser-only; no server changes.
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent
