@@ -2583,3 +2583,80 @@ auditable act.**
 - The platform guard refuses to start on Windows (where the
   POSIX-only `fcntl` locks would silently no-op) rather than
   corrupting STATE under a half-working runtime.
+
+## Shipped as (1.27.0)
+
+The integrations advisor's sharpest single call-out: Overture's
+PR→ruling causal thread closed only half the audit loop. GitHub
+Issues — where discussion happens, where repro steps and labels
+live, where product and compliance leave their fingerprint — were
+nowhere. 1.27 mirrors `prs-push` byte-for-byte with `issues-push`
+and threads every GitHub Issue that mentions a `qid` back to the
+ruling that caused the discussion. Plus the two security prereqs
+the adversarial reviewer flagged in 1.26 as "deferred to 1.27":
+real COEP cross-origin isolation and a CSRF double-submit on the
+owner door.
+
+- **`issues.py`.** New module modelled on `prs.py` to the line:
+  closed schema, `snapshot_problem` validator, atomic
+  `STATE/issues.json` via `atfile` with O_NOFOLLOW, a
+  `from_gh` adapter that turns `gh issue list` JSON into the
+  canonical shape, and a `gh_lists` helper the steward runs.
+- **`agent.py issues-push`.** Mirror of `prs-push`: runs `gh
+  issue list` on open and recent closed, posts the result as
+  data to the agent socket's new `/issues` route. The server
+  never talks to GitHub.
+- **Owner-door `/api/issues`** reads the stored snapshot back,
+  same shape and semantics as `/api/prs`.
+- **Rulings → Issues backlinks.** `page_payload` scans every
+  stored issue's title AND body for `qid` literals (bodies
+  matter — repro templates and discussion threads are where
+  qids tend to appear). Browser renders a sibling chip strip
+  under each locked ruling labelled **"Discussed in"** (vs.
+  "Shipped as" for PRs). Open issues render as outlines;
+  closed render as filled grey (the discussion wrapped up).
+  Each chip opens the issue via its canonical `url` from the
+  stored snapshot, pinned to
+  `https://github.com/<repo>/issues/<number>` exactly.
+- **CSRF double-submit** on every `/api/*` POST. The server
+  generates a boot-scoped token at `Console.__init__`, injects
+  it into the HTML config block, and refuses any POST whose
+  `X-Overture-CSRF` header doesn't match. `apiPost` echoes it
+  automatically; the two direct POST sites (`/lock-all`,
+  `/page-publish`) were patched in-line. Belt-and-braces with
+  the existing same-origin check.
+- **COEP require-corp.** Added
+  `Cross-Origin-Embedder-Policy: require-corp` to
+  `SECURITY_HEADERS` so every response (main page and every
+  iframe-loaded resource) carries it. Combined with COOP
+  same-origin from 1.26, this enables true cross-origin
+  isolation — the brief claimed it in 1.19 but no header was
+  actually set until now. The iframe resources already set
+  `Cross-Origin-Resource-Policy: cross-origin` via
+  `_send_raw`, so the nested-context load passes the browser's
+  require-corp check.
+
+### Trust
+
+- `issues-push` runs `gh` in the steward's own process inside
+  its agent jail. The server starts no process and makes no
+  network call — same discipline as `prs-push`.
+- The issue backlink chip's `href` is the canonical
+  `url` from the stored snapshot, which `issues.py` pins to
+  `https://github.com/<repo>/issues/<number>` exactly; nothing
+  typed into an issue title or body can redirect the chip.
+- Issue bodies are capped at `MAX_BODY = 64 KiB` and the
+  pushed snapshot at `MAX_FILE = 3 MiB`; a push over cap is
+  refused by name, nothing is written.
+- CSRF tokens are boot-scoped and never written to disk; a
+  restart invalidates every open page's token, which the live
+  loop already surfaces as a boot change. The token is
+  readable from `document.cookie` only on same-origin
+  (actually, we never set it as a cookie — the token travels
+  only in the HTML's config block, so an attacker's
+  cross-origin page cannot read it even with a stolen Access
+  cookie).
+- COEP require-corp blocks any accidental cross-origin
+  subresource from loading in the console. Everything the
+  console needs is inlined or served under `/api/*` from the
+  same owner door.

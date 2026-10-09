@@ -2516,6 +2516,52 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   outline-offset: -2px;
 }
 
+/* ========= Rulings → Issues backlinks (1.27.0) ==============================
+   Sibling strip to the PR backlinks. "Discussed in" instead of "Shipped as";
+   open issues render as outlines, closed as filled grey. */
+.ck-issue-backlinks {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 6px 10px;
+  background: var(--c-surface-alt);
+  border: 1px solid var(--c-border);
+  border-left: 3px solid var(--c-accent);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.ck-issue-backlinks-label {
+  color: var(--c-fg-muted);
+  margin-right: 4px;
+}
+.ck-issue-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-fg);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+  min-height: 24px;
+}
+.ck-issue-chip:hover,
+.ck-issue-chip:focus-visible {
+  border-color: var(--c-accent);
+  background: var(--c-surface-alt);
+}
+.ck-issue-chip-glyph { color: var(--c-fg-muted); }
+.ck-issue-chip-closed {
+  background: var(--c-fg-muted);
+  color: #fff;
+  border-color: var(--c-fg-muted);
+}
+.ck-issue-chip-closed .ck-issue-chip-glyph { color: #fff; }
+
 /* ========= Rulings → PRs backlinks (1.25.0) =================================
    A chip strip under a locked ruling showing every tracked PR whose title mentions
    the qid. Merged PRs render filled (the ruling shipped); open/closed render as

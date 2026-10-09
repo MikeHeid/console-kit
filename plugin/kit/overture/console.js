@@ -910,9 +910,14 @@
     }
     const payload = Object.assign({}, body, { nonce });  // never mutate caller's body
     try {
+      // CSRF double-submit — the server's HTML config block carries the boot's
+      // CSRF token; echo it in X-Overture-CSRF on every POST. Belt-and-braces with the
+      // same-origin cookie + Origin check already in place.
+      const headers = { 'Content-Type': 'application/json' };
+      if (config && config.csrf) headers['X-Overture-CSRF'] = config.csrf;
       const resp = await fetch(config.api + endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: headers,
         credentials: 'same-origin',
         body: JSON.stringify(payload)
       });
@@ -3017,6 +3022,12 @@
       if (Array.isArray(backlinks) && backlinks.length) {
         bodyEl.appendChild(renderPrBacklinks(backlinks));
       }
+      // Issues → Rulings — a sibling chip strip labelled "Discussed in"
+      // for every GitHub Issue (open or closed) whose title/body mentions this qid.
+      const issueBacklinks = view && view.issue_backlinks && view.issue_backlinks[qData.qid];
+      if (Array.isArray(issueBacklinks) && issueBacklinks.length) {
+        bodyEl.appendChild(renderIssueBacklinks(issueBacklinks));
+      }
       // Actions — fix #5: unique aria-label
       const actions = el('div', { className: 'ck-actions' });
       const truncText = truncateText(qData.text, 40);
@@ -4124,6 +4135,31 @@
   // Fix #6: wrap rejected in <s> with visually-hidden text for screen readers
   // Render PR chips threaded to a ruling. Each chip opens the PR in a new tab.
   // Merged PRs get a visibly distinct variant so the operator can see "this ruling shipped".
+  // GitHub Issues threaded to a ruling. Open issues render as outlines; closed as
+  // filled grey (the discussion wrapped up). Each chip opens the issue in a new tab via its
+  // own canonical URL from the stored snapshot.
+  function renderIssueBacklinks(backlinks) {
+    const wrap = el('div', { className: 'ck-issue-backlinks', role: 'group',
+      'aria-label': 'Issues that discuss this ruling' });
+    wrap.appendChild(el('span', { className: 'ck-issue-backlinks-label' }, ['Discussed in: ']));
+    for (const is of backlinks) {
+      if (!is || typeof is.number !== 'number') continue;
+      const closed = is.state === 'closed';
+      const chip = el('a', {
+        className: 'ck-issue-chip' + (closed ? ' ck-issue-chip-closed' : ''),
+        href: typeof is.url === 'string' ? is.url : '#',
+        target: '_blank',
+        rel: 'noopener',
+        'aria-label': 'Open issue #' + is.number + (closed ? ' (closed)' : ' (open)')
+      }, [
+        el('span', { className: 'ck-issue-chip-glyph', 'aria-hidden': 'true' }, [closed ? '●' : '◉']),
+        el('span', {}, ['#' + is.number])
+      ]);
+      wrap.appendChild(chip);
+    }
+    return wrap;
+  }
+
   function renderPrBacklinks(backlinks) {
     const wrap = el('div', { className: 'ck-pr-backlinks', role: 'group',
       'aria-label': 'Pull requests that cite this ruling' });
@@ -6412,7 +6448,8 @@
     let data = {};
     try {
       resp = await fetch(config.api + '/lock-all', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json',
+                   ...(config && config.csrf ? { 'X-Overture-CSRF': config.csrf } : {}) },
         body: JSON.stringify({ fork: forkId, entries: entries, nonce: mem.nonce }) });
       data = await resp.json().catch(() => ({ error: 'HTTP ' + resp.status }));
     } catch (e) {
@@ -8057,7 +8094,8 @@
       let data = {};
       try {
         resp = await fetch(config.api + '/page-publish', { method: 'POST', credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json',
+                     ...(config && config.csrf ? { 'X-Overture-CSRF': config.csrf } : {}) },
           body: JSON.stringify({ commit: btn.getAttribute('data-commit') }) });
         data = await resp.json().catch(() => ({ error: 'HTTP ' + resp.status }));
       } catch (e) {
