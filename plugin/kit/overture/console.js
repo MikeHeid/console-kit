@@ -3912,6 +3912,11 @@
     if (!reqs.length) return wrap;
     wrap.appendChild(el('div', { className: 'ck-section-heading' }, ['Visuals']));
     const drawn = (view.visuals || {})[itemId] || [];
+    // Variant chips: compute the position of each visual within the item's full set,
+    // oldest first. v1 is the first attempt. Walkers in the card below use these.
+    const walkOrder = [...drawn].sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+    const total = walkOrder.length;
+    const indexOf = new Map(walkOrder.map((v, i) => [v.id, i]));
     for (const m of reqs) {
       const card = el('div', { className: 'ck-fork ck-visual-request', dataRequest: m.id });
       card.appendChild(el('div', { className: 'ck-fork-head' }, ['◫ Visual requested · ' + relTime(m.ts)]));
@@ -3920,18 +3925,48 @@
       card.appendChild(t);
       const mine = drawn.filter(v => v.request === m.id);
       if (!mine.length) card.appendChild(el('p', { className: 'ck-muted' }, ['Waiting for an agent to draw it.']));
-      for (const v of mine) card.appendChild(renderVisual(v));
+      for (const v of mine) card.appendChild(renderVisual(v, indexOf.get(v.id), total, walkOrder));
       wrap.appendChild(card);
     }
     return wrap;
   }
 
-  function renderVisual(v) {
+  // scroll to another variant and focus it, so the operator can see the
+  // chosen one even if the item has many visual cards. Honors reduced-motion.
+  function walkToVariant(walkOrder, targetIdx) {
+    if (targetIdx < 0 || targetIdx >= walkOrder.length) return;
+    const target = walkOrder[targetIdx];
+    const node = panelEl && panelEl.querySelector('[data-visual="' + CSS.escape(target.id) + '"]');
+    if (!node) return;
+    const smooth = reducedMotion && reducedMotion.matches ? 'auto' : 'smooth';
+    node.scrollIntoView({ block: 'center', behavior: smooth });
+    // Focus the first interactive child so a subsequent `[`/`]` continues walking from here.
+    const btn = node.querySelector('.ck-visual-walk, button, [tabindex="0"]');
+    if (btn && btn.focus) try { btn.focus(); } catch (_e) {}
+  }
+
+  function renderVisual(v, idx, total, walkOrder) {
     const box = el('div', { className: 'ck-visual', dataFormat: v.format, dataVisual: v.id });
-    const titleRow = el('div', { className: 'ck-visual-title-row' }, [
-      el('div', { className: 'ck-visual-title' }, [v.title]),
-      renderStarButton('visual:' + v.id, 'this visual')
-    ]);
+    const titleBits = [el('div', { className: 'ck-visual-title' }, [v.title])];
+    // v0-style variant chip "v3 of 7" when the item carries siblings.
+    // Prev / Next buttons walk oldest-first; keyboard `[` and `]` on any focused
+    // visual card does the same (handleShortcut below).
+    if (typeof idx === 'number' && total > 1) {
+      const chip = el('span', { className: 'ck-visual-variant', 'aria-label':
+        'Variant ' + (idx + 1) + ' of ' + total + ' on this item' },
+        ['v' + (idx + 1) + ' of ' + total]);
+      titleBits.push(chip);
+      const prev = el('button', { type: 'button', className: 'ck-btn ck-btn-quiet ck-visual-walk',
+        'aria-label': 'Previous variant', disabled: idx === 0 ? 'disabled' : null }, ['◂']);
+      const next = el('button', { type: 'button', className: 'ck-btn ck-btn-quiet ck-visual-walk',
+        'aria-label': 'Next variant', disabled: idx === total - 1 ? 'disabled' : null }, ['▸']);
+      prev.addEventListener('click', () => walkToVariant(walkOrder, idx - 1));
+      next.addEventListener('click', () => walkToVariant(walkOrder, idx + 1));
+      if (idx === 0) prev.removeAttribute('disabled'), prev.setAttribute('disabled', 'disabled');
+      titleBits.push(prev, next);
+    }
+    titleBits.push(renderStarButton('visual:' + v.id, 'this visual'));
+    const titleRow = el('div', { className: 'ck-visual-title-row' }, titleBits);
     box.appendChild(titleRow);
     box.appendChild(el('div', { className: 'ck-muted' }, [
       (v.format === 'html' ? 'HTML mock' : 'Mermaid diagram') + ' · ' + String(v.path).split('/').pop() +

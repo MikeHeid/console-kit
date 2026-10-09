@@ -2746,6 +2746,39 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   overflow-y: auto;
 }
 
+/* ========= Visual variant chips (1.29.0) ====================================
+   v0-style version chip beside each visual's title when the item carries
+   multiple variants. Prev / Next walk the sibling set oldest-first; the
+   operator can also use `[` and `]` on any focused walk button. */
+.ck-visual-variant {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 1px 8px;
+  margin-left: 8px;
+  background: var(--c-surface-alt);
+  color: var(--c-fg-muted);
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.ck-visual-walk {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 1px 6px;
+  margin-left: 4px;
+  font-size: 11px;
+  line-height: 1;
+}
+.ck-visual-walk[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* ========= Active agents fold (1.28.0) ======================================
    Visibility into which named agents are currently holding a working mark on
    this item. Compact, open-by-default; collapses if the operator wants it out

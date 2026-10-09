@@ -1638,6 +1638,12 @@ class Console:
             raise RequestError(400, f"format {fmt!r} is not one of {', '.join(S.VISUAL_FORMATS)}")
         if not isinstance(content, str) or not content.strip():
             raise RequestError(400, "content must be the visual's text: a Mermaid block or an HTML document")
+        # HTML visuals pass through a sanitizer that strips script/style/iframe/form/
+        # meta-refresh/on*/javascript: before storage. Belt-and-breadth on top of the sandbox.
+        # If anything was stripped, the stored hash reflects the cleaned bytes — a replay with the
+        # unsanitized source will not match the stored sha256, which is the intended trust surface.
+        if fmt == "html":
+            content, _stripped = VIS.sanitize_html(content)
         data = content.encode("utf-8")
         if len(data) > S.MAX_VISUAL:
             raise RequestError(413, f"the visual is {len(data)} bytes; the limit is {S.MAX_VISUAL}. It is "
