@@ -2426,3 +2426,72 @@ focus the moment you Tab out of them. 1.24 fixes all of it.
 - No new secrets, no new network callers, no change to peer
   federation. The accessibility work is layered on top of
   the 1.23 toast + chip plumbing without touching it.
+
+## The hero flow (1.25.0)
+
+1.23 made the console honest; 1.24 made it welcoming; 1.25
+makes it legible. The product strategist's reading of
+Overture is that its most defensible mechanic — rulings
+that notice when their anchor in the code no longer holds
+— reads as a footnote today, and the information
+architecture (Playbooks hidden in a Delegate select,
+Triggers only showing when non-empty) buries half the
+product. 1.25 names the moat and reshapes the tabs.
+
+- **Living Rulings badge.** A new top-of-fold chip in the
+  Inbox counts stale rulings ("3 Living rulings need
+  review") and, on click, narrows the filter to stale and
+  scrolls the first one into view. The stale banner inside
+  each ruling card now carries a "Living ruling" tag so the
+  feature has a name, not just a symptom.
+- **Playbooks and Triggers are top-level tabs.** Pre-1.25 a
+  playbook could only be launched from the Delegate bar's
+  select; triggers appeared only as a collapsible firing
+  log at the top of the Inbox. Both are now proper tabs:
+  Playbooks shows each playbook's description, step count,
+  Preview and Run; Triggers shows configured triggers with
+  Replay plus the firing log. No new data pipes — both tabs
+  read `view.playbooks` / `view.triggers` already shipped
+  since 0.11 / 0.12.
+- **Favorite and Chat move behind "More ▾".** The main bar
+  stays sized for one row: Inbox, Feed, PRs, Playbooks,
+  Triggers, Portfolio. Favorite and Chat live under a
+  dropdown that still shows notes (chat's awaiting-agent
+  dot folds into "More" so the operator never misses it).
+  Keyboard shortcuts (`g s`, `g c`) still work; new
+  shortcuts `g y` and `g t` jump to Playbooks and Triggers.
+- **Rulings → PRs backlinks.** When a tracked PR's title
+  mentions a qid literally (e.g. "fix(auth): resolve
+  A.1/Q7"), each matching PR appears as a chip under the
+  locked ruling — a merged PR renders filled ("shipped as
+  #142"), an open one as an outline. Server computes the
+  map in `page_payload` from `prs.json` (already in state);
+  no network, no gh calls. This is the audit artifact that
+  threads a merged outcome back to the decision that caused
+  it — the thing nobody else is building.
+- **Portfolio empty-state upgrade card.** When no peers are
+  configured, the muted "No peers configured" paragraph is
+  replaced with a dashed-accent upgrade card: "Add your
+  first project" (or "Supervise more than one project at
+  once" when self is present), the real
+  `/overture:portfolio-add` command with Copy, and a link
+  to the setup guide. Visually distinct so it reads as
+  "upgrade seam" not "error".
+
+### Trust
+
+- `page_payload` computes PR backlinks from the already-stored
+  PR snapshot (never talks to GitHub, never spawns gh). An
+  exception is swallowed to a stderr line + `pr_backlinks:
+  {}` — the page never faults for this.
+- Backlinks appear only on the owner door's `/api/view`,
+  never on the agent door's `/view`, because they live
+  inside `page_payload` alongside drafts.
+- The backlink chip's `href` is the PR's own `url` from the
+  stored snapshot, which `prs.py` pins to
+  `https://github.com/<repo>/pull/<number>` exactly; nothing
+  typed into a PR title can redirect the chip.
+- The Living Rulings badge is a pure client computation off
+  `view.questions`; no new server endpoint.
+- The portfolio upgrade card renders a Copy snippet; the
+  text is a constant string, no server data.
