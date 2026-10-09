@@ -67,6 +67,12 @@ SECRETS_DIR = "portfolio-secrets"
 MAX_SECRET_FILE = 4096
 TIMEOUT_S = 4.0
 CACHE_TTL_S = 5.0
+# 1.21.0: a hard wall-time deadline for the whole aggregator fan-out. Even a peer that trickles
+# one byte right before every socket timeout cannot push the aggregator past this cap, because
+# `fan_out` watches the deadline across futures. The limit is slightly below the browser's own
+# fetch grace so the owner door responds before the browser gives up.
+OVERALL_DEADLINE_S = 8.0
+MAX_WORKERS = 16
 
 
 class PeersError(ValueError):
@@ -193,7 +199,13 @@ def load_secret(state: Path, peer: Peer) -> str:
 
 
 class Aggregator:
-    """In-process cache for peer slim responses. One shared instance per Console."""
+    """In-process cache for peer slim responses. One shared instance per Console.
+
+    1.21.0: `fan_out` fetches every peer concurrently with a bounded thread pool so one slow peer
+    does not block the aggregator serially. Each per-peer call still has the TIMEOUT_S cap on
+    socket operations, and a new OVERALL_DEADLINE_S hard cap bounds the TOTAL wall time (so a
+    trickling peer that keeps sending one byte before each socket timeout cannot stall for hours).
+    """
 
     def __init__(self, state: Path) -> None:
         self.state = Path(state)
@@ -222,6 +234,38 @@ class Aggregator:
             self._cache[peer.name] = (now, row)
         return row
 
+    def fan_out(self, peers: list[Peer]) -> list[dict]:
+        """1.21.0: fetch every peer concurrently; return rows in `peers` order.
+
+        Each future is bounded by `OVERALL_DEADLINE_S`; any future still running past that mark
+        yields a timeout error row for its peer. Cache hits short-circuit immediately. Order is
+        preserved so the browser's grid stays stable across refreshes.
+        """
+        if not peers:
+            return []
+        from concurrent.futures import ThreadPoolExecutor, FIRST_COMPLETED, wait as _wait
+        deadline = time.time() + OVERALL_DEADLINE_S
+        results: dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=min(len(peers), MAX_WORKERS)) as pool:
+            futs = {pool.submit(self.fetch_slim, p): p for p in peers}
+            pending = set(futs)
+            while pending:
+                remaining = max(0.0, deadline - time.time())
+                done, pending = _wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
+                if not done:
+                    # Deadline hit: name every peer still unresolved as an error row and stop.
+                    for f in pending:
+                        p = futs[f]
+                        results[p.name] = _error_row(p, f"{p.name}: aggregator deadline {OVERALL_DEADLINE_S:g}s exceeded")
+                    break
+                for f in done:
+                    p = futs[f]
+                    try:
+                        results[p.name] = f.result()
+                    except Exception as e:  # noqa: BLE001 — one bad peer never faults the aggregator
+                        results[p.name] = _error_row(p, f"{p.name}: {type(e).__name__}: {e}")
+        return [results.get(p.name) or _error_row(p, f"{p.name}: no result") for p in peers]
+
 
 def _fetch_slim_http(peer: Peer, secret: str) -> dict:
     """One HTTPS call to the peer's /api/portfolio-slim with Access service-token headers.
@@ -246,11 +290,27 @@ def _fetch_slim_http(peer: Peer, secret: str) -> dict:
     req.add_header("CF-Access-Client-Id", peer.client_id)
     req.add_header("CF-Access-Client-Secret", secret)
     req.add_header("Accept", "application/json")
+    # 1.21.0: enforce a total-time cap on the body read. urllib's `timeout=` is per-socket-op,
+    # which a peer that trickles one byte right before each socket timeout can game indefinitely.
+    import socket as _so
+    body_deadline = time.monotonic() + TIMEOUT_S
     try:
         with opener.open(req, timeout=TIMEOUT_S) as resp:
             if resp.status != 200:
                 return _error_row(peer, f"{peer.name}: HTTP {resp.status}")
-            raw = resp.read(64 * 1024)
+            raw = b""
+            while len(raw) < 64 * 1024:
+                remaining = body_deadline - time.monotonic()
+                if remaining <= 0:
+                    return _error_row(peer, f"{peer.name}: body read exceeded {TIMEOUT_S:g}s")
+                try:
+                    resp.fp.raw._sock.settimeout(min(remaining, 1.0))
+                except (AttributeError, OSError):
+                    pass   # not every opener exposes the raw socket; the overall deadline above still applies
+                chunk = resp.read(min(8 * 1024, 64 * 1024 - len(raw)))
+                if not chunk:
+                    break
+                raw += chunk
     except urllib.error.HTTPError as e:
         return _error_row(peer, f"{peer.name}: HTTP {e.code}")
     except urllib.error.URLError as e:
