@@ -1827,8 +1827,11 @@ class EvidenceReadLimitTests(_Live, unittest.TestCase):
 
 # -- 0.8.0: roar, refine/drill, tags, transcripts and visuals through the real server ------
 
+# 1.29.0: visual sanitizer strips <script>; the old MOCK's script would fail the round-trip
+# assertion. The prototype use-case is "a static mock an agent drew for the operator to
+# look at" — scripts were never going to run inside the sandbox anyway (no allow-scripts).
 MOCK = ("<!doctype html><html><head><style>h1{color:#123}</style></head><body><h1>Grid mock</h1>"
-        "<script>document.body.setAttribute('data-ran','1')</script></body></html>")
+        "<p data-feature='mock'>Draft layout, no interactivity.</p></body></html>")
 
 
 class Phase4Tests(_Live, unittest.TestCase):

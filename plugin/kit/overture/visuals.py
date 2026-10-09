@@ -64,6 +64,54 @@ MAX_DOC_BYTES = 256 * 1024     # a doc is a title, at most MAX_VISUAL_DOC charac
 MAX_INDEX_BYTES = 4 << 20
 NAME = re.compile(r"^([0-9a-f]{8})-([0-9a-f]{12})(\.mmd|\.html)\Z")
 
+# HTML sanitization. The sandboxed iframe already runs under `default-src 'none'` with no
+# `allow-scripts`, so inline `<script>` and `onerror=` can't fire in the browser — but defense-in-
+# breadth is cheap and the adversarial reviewer specifically asked for a server-side strip.
+# Patterns are case-insensitive. Order matters: strip whole dangerous elements first (with their
+# content), then dangerous attributes, then dangerous URL schemes.
+_HTML_STRIP_ELEMENTS = re.compile(
+    # <style> is intentionally NOT stripped: CSS is inert under the sandbox's `default-src 'none';
+    # style-src 'unsafe-inline'`, and prototypes without CSS are useless. Script-equivalent
+    # elements only.
+    r"<\s*(?P<tag>script|iframe|frame|frameset|object|embed|form|applet)\b[^>]*>.*?<\s*/\s*(?P=tag)\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+# Self-closing or stray openers for the same dangerous elements, plus <meta http-equiv=refresh> and <base>.
+_HTML_STRIP_SELF = re.compile(
+    r"<\s*(?:script|iframe|frame|frameset|object|embed|form|applet|base)\b[^>]*/?>",
+    re.IGNORECASE,
+)
+_HTML_STRIP_META_REFRESH = re.compile(
+    r"<\s*meta\b[^>]*\bhttp-equiv\s*=\s*['\"]?\s*refresh\b[^>]*>",
+    re.IGNORECASE,
+)
+# Event-handler attributes: on* names, in any whitespace- or tag-boundary context.
+_HTML_STRIP_ON = re.compile(
+    r"\s(on[a-z]+)\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
+    re.IGNORECASE,
+)
+# javascript: and vbscript: URLs on href/src/action/formaction attributes.
+_HTML_STRIP_JS_URL = re.compile(
+    r"\s(href|src|action|formaction|xlink:href)\s*=\s*(?:\"\s*(?:javascript|vbscript|data)\s*:[^\"]*\""
+    r"|'\s*(?:javascript|vbscript|data)\s*:[^']*')",
+    re.IGNORECASE,
+)
+
+
+def sanitize_html(html: str) -> tuple[str, int]:
+    """strip script/style/iframe/form/meta-refresh/on* /javascript: from HTML before storage.
+
+    Returns (cleaned, strip_count). Never raises; the sandbox is still the first line of defense,
+    this is layered on top. The output is encoded utf-8 by the caller and stored verbatim.
+    """
+    count = 0
+    out, n = _HTML_STRIP_ELEMENTS.subn("", html);               count += n
+    out, n = _HTML_STRIP_SELF.subn("", out);                     count += n
+    out, n = _HTML_STRIP_META_REFRESH.subn("", out);             count += n
+    out, n = _HTML_STRIP_ON.subn("", out);                       count += n
+    out, n = _HTML_STRIP_JS_URL.subn("", out);                   count += n
+    return out, count
+
 
 class VisualError(Exception):
     """A visual the kit refuses to write or to serve; the message says why and holds no file content."""

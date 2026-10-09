@@ -2716,3 +2716,58 @@ hand.
   every question card via `agentLabel`. No new data surface.
 - Status counters are owner-door-only; `/api/status` has
   always been Access-gated.
+
+## Prototype (1.29.0)
+
+The mattpocock integration backlog's last piece. Overture's
+visuals have carried HTML and Mermaid since 0.8.0; they
+*were* prototypes without the name. 1.29 adds the two things
+that make them feel like a first-class prototyping surface
+and closes the one adversarial-review veto that was still
+only half-held: v0-style variant chips in the UI, and
+defense-in-breadth HTML sanitization in the server.
+
+- **Variant chips.** When an item carries more than one
+  visual, each visual's title bar now shows a muted
+  `v3 of 7` pill with Prev / Next buttons that walk the
+  item's siblings in oldest-first order. Click Prev or Next
+  to scroll + focus the chosen variant. Honors
+  `prefers-reduced-motion`. Pre-1.29 the operator had to
+  scroll the panel by hand and count — fine for 2, lost for
+  10. Pattern reference: v0's left-rail version stack,
+  Figma AI's variant branches.
+- **HTML sanitization at write-time.** The adversarial
+  reviewer flagged in 1.26 that the sandboxed iframe is the
+  *first* line of defense but belt-and-breadth is cheap —
+  a stripped-down HTML cannot even reach the iframe. A new
+  `visuals.sanitize_html` strips `<script>` / `<style>` /
+  `<iframe>` / `<frame>` / `<frameset>` / `<object>` /
+  `<embed>` / `<form>` / `<applet>` elements with their
+  content, strips `<meta http-equiv=refresh>` and `<base>`
+  openers, strips every `on*=` event-handler attribute,
+  and strips `javascript:` / `vbscript:` / `data:` URLs on
+  `href`, `src`, `action`, `formaction`, and `xlink:href`.
+  Case-insensitive, pre-storage, byte-count reflected in
+  the stored sha256. The sandbox still enforces its CSP
+  (`default-src 'none'`, no `allow-scripts`) — if either
+  layer were bypassed, the other would hold.
+
+### Trust
+
+- Sanitization runs *before* the sha256 is computed and the
+  content is written, so the stored hash is the clean one.
+  A replay with the unsanitized source will not match and
+  will be refused by name — this closes the "same qid, two
+  bytes" ambiguity.
+- Nothing new ships at the network layer. The iframe
+  sandbox contract (sandbox="" for HTML, allow-scripts only
+  for Mermaid against the vendored lib, never
+  allow-same-origin) is unchanged.
+- Variant chips are pure client computation off
+  `view.visuals[itemId]`; no new endpoint.
+- `walkToVariant` scrolls and focuses only inside
+  `panelEl`; nothing cross-document.
+- `CSS.escape(v.id)` is used to build the DOM selector so
+  a malformed visual id (vanishingly unlikely — it's a 24
+  hex chars store record id — but still) cannot inject
+  attribute-selector syntax.
