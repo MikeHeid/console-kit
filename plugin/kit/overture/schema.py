@@ -75,7 +75,11 @@ QUESTION_KINDS = ("single", "multi", "free")
 # "chat" (0.7.0) is a general message in the inbox's chat, which whichever
 # session is watching answers (owner, 2026-09-29).
 # "visual" (0.8.0) asks for a picture of an item: a Mermaid block or an HTML mock.
-INTENTS = ("fork", "process", "chat", "visual", "move")
+# "grill"  asks the agent fleet to adversarially grill a half-formed idea
+# BEFORE it spawns work. The grill-me skill picks it up and writes N open-ended
+# questions back through the regular /question path, so each answered grill
+# becomes a locked ruling in the audit trail.
+INTENTS = ("fork", "process", "chat", "visual", "move", "grill")
 OWNER_INTENTS = frozenset(INTENTS)
 # The chat's thread (0.7.0). It is not a register item: it can never be one,
 # because ITEM_ID refuses a leading "@", so no project item can share its

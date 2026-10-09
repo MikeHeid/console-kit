@@ -13,8 +13,13 @@ they are concrete, not generic.
 ## When to run
 
 - The operator typed `/overture:grill-me` with an item id or an idea title.
-- The console's Launch Idea pane sent a round request with step `grill-me` and
-  the operator's one-line pitch as the brief.
+- **A message with `intent: "grill"` arrived in an item's thread (1.30.0).**
+  The Launch Idea pane's "⚡ Grill with agent" button writes exactly this
+  message with the operator's pitch as the body. Pick up the newest
+  `grill`-intent message in the item's thread that has no agent-authored
+  grill questions following it, author 3–5 questions, write them through
+  `/question` on the same item, and emit a short confirmation message in
+  the thread so the operator can see the fleet took it.
 - The owner asked for a "grilling" ticket on an item that already carries a
   pitch in its description.
 
