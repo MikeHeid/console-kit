@@ -1956,6 +1956,26 @@ move is a signal the adapter picks up next.**
 - The owner-door `/api/item-move` is Access-authed like every
   other owner route.
 
+## Palette full-text search (1.18.0)
+
+The command palette (`Ctrl+K` / `Cmd+K`) now searches **inside**
+item titles, question bodies, and chat messages — not just the
+label slice.
+
+- Each row carries a `search` payload with lowercased full
+  content; the filter checks label first (startswith /
+  substring / subsequence) and falls back to body-text
+  substring hits one score tier lower.
+- A new **`chat`** row kind indexes the newest 50 chat
+  messages. Each row's label is `You: …` / `<agent>: …` with
+  the first 80 chars of text; Enter opens the Chat tab (which
+  scrolls to its end on render).
+- Chat rows only appear once the owner types; an empty palette
+  stays short (items / tabs / playbooks / peers / actions).
+- Alt+Enter on a chat row copies a `#chat` deep link.
+- No new routes — everything comes from the existing view
+  (`view.questions`, `view.threads[CHAT_ITEM]`).
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent
