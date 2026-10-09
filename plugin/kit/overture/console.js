@@ -24,6 +24,10 @@
   let liveRegion = null;
   let inboxBtn = null;
   let dockStrip = null;
+  let statusChip = null;         // /api/status header chip
+  let statusPop = null;          // expanded status drawer
+  let statusLast = null;         // last /api/status body
+  let statusTimer = null;        // 30s refetch interval handle
   // AB-2/Q2 (owner): at 1024px and wider the panel is a column docked on the
   // right, not an overlay; it starts collapsed to a strip with an unread badge.
   const DOCK_QUERY = '(min-width: 1024px)';
@@ -61,12 +65,37 @@
     }, DRAFT_SAVE_DELAY_MS);
   }
   async function saveDraftToServer(key, text) {
-    try {
-      await apiPost('/draft', { key, text }, 'draft-' + key + '-' + Date.now());
-      // On a successful ack of an empty-text save, the server now agrees the key is gone; drop
-      // the pending-cleared mark so a future server sync can seed from the server again.
-      if (text === '') draftClearedPending.delete(key);
-    } catch (e) { /* best effort; try again on next edit */ }
+    // pass {quiet:true, refresh:false} so autosave does not announce "Sent"
+    // every typing pause nor re-fetch the whole view. Check data.error so the UI
+    // can show a draft-not-saved state when the server rejects or network fails.
+    // Stable nonce per key: retries of the same draft reuse one in-flight slot.
+    const r = await apiPost('/draft', { key, text }, 'draft-' + key, { quiet: true, refresh: false });
+    if (r && r.error) {
+      draftSaveErrors[key] = r.error;
+      markDraftError(key);
+      return;
+    }
+    delete draftSaveErrors[key];
+    markDraftError(key);
+    // On a successful ack of an empty-text save, the server now agrees the key is gone; drop
+    // the pending-cleared mark so a future server sync can seed from the server again.
+    if (text === '') draftClearedPending.delete(key);
+  }
+  // Per-key draft-save error state; the compose that owns the key may render an inline
+  // "not saved yet" hint next to it. Cleared on first successful save.
+  const draftSaveErrors = {};
+  function markDraftError(key) {
+    // Scoped to any element carrying data-ck-draft-key="<key>"; the compose that owns
+    // the textarea sets this on its wrapper. No-op if nothing is wired up.
+    const hint = document.querySelector('[data-ck-draft-key="' + CSS.escape(key) + '"] .ck-draft-hint');
+    if (!hint) return;
+    if (draftSaveErrors[key]) {
+      hint.textContent = 'Draft not saved — will retry on next edit.';
+      hint.setAttribute('data-state', 'error');
+    } else {
+      hint.textContent = '';
+      hint.removeAttribute('data-state');
+    }
   }
   // Flush pending draft saves on tab close so a cleared draft doesn't linger server-side.
   window.addEventListener('pagehide', () => {
@@ -266,11 +295,193 @@
     return s;
   }
 
-  // Announce to screen readers via live region
-  function announce(msg) {
-    if (!liveRegion) return;
-    liveRegion.textContent = '';
-    setTimeout(() => { liveRegion.textContent = msg; }, 50);
+  // Announce to screen readers via live region, and mirror as a visible toast for
+  // sighted users. Pre-this release every "Sent" / "Error" / "Copied" / "Playbook
+  // ran" wrote only to the off-screen aria-live region, so sighted operators saw
+  // nothing when something worked — the console felt broken on success.
+  //
+  // Options:
+  //   { tone: 'ok' | 'error' | 'info' }   // visual tone of the toast (default: 'info')
+  //   { sticky: true }                    // leave the toast up until clicked (errors)
+  //   { silent: true }                    // skip the visible toast; aria-live only
+  //
+  // Dedupe: identical messages within 1.5s coalesce (prevents repeated "Sent" bursts
+  // if a caller fires multiple writes).
+  const TOAST_LIFE_MS = 4000;
+  const TOAST_DEDUPE_MS = 1500;
+  const toastRecent = new Map();  // msg -> last-shown-ms
+  function announce(msg, opts) {
+    if (liveRegion) {
+      liveRegion.textContent = '';
+      setTimeout(() => { liveRegion.textContent = msg; }, 50);
+    }
+    const o = opts || {};
+    if (o.silent) return;
+    try { showToast(msg, o); } catch (_e) { /* best effort */ }
+  }
+  function ensureToastHost() {
+    let host = document.getElementById('ck-toasts');
+    if (host) return host;
+    host = document.createElement('div');
+    host.id = 'ck-toasts';
+    host.setAttribute('aria-hidden', 'true');  // aria-live region already announces
+    document.body.appendChild(host);
+    return host;
+  }
+  function showToast(msg, opts) {
+    const now = Date.now();
+    const last = toastRecent.get(msg) || 0;
+    if (now - last < TOAST_DEDUPE_MS) return;
+    toastRecent.set(msg, now);
+    const tone = (opts && opts.tone) || 'info';
+    const host = ensureToastHost();
+    const t = document.createElement('div');
+    t.className = 'ck-toast';
+    t.setAttribute('data-tone', tone);
+    const label = document.createElement('span');
+    label.className = 'ck-toast-msg';
+    label.textContent = msg;
+    t.appendChild(label);
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'ck-toast-close';
+    close.setAttribute('aria-label', 'Dismiss notification');
+    close.textContent = '×';
+    close.addEventListener('click', () => dismissToast(t));
+    t.appendChild(close);
+    host.appendChild(t);
+    // Trigger slide-in on next frame
+    requestAnimationFrame(() => t.classList.add('ck-toast-in'));
+    if (opts && opts.sticky) return;
+    setTimeout(() => dismissToast(t), TOAST_LIFE_MS);
+  }
+  function dismissToast(t) {
+    if (!t || !t.parentNode) return;
+    t.classList.add('ck-toast-out');
+    setTimeout(() => { if (t.parentNode) t.parentNode.removeChild(t); }, 180);
+  }
+
+  // ---- Status chip --------------------------------------------------------
+  // Polls /api/status (owner-gated) every STATUS_POLL_MS and on panel open. The chip
+  // reads at a glance: green for all-OK, amber for degraded (register unreadable, cron
+  // behind), red for down. Clicking opens a small drawer with the full breakdown.
+  const STATUS_POLL_MS = 30000;
+  async function fetchStatus() {
+    if (!config || !config.api) return;
+    try {
+      const resp = await fetch(config.api + '/api/status', { credentials: 'same-origin' });
+      if (!resp.ok) { paintStatus({ ok: false, error: 'HTTP ' + resp.status }); return; }
+      const data = await resp.json().catch(() => null);
+      if (data) { statusLast = data; paintStatus(data); }
+    } catch (_e) {
+      paintStatus({ ok: false, error: 'offline' });
+    }
+  }
+  function startStatus() {
+    if (statusTimer) return;
+    fetchStatus();
+    statusTimer = setInterval(fetchStatus, STATUS_POLL_MS);
+  }
+  function stopStatus() {
+    if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+  }
+  function statusTone(s) {
+    if (!s || s.ok === false) return 'down';
+    if (s.register !== 'ok') return 'degraded';
+    if (typeof s.cron_last_tick_age_s === 'number' && s.cron_last_tick_age_s > 180) return 'degraded';
+    if (typeof s.waiters === 'number' && typeof s.max_waiters === 'number'
+        && s.waiters >= s.max_waiters) return 'degraded';
+    return 'ok';
+  }
+  function statusWord(s) {
+    const tone = statusTone(s);
+    if (tone === 'down') return 'down';
+    if (tone === 'degraded') return 'degraded';
+    return 'ready';
+  }
+  function paintStatus(s) {
+    if (!statusChip) return;
+    const tone = statusTone(s);
+    statusChip.setAttribute('data-tone', tone);
+    const word = statusChip.querySelector('.ck-status-word');
+    if (word) word.textContent = statusWord(s);
+    const label = 'Server status: ' + statusWord(s)
+      + (s && typeof s.version === 'string' ? ' (v' + s.version + ')' : '');
+    statusChip.setAttribute('aria-label', label);
+    if (statusPop) renderStatusPop();   // refresh the open drawer in place
+  }
+  function toggleStatusPop() {
+    if (statusPop) { closeStatusPop(); return; }
+    openStatusPop();
+  }
+  function openStatusPop() {
+    if (!panelEl) return;
+    statusPop = el('div', { id: 'ck-status-pop', className: 'ck-status-pop',
+      role: 'dialog', 'aria-label': 'Server status details' });
+    panelEl.appendChild(statusPop);
+    statusChip.setAttribute('aria-expanded', 'true');
+    renderStatusPop();
+    // Click outside closes
+    setTimeout(() => document.addEventListener('click', onStatusOutside, true), 0);
+  }
+  function onStatusOutside(e) {
+    if (!statusPop) return;
+    if (statusPop.contains(e.target) || (statusChip && statusChip.contains(e.target))) return;
+    closeStatusPop();
+  }
+  function closeStatusPop() {
+    document.removeEventListener('click', onStatusOutside, true);
+    if (statusPop) { statusPop.remove(); statusPop = null; }
+    if (statusChip) statusChip.setAttribute('aria-expanded', 'false');
+  }
+  function fmtAge(sec) {
+    if (sec == null) return 'never';
+    if (sec < 60) return sec + 's ago';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+    if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
+    return Math.floor(sec / 86400) + 'd ago';
+  }
+  function fmtUptime(sec) {
+    if (sec == null) return '—';
+    if (sec < 60) return sec + 's';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm';
+    if (sec < 86400) return Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm';
+    return Math.floor(sec / 86400) + 'd ' + Math.floor((sec % 86400) / 3600) + 'h';
+  }
+  function renderStatusPop() {
+    if (!statusPop) return;
+    const s = statusLast;
+    statusPop.textContent = '';
+    const title = el('div', { className: 'ck-status-pop-title' }, ['Server status']);
+    statusPop.appendChild(title);
+    if (!s) {
+      statusPop.appendChild(el('p', { className: 'ck-muted' }, ['Loading…']));
+      return;
+    }
+    if (s.error) {
+      statusPop.appendChild(el('p', { className: 'ck-status-row', 'data-state': 'error' }, [s.error]));
+      return;
+    }
+    const rows = [
+      ['Overture', s.version || '—'],
+      ['Register',  s.register === 'ok' ? 'ok' : (s.register || 'error')],
+      ['Agent',     s.agent || 'unknown'],
+      ['Uptime',    fmtUptime(s.uptime_s)],
+      ['Live polls', (s.waiters != null ? s.waiters : '?') + ' / ' + (s.max_waiters != null ? s.max_waiters : '?')],
+      ['Chat quota', (s.chat_remaining != null ? s.chat_remaining : '?') + ' / ' + (s.chat_per_minute != null ? s.chat_per_minute : '?') + ' per minute'],
+      ['Cron tick', fmtAge(s.cron_last_tick_age_s)],
+      ['Peers fetched', fmtAge(s.peers_last_fetched_age_s)],
+    ];
+    for (const [k, v] of rows) {
+      const row = el('div', { className: 'ck-status-row' }, [
+        el('span', { className: 'ck-status-k' }, [k]),
+        el('span', { className: 'ck-status-v' }, [String(v)])
+      ]);
+      statusPop.appendChild(row);
+    }
+    if (s.register_note) {
+      statusPop.appendChild(el('p', { className: 'ck-status-note' }, [s.register_note]));
+    }
   }
 
   // A brief "this changed" pop (0.7.0). CSS runs it only without reduced motion.
@@ -672,8 +883,15 @@
     }
   }
 
-  // POST helper with nonce
-  async function apiPost(endpoint, body, nonceKey) {
+  // POST helper with nonce.
+  // options {quiet, refresh} let background saves (draft autosave) opt out of
+  // the "Sent" announcement and the whole-view refetch. apiPost no longer mutates its
+  // caller's `body`; non-JSON responses no longer raise "Unexpected token '<'" at the
+  // call site; a non-OK response is always normalised to {error}.
+  async function apiPost(endpoint, body, nonceKey, options) {
+    const opts = options || {};
+    const quiet = !!opts.quiet;
+    const refresh = opts.refresh !== false;   // default: refresh view on OK
     if (!config || !config.api) return { error: 'No API configured' };
     // Reuse nonce for retry of the same submit
     let nonce = pendingNonces[nonceKey];
@@ -681,23 +899,31 @@
       nonce = genNonce();
       pendingNonces[nonceKey] = nonce;
     }
-    body.nonce = nonce;
+    const payload = Object.assign({}, body, { nonce });  // never mutate caller's body
     try {
       const resp = await fetch(config.api + endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify(body)
+        body: JSON.stringify(payload)
       });
-      const data = await resp.json();
+      // Parse JSON tolerantly: a 502/empty/HTML error page would otherwise throw and
+      // land in the catch below as "Unexpected token '<'" — useless to the operator.
+      const data = await resp.json().catch(() => null);
       if (resp.ok) {
         delete pendingNonces[nonceKey];
-        announce('Sent');
-        await fetchView();
+        if (!quiet) announce('Sent');
+        if (refresh) await fetchView();
+        return data || {};
       }
-      return data;
+      // Non-OK: nonce stays pending so a retry of the same submit reuses it. Normalise
+      // the error shape so every caller can rely on `.error` being present.
+      const err = (data && typeof data.error === 'string')
+        ? data.error
+        : ('HTTP ' + resp.status);
+      return { error: err, status: resp.status };
     } catch (e) {
-      return { error: e.message || 'Network error' };
+      return { error: (e && e.message) || 'Network error' };
     }
   }
 
@@ -1114,6 +1340,22 @@
     });
     document.body.appendChild(liveRegion);
 
+    // Status chip: a dot + word in the panel's top-right that reflects /api/status.
+    // Click to see the full breakdown (uptime, waiters, chat budget, cron tick, peers freshness).
+    // Pre-1.23 the console had no at-a-glance health; the only signal was a stale list.
+    statusChip = el('button', {
+      type: 'button',
+      className: 'ck-status-chip',
+      'aria-label': 'Server status (loading)',
+      'aria-expanded': 'false',
+      'aria-controls': 'ck-status-pop'
+    }, [
+      el('span', { className: 'ck-status-dot', 'aria-hidden': 'true' }),
+      el('span', { className: 'ck-status-word' }, ['…'])
+    ]);
+    statusChip.addEventListener('click', toggleStatusPop);
+    panelEl.appendChild(statusChip);
+
     // Until /view has loaded once the count is unknown: "?" says so, where "0"
     // would read as "nothing waiting". updateInboxButton replaces it.
     const UNKNOWN = 'Open inbox (not loaded yet)';
@@ -1527,6 +1769,7 @@
     currentMode = mode;
     fromInbox = false;
     if (mode === 'inbox') seenAtOpen = seenSeq() || 0;
+    startStatus();                       // begin polling /api/status while panel is open
     panelEl.setAttribute('data-open', 'true');
     panelEl.setAttribute('aria-label', mode === 'inbox' ? 'Inbox' : 'Console: ' + (itemId || ''));
     applyDock();
@@ -1558,6 +1801,8 @@
   function closePanel() {
     panelEl.setAttribute('data-open', 'false');
     dropLocksNotOnShow();
+    closeStatusPop();                    // tear down the status drawer if it was open
+    stopStatus();                        // stop polling when the panel is closed
     applyDock();
     // Default-open stays dismissed for the session once the owner closes it.
     try { sessionStorage.setItem('ck-inbox-closed', '1'); } catch (e) { /* storage blocked */ }
@@ -3663,18 +3908,41 @@
     const reason = el('textarea', { id: id, rows: '2', className: 'ck-textarea', maxlength: '2000' });
     wrap.appendChild(reason);
     const actions = el('div', { className: 'ck-actions', style: 'margin-top: 8px;' });
-    const go = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' },
-      [withdraw ? 'Withdraw' : 'Keep, stop checking']);
+    // Withdraw is destructive — danger-styled + two-click confirm. Keep
+    // (stop checking) is non-destructive, stays primary. First click arms the
+    // button ("Click again to withdraw"); the arm times out after 4s so a stray
+    // click never commits silently.
+    const goLabel = withdraw ? 'Withdraw' : 'Keep, stop checking';
+    const go = el('button',
+      { className: 'ck-btn ' + (withdraw ? 'ck-btn-danger' : 'ck-btn-primary'), type: 'button' },
+      [goLabel]);
+    let armed = false;
+    let armTimer = null;
+    const disarm = () => {
+      armed = false;
+      if (armTimer) { clearTimeout(armTimer); armTimer = null; }
+      go.textContent = goLabel;
+      go.removeAttribute('data-armed');
+    };
     go.addEventListener('click', async () => {
       const text = reason.value.trim();
       if (withdraw && !text) { announce('Say why it no longer applies'); reason.focus(); return; }
+      if (withdraw && !armed) {
+        armed = true;
+        go.setAttribute('data-armed', 'true');
+        go.textContent = 'Click again to withdraw';
+        armTimer = setTimeout(disarm, 4000);
+        reason.focus();
+        return;
+      }
       go.disabled = true;
+      if (armTimer) { clearTimeout(armTimer); armTimer = null; }
       // The lock the page was shown: a lock changed since is refused by name, never acted on unseen.
       const body = { action: action, qid: qid, lock: q.lock };
       if (text) body.reason = text;
       const result = await apiPost('/refactor', body, action + '-' + qid);
       go.disabled = false;
-      if (result.error) announce('Error: ' + result.error);
+      if (result.error) { announce('Error: ' + result.error, { tone: 'error', sticky: true }); disarm(); }
       else { openForms.delete(action + '-' + qid); renderPanel(); }
     });
     const cancel = el('button', { className: 'ck-btn', type: 'button' }, ['Cancel']);

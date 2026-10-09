@@ -212,6 +212,14 @@ class Aggregator:
         self._lock = threading.Lock()
         self._cache: dict[str, tuple[float, dict]] = {}
 
+    def last_fetched(self) -> float | None:
+        """1.23.0: epoch seconds of the most recent per-peer fetch, or None if the aggregator has
+        never been consulted. Read by `Console.status()` for the owner-visible status chip."""
+        with self._lock:
+            if not self._cache:
+                return None
+            return max(ts for ts, _ in self._cache.values())
+
     def fetch_slim(self, peer: Peer) -> dict:
         """Fetch a peer's /api/portfolio-slim. Returns the slim dict or an error row shaped the same way.
 
