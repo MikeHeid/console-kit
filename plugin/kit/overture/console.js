@@ -36,14 +36,20 @@
   let pendingNonces = {};
   let draftTexts = {};
   const draftSaveTimers = {};
+  // Keys that were cleared locally but whose server save hasn't acked yet. syncServerDrafts
+  // skips these so a view fetch between clear and ack can't resurrect the old text (1.19.1).
+  const draftClearedPending = new Set();
   const DRAFT_SAVE_DELAY_MS = 1500;
 
-  // setDraft: update the in-session map and schedule a debounced server save, so a draft typed on
-  // one browser becomes visible to the owner's other browsers after the next view fetch.
   function setDraft(key, value) {
     const text = (value == null) ? '' : String(value);
-    if (text === '') { if (key in draftTexts) delete draftTexts[key]; }
-    else draftTexts[key] = text;
+    if (text === '') {
+      if (key in draftTexts) delete draftTexts[key];
+      draftClearedPending.add(key);
+    } else {
+      draftTexts[key] = text;
+      draftClearedPending.delete(key);
+    }
     scheduleDraftSave(key, text);
   }
   function scheduleDraftSave(key, text) {
@@ -57,14 +63,30 @@
   async function saveDraftToServer(key, text) {
     try {
       await apiPost('/draft', { key, text }, 'draft-' + key + '-' + Date.now());
-    } catch (e) { /* best effort */ }
+      // On a successful ack of an empty-text save, the server now agrees the key is gone; drop
+      // the pending-cleared mark so a future server sync can seed from the server again.
+      if (text === '') draftClearedPending.delete(key);
+    } catch (e) { /* best effort; try again on next edit */ }
   }
+  // Flush pending draft saves on tab close so a cleared draft doesn't linger server-side.
+  window.addEventListener('pagehide', () => {
+    for (const key of Object.keys(draftSaveTimers)) {
+      clearTimeout(draftSaveTimers[key]);
+      delete draftSaveTimers[key];
+      const text = draftTexts[key] || '';
+      try {
+        const url = config.api + '/draft';
+        const body = JSON.stringify({ key, text, nonce: 'draft-flush-' + key + '-' + Date.now() });
+        navigator.sendBeacon && navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }));
+      } catch (e) { /* best effort */ }
+    }
+  });
   function syncServerDrafts(serverDrafts) {
     if (!serverDrafts || typeof serverDrafts !== 'object') return;
     for (const key of Object.keys(serverDrafts)) {
       const serverText = serverDrafts[key];
       if (typeof serverText !== 'string' || !serverText) continue;
-      // Server-draft merge is a passive read: use the server value locally without saving back.
+      if (draftClearedPending.has(key)) continue;    // local clear not acked yet; do not resurrect
       if (!(key in draftTexts)) draftTexts[key] = serverText;
     }
   }
@@ -478,7 +500,10 @@
   // No HTML pass-through — the DOM is built with document.createElement so a malicious payload in
   // the body cannot inject script, iframe, or attributes.
   function renderMarkdown(target, text) {
-    const lines = String(text || '').split('\n');
+    // Normalise CRLF and lone CR so regex anchors behave: `.` doesn't match \r, so a CRLF heading
+    // like "# Title\r" would not match the heading rule yet would be excluded by the paragraph
+    // guard — a hang (1.19.1).
+    const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
     let i = 0;
     while (i < lines.length) {
       const line = lines[i];
@@ -532,8 +557,11 @@
       }
       // Blank line
       if (/^\s*$/.test(line)) { i++; continue; }
-      // Paragraph: coalesce consecutive non-structural lines
-      const paraLines = [];
+      // Paragraph: always consume AT LEAST this line (so a malformed fence like ```c++ foo or an
+      // oddly-attributed fence like ```json{"a":1} can't match neither the fence branch (strict)
+      // nor the paragraph guard, leaving i stuck). Then coalesce following non-structural lines.
+      const paraLines = [lines[i]];
+      i++;
       while (i < lines.length && !/^\s*$/.test(lines[i])
              && !/^(#{1,6})\s+/.test(lines[i]) && !/^```/.test(lines[i])
              && !/^\s*[-*+]\s+/.test(lines[i]) && !/^\s*\d+\.\s+/.test(lines[i])
