@@ -1631,7 +1631,7 @@ class Console:
             mine: dict = {**self.portfolio_slim(), "ok": True}
         except Exception as e:  # noqa: BLE001
             mine = {"ok": False, "error": f"this console: {e}", "project": self.cfg.project}
-        peer_rows = [self._portfolio.fetch_slim(peer) for peer in peers.values()]
+        peer_rows = self._portfolio.fan_out(list(peers.values()))   # concurrent, deadline-bounded
         out: dict = {"self": mine, "peers": peer_rows}
         if self_err:
             out["config_error"] = self_err

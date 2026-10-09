@@ -368,7 +368,7 @@
   function appendTextWithRefs(target, body) {
     // Build a reverse map ref -> item id once per call; costs an O(items) walk, keeps the output simple.
     const byRef = {};
-    // 1.20.1: read refs from view.refs sibling map first, fall back to legacy items[id].ref
+    // read refs from view.refs sibling map first, fall back to legacy items[id].ref
     const refsMap = (view && view.refs) || {};
     for (const id of Object.keys(refsMap)) {
       const r = refsMap[id];
@@ -1281,7 +1281,7 @@
     for (const [id, label, hint] of tabs) cmds.push({ kind: 'tab', id, label, hint });
     for (const id of Object.keys(items || {})) {
       const it = items[id] || {};
-      const r = itemRef(id);   // 1.20.1: read from view.refs sibling map
+      const r = itemRef(id);   // read from view.refs sibling map
       const refPrefix = r ? r + ' · ' : '';
       cmds.push({ kind: 'item', id, label: refPrefix + id + (it.title ? ' · ' + it.title : ''),
                   hint: 'open', ref: r,
@@ -5699,7 +5699,7 @@
     return card;
   }
 
-  // Per-item dotted-number ref assigned by the server. 1.20.1: read from view.refs (sibling map)
+  // Per-item dotted-number ref assigned by the server. read from view.refs (sibling map)
   // rather than items[id].ref — items.json stays shape-stable with what the project pushed.
   function itemRef(id) {
     if (view && view.refs && typeof view.refs[id] === 'string') return view.refs[id];
@@ -6028,7 +6028,7 @@
     // version strings and URLs the same way clickable refs in agent text do.
     if (found.length < PR_MAX_LINKS && items) {
       const byRef = {};
-      // 1.20.1: read refs from view.refs sibling map; fall back to legacy items[id].ref
+      // read refs from view.refs sibling map; fall back to legacy items[id].ref
       const refsMap = (view && view.refs) || {};
       for (const id of Object.keys(refsMap)) {
         const r = refsMap[id];

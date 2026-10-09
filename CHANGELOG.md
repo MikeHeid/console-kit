@@ -2204,6 +2204,36 @@ This patch cleans them up and the full suite now passes.
 - `test_onboard.py`: 31 pass
 - `test_vendor.py`: 11 pass
 
+## Concurrent peer fetch + total-time cap (1.21.0)
+
+Closes the two peer-aggregator reliability items from the parallel
+review.
+
+- **Concurrent fan-out.** `Aggregator.fan_out(peers)` fetches
+  every peer in a bounded `ThreadPoolExecutor` (up to
+  `MAX_WORKERS = 16`). A deployment with 32 peers no longer takes
+  32× `TIMEOUT_S` wall time in the worst case — just one slow
+  peer's worth. Order of the returned rows matches the input
+  order so the Portfolio grid stays stable across refreshes.
+- **Overall deadline.** `OVERALL_DEADLINE_S = 8.0` caps the whole
+  fan-out. Peers whose futures are still pending at the deadline
+  yield a `"aggregator deadline exceeded"` error row, so one slow
+  peer can never block the browser's `/api/portfolio` fetch past
+  that cap.
+- **Per-peer body-read deadline.** `_fetch_slim_http` enforces a
+  total-time cap on the body read (`body_deadline = TIMEOUT_S`),
+  reading in chunks against a monotonic clock. A peer that
+  trickles one byte right before every socket timeout — which
+  used to be able to stall the per-op `TIMEOUT_S` indefinitely —
+  now fails with `"body read exceeded"`.
+- **One bad peer never faults the aggregator.** `fan_out`'s
+  per-future `except Exception` catches everything (not just
+  `OSError` + `HTTPException`) so a protocol-level surprise from
+  one peer yields an error row for that peer alone.
+
+Smoke-tested: 5 peers return 5 ordered rows in ~17ms (all error
+rows under test; a real peer run would see concurrent round-trips).
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent
