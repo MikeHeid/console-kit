@@ -1023,11 +1023,9 @@ class Console:
         view["triggers"] = [t.to_public() for t in self.triggers.all().values()]
         view["trigger_log"] = self.triggers.recent(20)
         view["favorites"] = self.favorites.list()   # 0.8.19: starred keys, newest first
-        try:
-            from . import drafts as DR
-            view["drafts"] = DR.as_view(DR.load(self.cfg.state)["keys"])
-        except (DR.DraftError, OSError):
-            view["drafts"] = {}   # a bad or unreadable file never fails the view
+        # Drafts are OWNER-ONLY (1.19.0). They are added only by `page_payload()` for the owner
+        # door. `payload()` returns the shared base; agent-side callers (AgentHandler.do_GET) must
+        # NOT see unsent compose text (1.19.1).
         pushed = getattr(self.adapter, "pushed", None)
         if getattr(self.adapter, "problem", None):   # the items() above already read (and logged) it
             view["items_note"] = IT.UNREADABLE
@@ -1046,7 +1044,15 @@ class Console:
         boot, so the agent socket's /view stays the same bytes across restarts.
         """
         ver = self.version()
-        return {**self.payload(), "ver": ver}
+        out = {**self.payload(), "ver": ver}
+        # 1.19.1: drafts are owner-only; they travel on the owner door's /api/view only.
+        try:
+            from . import drafts as DR
+            out.setdefault("view", {})
+            out["view"] = {**out["view"], "drafts": DR.as_view(DR.load(self.cfg.state)["keys"])}
+        except (DR.DraftError, OSError):
+            out["view"] = {**out["view"], "drafts": {}}
+        return out
 
     def push_items(self, body: object) -> dict:
         """`items-push` (Q24, K3 §3.6): the steward's adapter output, as data. Kept in STATE/items.json, then seeded.
@@ -1290,6 +1296,9 @@ class Console:
 
         Mirrors unsent compose text (chat, answer, visual brief …) across the owner's browsers.
         Owner-only (gated by the route). Writes `STATE/drafts.json` whole on each change.
+
+        1.19.1: wrapped in `_lock` so concurrent saves don't lose updates; OSError on write surfaces
+        as a 500 rather than an unhandled traceback.
         """
         if (not isinstance(body, dict) or set(body) - {"key", "text", "nonce"}
                 or not isinstance(body.get("key"), str) or not isinstance(body.get("nonce"), str)
@@ -1297,20 +1306,21 @@ class Console:
             raise RequestError(400, '/api/draft takes {"key": "<tag>", "text": "<content>", "nonce": "<nonce>"}')
         from . import drafts as DR
         try:
-            drafts = DR.set_draft(self.cfg.state, body["key"], body["text"], _iso_now())
+            with self._lock:
+                drafts = DR.set_draft(self.cfg.state, body["key"], body["text"], _iso_now())
         except DR.DraftError as e:
             raise RequestError(400, str(e)) from None
+        except OSError as e:
+            sys.stderr.write(f"console drafts: write failed: {type(e).__name__}: {e}\n")
+            raise RequestError(500, "could not write drafts; see server log") from None
         return {"drafts": drafts}
 
-    def item_move(self, body: object) -> dict:
-        """1.17.0: record the owner's intent to re-parent `item` under `parent` (or null for root).
+    def item_move(self, body: object, by: str = "owner", agent: str | None = None) -> dict:
+        """1.17.0: record a re-parent intent on an item's thread. 1.19.1: the writer is passed in,
+        so an agent-door call records authorship truthfully instead of forging `by: "owner"`.
 
-        Writes a `message` with intent "move" to the item's thread; the adapter is still the source
-        of truth for parent relations, but the move is now visible in the Feed and in the item's
-        thread. The project's steward sees it on next watch and updates items() accordingly.
-
-        Validates that `item` exists in the register and that `parent` either exists or is null.
-        Refuses a move to self or to a descendant (would form a cycle under the pushed items).
+        Writes a `message` with intent "move" (owner) or intent "chat" with a move_to-style note
+        (agent). Adapter stays source of truth for parents; the move is visible in Feed and thread.
         """
         if (not isinstance(body, dict)
                 or set(body) - {"item", "parent", "nonce", "text"}
@@ -1341,10 +1351,19 @@ class Console:
         text = body.get("text")
         if text is not None and not isinstance(text, str):
             raise RequestError(400, "`text` must be a string if given")
-        write_body = {"item": body["item"], "nonce": body["nonce"],
-                      "intent": "move", "move_to": parent,
-                      "text": text or (f"Move under {parent}" if parent else "Move to top level")}
-        rec = self.write("message", write_body, "owner")
+        default_text = f"Move under {parent}" if parent else "Move to top level"
+        if by == "owner":
+            write_body = {"item": body["item"], "nonce": body["nonce"],
+                          "intent": "move", "move_to": parent,
+                          "text": text or default_text}
+            rec = self.write("message", write_body, "owner")
+        else:
+            # 1.19.1: an agent requesting a move writes a plain thread message under its own
+            # identity, not the owner's. The intent "move" is reserved for the owner because
+            # the semantics are "the owner wants this moved" — an agent's note is advisory.
+            canned = (f"Suggests moving under {parent}" if parent else "Suggests moving to top level")
+            write_body = {"item": body["item"], "nonce": body["nonce"], "text": canned}
+            rec = self.write("message", write_body, "agent", agent)
         return {"record": rec}
 
     def replay_trigger(self, body: object) -> dict:
@@ -1363,15 +1382,17 @@ class Console:
         if trigger is None:
             raise RequestError(404, f"no trigger named {body['name']!r}")
         err: str | None = None
+        err_code = 500
         try:
             out = self.run_playbook({"name": trigger.playbook, "nonce": f"replay-{body['nonce']}"})
         except RequestError as e:
             err = str(e)
+            err_code = e.code   # 1.19.1: preserve 400 / 404 from the inner call instead of 500-ing everything
             out = {"records": [], "skipped": []}
         self.triggers.log(trigger.name, "replay", _iso_now(), len(out.get("records", [])),
                           len(out.get("skipped", [])), err)
         if err:
-            raise RequestError(500, err)
+            raise RequestError(err_code, err)
         return out
 
     def favorite_toggle(self, body: object) -> dict:
@@ -3072,8 +3093,11 @@ class AgentHandler(_Handler):
                 # The agent socket is user-only (0600, in a 0700 dir): same trust surface as the owner door
                 # for owner-privileged actions, matching items-push / prs-push / page-snapshot.
                 return self._send(200, self.console.run_playbook(self._body()))
-            if self.path == "/item-move":  # 1.17.0: record a re-parent intent on an item (owner-privileged)
-                return self._send(200, self.console.item_move(self._body()))
+            if self.path == "/item-move":  # 1.17.0: record a re-parent intent on an item
+                # 1.19.1: a session on the owner's machine writes with its own authorship; the
+                # intent "move" is reserved for the owner-door path. The agent variant lands as a
+                # plain advisory message under its agent name.
+                return self._send(200, self.console.item_move(self._body(), by="agent", agent=agent))
             kind = AGENT_ROUTES.get(self.path)
             if kind is None:
                 return self._send(404, {"error": "not found"})

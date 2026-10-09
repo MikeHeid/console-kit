@@ -40,6 +40,26 @@ MAX_FILE = 32 * 1024
 MAX_PEERS = 32
 PEER_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}\Z")
 URL = re.compile(r"^https://[a-z0-9][a-z0-9.\-]{0,255}(:[0-9]{1,5})?/?\Z")
+# 1.19.1: reject hosts that could resolve to the owner's own metadata, intranet, or loopback —
+# a peer whose URL points at those targets would send the Cloudflare Access service-token secret
+# somewhere the owner did not expect. These are refused at config load time.
+_PRIVATE_HOST = re.compile(
+    r"(^localhost\b|^(0|127|10|169\.254|192\.168)\.|^172\.(1[6-9]|2[0-9]|3[01])\.|\.local\Z|\.internal\Z|\.lan\Z|\.home\Z|\.corp\Z)",
+    re.IGNORECASE,
+)
+
+
+def _is_private_host(url: str) -> bool:
+    """Extract the host from https://HOST[:port][/] and decide if it is a private/loopback name."""
+    body = url[len("https://"):]
+    for sep in ("/", "?", "#"):
+        i = body.find(sep)
+        if i >= 0:
+            body = body[:i]
+    host = body.split(":", 1)[0]
+    if not host:
+        return True
+    return bool(_PRIVATE_HOST.search(host))
 CLIENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}(\.access)?\Z")
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}\Z")
 
@@ -103,6 +123,9 @@ def _validate(name: str, cfg: object) -> Peer:
     url = cfg.get("url")
     if not isinstance(url, str) or not URL.match(url):
         raise PeersError(f"{FILE}: peers[{name!r}].url must be https:// of a plain hostname")
+    if _is_private_host(url):
+        raise PeersError(f"{FILE}: peers[{name!r}].url points at a loopback / private / "
+                         f".local hostname; the Access service-token must only reach public hosts")
     client_id = cfg.get("client_id")
     if not isinstance(client_id, str) or not CLIENT_ID.match(client_id):
         raise PeersError(f"{FILE}: peers[{name!r}].client_id must be a Cloudflare Access client ID")
@@ -173,15 +196,30 @@ class Aggregator:
 
 
 def _fetch_slim_http(peer: Peer, secret: str) -> dict:
-    """One HTTPS call to the peer's /api/portfolio-slim with Access service-token headers."""
+    """One HTTPS call to the peer's /api/portfolio-slim with Access service-token headers.
+
+    1.19.1: installs a no-redirect opener so a crafted peer or MITM cannot bounce the request to a
+    different host (which would re-send the Cloudflare Access service-token secret).
+    """
+    import http.client
     import urllib.request
     import urllib.error
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        """Refuse redirects. urllib's default follows them AND re-sends custom headers, which
+        would leak CF-Access-Client-Secret to whatever host the redirect names.
+        """
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            raise urllib.error.HTTPError(req.full_url, code,
+                "redirect refused (secret must not leave the configured peer URL)", headers, fp)
+
+    opener = urllib.request.build_opener(_NoRedirect())
     req = urllib.request.Request(peer.url + "/api/portfolio-slim")
     req.add_header("CF-Access-Client-Id", peer.client_id)
     req.add_header("CF-Access-Client-Secret", secret)
     req.add_header("Accept", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+        with opener.open(req, timeout=TIMEOUT_S) as resp:
             if resp.status != 200:
                 return _error_row(peer, f"{peer.name}: HTTP {resp.status}")
             raw = resp.read(64 * 1024)
@@ -191,6 +229,8 @@ def _fetch_slim_http(peer: Peer, secret: str) -> dict:
         return _error_row(peer, f"{peer.name}: {e.reason}")
     except TimeoutError:
         return _error_row(peer, f"{peer.name}: timed out after {TIMEOUT_S:g}s")
+    except http.client.HTTPException as e:   # 1.19.1: BadStatusLine, LineTooLong, IncompleteRead
+        return _error_row(peer, f"{peer.name}: {type(e).__name__}: {e}")
     except OSError as e:
         return _error_row(peer, f"{peer.name}: {e}")
     try:

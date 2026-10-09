@@ -46,7 +46,7 @@ MAX_KEYS = 500           # live entries; older-ts entries pruned above this
 MAX_KEY_LEN = 256
 # A draft key is a shaped tag like "chat:", "answer:AB-1/Q3", "delegate:text". Shape it so a bad
 # string cannot escape the drafts namespace or embed anything that becomes a path or URL.
-KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@\-]{0,255}$")
+KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@\-]{0,255}\Z")
 STATE_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
 
 
@@ -89,8 +89,12 @@ def load(state: Path) -> dict:
 
 
 def save(state: Path, doc: dict) -> None:
-    """Replace `STATE/drafts.json` whole, O_NOFOLLOW. Raises OSError on an unwritable dir."""
-    data = json.dumps({"keys": doc.get("keys", {})}, sort_keys=True).encode()
+    """Replace `STATE/drafts.json` whole, O_NOFOLLOW. Raises OSError on an unwritable dir.
+
+    1.19.1: ensure_ascii=False so a non-ASCII draft doesn't inflate 6× on disk and silently push
+    the file past MAX_FILE after only a handful of entries.
+    """
+    data = json.dumps({"keys": doc.get("keys", {})}, sort_keys=True, ensure_ascii=False).encode("utf-8")
     if len(data) > MAX_FILE:
         raise DraftError(f"drafts: file would be {len(data)} bytes; limit is {MAX_FILE}")
     sfd = os.open(state, STATE_FLAGS)

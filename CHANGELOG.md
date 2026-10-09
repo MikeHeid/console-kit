@@ -2006,6 +2006,88 @@ across the owner's browsers. Write at home, finish at the office.
   route. Drafts are per-owner; peers and agents cannot read or
   write them.
 
+## Security + reliability patch (1.19.1)
+
+Two independent reviews surfaced issues worth blocking the next
+feature ship on. All fixed in this patch.
+
+### CRITICAL
+
+- **Agent-door `/view` leaked owner drafts.** `payload()`
+  added `view.drafts` since 1.19.0, and `AgentHandler.do_GET`
+  serves `payload()` straight through. An agent calling
+  `/view` on the user-only socket could read the owner's
+  half-typed answers and chat text. Fix: drafts now attach in
+  `page_payload()` only (the owner door's path). Agents see no
+  `drafts` key.
+- **Markdown renderer could hang the tab.** `renderMarkdown`
+  used a strict fence regex but a loose paragraph exclusion:
+  lines like `` ```c++ foo `` or `` ```json {"a":1} `` matched
+  neither, so `i` never advanced and `<p>` elements piled up
+  forever. CRLF text with a heading hit the same case because
+  `.` does not match `\r`. Fix: normalise CRLF; the paragraph
+  branch now unconditionally consumes at least one line, so a
+  malformed fence falls through as literal text.
+
+### HIGH
+
+- **Access service-token could leak via redirect.**
+  `urllib.urlopen` follows 30x redirects AND re-sends custom
+  headers, including `CF-Access-Client-Secret`. A crafted peer
+  (or MITM) could 302 to `http://attacker/` and receive the
+  secret. Fix: `peers._fetch_slim_http` now builds an opener
+  with a redirect handler that raises on any redirect; the
+  request fails with `HTTP 30x`.
+- **Private-host peers refused.** The `peers.py` URL regex
+  accepted `https://localhost`, `.local`, `.internal`, and
+  RFC1918 ranges. Combined with an in-repo config the agent
+  can edit, this could point the Access secret at a host the
+  owner never intended. Fix: `_is_private_host` refuses
+  loopback / `.local` / `.internal` / `.lan` / `.home` /
+  `.corp` / `127.*` / `10.*` / `172.16-31.*` / `192.168.*` /
+  `169.254.*` at config load time.
+- **Agent-door `/item-move` forged owner authorship.**
+  `item_move` always wrote `by: "owner"`. An agent writing to
+  the user-only socket could post as the owner. Fix: pass a
+  `by` argument through; the agent-door path writes a plain
+  advisory message under the agent's own name, and `intent:
+  "move"` stays reserved for the owner door.
+- **Draft clear could resurrect from a server round-trip.**
+  `setDraft(key, '')` deleted locally, but a view fetch
+  before the debounced server save landed would see the key
+  absent locally and re-add the old server value. Fix: a
+  `draftClearedPending` set tracks keys whose clear hasn't
+  acked; `syncServerDrafts` skips them. `pagehide` flushes
+  pending saves with `sendBeacon`.
+- **Peer aggregator could 503 on a bad peer.**
+  `_fetch_slim_http` caught `OSError` + `URLError`, but
+  `http.client.HTTPException` (and its `BadStatusLine`,
+  `LineTooLong`, `IncompleteRead` subclasses) escaped and
+  faulted the whole aggregator. Fix: catch `HTTPException`
+  explicitly.
+- **`refs._topological` recursed.** A 1 000-item parent chain
+  hit Python's recursion limit. Fix: iterative walk.
+- **`save_draft` had no lock.** Two concurrent saves could
+  lose updates on `ThreadingHTTPServer`. Fix: wrap in
+  `self._lock`. `OSError` on write now surfaces as 500 with a
+  server-log entry rather than an unhandled traceback.
+- **`replay_trigger` turned 404s into 500s.** A missing
+  playbook on a configured trigger returned 500 instead of
+  propagating the inner error's code. Fix: preserve
+  `e.code` from the caught `RequestError`.
+
+### MEDIUM
+
+- **`refs.py` reused retired numbers on an explicit push.**
+  Uniqueness was checked only against `assignments`. Fix:
+  pushing a retired ref is refused by name, unless it is the
+  same id getting its own number back. A retired id that
+  returns now gets its old ref restored.
+- **`drafts.save` could inflate on non-ASCII and silently
+  push past `MAX_FILE`.** Fix: `ensure_ascii=False`.
+- **`KEY_RE` anchor `$` allowed a trailing newline in a draft
+  key.** Fix: `\Z`.
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent

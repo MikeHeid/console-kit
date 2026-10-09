@@ -158,6 +158,14 @@ def assign_refs(state: Path, items: dict, auto: bool = True) -> dict[str, str]:
             for other_id, other_ref in assignments.items():
                 if other_ref == pushed and other_id != item_id:
                     raise RefError(f"items.{item_id}.ref {pushed!r} is already assigned to {other_id!r}")
+            # 1.19.1: refs are "never reused" — if `pushed` is a retired ref for a different id,
+            # refuse rather than silently reclaim it.
+            if pushed in retired and retired[pushed] != item_id:
+                raise RefError(f"items.{item_id}.ref {pushed!r} was retired from {retired[pushed]!r}; "
+                               f"refs are not reused — pick a different number")
+            # If the id is a returning retired one keeping its own number, restore it.
+            if pushed in retired and retired[pushed] == item_id:
+                del retired[pushed]
             assignments[item_id] = pushed
 
     # Pass 2: pre-build the already-used set for free-number scanning (current + retired).
@@ -168,9 +176,17 @@ def assign_refs(state: Path, items: dict, auto: bool = True) -> dict[str, str]:
         used_by_parent.setdefault(_parent_segment_key(r), set()).add(r.rsplit(".", 1)[-1])
 
     # Pass 3: auto-assign the still-missing ones. Walk parents-first so a child sees its parent's ref.
+    # 1.19.1: a retired id that comes back gets its old ref restored (refs are permanent per id).
+    retired_by_id: dict[str, str] = {rid: ref for ref, rid in retired.items()}
     if auto:
         for item_id in _topological(items):
             if item_id in assignments:
+                continue
+            # If this id was retired before, restore its old number — never re-generate.
+            old = retired_by_id.get(item_id)
+            if old is not None:
+                assignments[item_id] = old
+                del retired[old]
                 continue
             parent = parent_of.get(item_id)
             parent_ref = assignments.get(parent) if parent else None
@@ -214,19 +230,28 @@ def _next_segment(used: set[str]) -> str:
 
 
 def _topological(items: dict) -> list[str]:
-    """Parent-before-child order. Items whose parent is missing from items[] are treated as roots."""
+    """Parent-before-child order. Items whose parent is missing from items[] are treated as roots.
+
+    1.19.1: iterative — a 1000-item parent chain was hitting Python's recursion limit via the old
+    recursive visit (snapshot_problem doesn't cap chain depth).
+    """
     out: list[str] = []
     seen: set[str] = set()
-
-    def visit(iid: str, stack: tuple = ()) -> None:
-        if iid in seen or iid in stack:
-            return
-        parent = (items.get(iid) or {}).get("parent") if isinstance(items.get(iid), dict) else None
-        if parent and parent in items and parent not in seen:
-            visit(parent, stack + (iid,))
-        out.append(iid)
-        seen.add(iid)
-
-    for iid in items:
-        visit(iid)
+    for start in items:
+        if start in seen:
+            continue
+        # Walk the parent chain of `start` into `stack` in reverse so we can emit parent-first;
+        # a cycle is terminated by the `on_path` set.
+        stack: list[str] = []
+        on_path: set[str] = set()
+        cur = start
+        while cur is not None and cur in items and cur not in seen and cur not in on_path:
+            stack.append(cur)
+            on_path.add(cur)
+            cur = (items[cur] or {}).get("parent") if isinstance(items[cur], dict) else None
+        while stack:
+            iid = stack.pop()
+            if iid not in seen:
+                out.append(iid)
+                seen.add(iid)
     return out
