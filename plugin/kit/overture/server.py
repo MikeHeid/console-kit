@@ -108,6 +108,7 @@ OWNER_FAVORITE = "/api/favorite"
 OWNER_PLAYBOOK = "/api/playbook"
 OWNER_TRIGGER_REPLAY = "/api/trigger-replay"
 OWNER_ITEM_MOVE = "/api/item-move"
+OWNER_DRAFT = "/api/draft"
 # The live console (0.7.0). A long poll: the page asks "has anything changed
 # since seq S?" and the server answers the moment something does, or after at
 # most WAIT_MAX seconds with "no". Well inside Cloudflare's 100 s response
@@ -1022,6 +1023,11 @@ class Console:
         view["triggers"] = [t.to_public() for t in self.triggers.all().values()]
         view["trigger_log"] = self.triggers.recent(20)
         view["favorites"] = self.favorites.list()   # 0.8.19: starred keys, newest first
+        try:
+            from . import drafts as DR
+            view["drafts"] = DR.as_view(DR.load(self.cfg.state)["keys"])
+        except (DR.DraftError, OSError):
+            view["drafts"] = {}   # a bad or unreadable file never fails the view
         pushed = getattr(self.adapter, "pushed", None)
         if getattr(self.adapter, "problem", None):   # the items() above already read (and logged) it
             view["items_note"] = IT.UNREADABLE
@@ -1278,6 +1284,23 @@ class Console:
             plan.append({"index": index, "kind": step["kind"], "item": step.get("item"),
                          "text": step.get("text") or "", "would_run": True, "reason": ""})
         return {"name": pb.name, "description": pb.description, "steps": plan}
+
+    def save_draft(self, body: object) -> dict:
+        """1.19.0: set-or-clear the owner's draft text for a shaped key. Empty text removes.
+
+        Mirrors unsent compose text (chat, answer, visual brief …) across the owner's browsers.
+        Owner-only (gated by the route). Writes `STATE/drafts.json` whole on each change.
+        """
+        if (not isinstance(body, dict) or set(body) - {"key", "text", "nonce"}
+                or not isinstance(body.get("key"), str) or not isinstance(body.get("nonce"), str)
+                or not isinstance(body.get("text"), str)):
+            raise RequestError(400, '/api/draft takes {"key": "<tag>", "text": "<content>", "nonce": "<nonce>"}')
+        from . import drafts as DR
+        try:
+            drafts = DR.set_draft(self.cfg.state, body["key"], body["text"], _iso_now())
+        except DR.DraftError as e:
+            raise RequestError(400, str(e)) from None
+        return {"drafts": drafts}
 
     def item_move(self, body: object) -> dict:
         """1.17.0: record the owner's intent to re-parent `item` under `parent` (or null for root).
@@ -2953,7 +2976,7 @@ class OwnerHandler(_Handler):
         kind = OWNER_ROUTES.get(self.path)
         if kind is None and self.path not in ("/api/relock", "/api/lock-all", "/api/page-publish",
                                               "/api/refactor", OWNER_FAVORITE, OWNER_PLAYBOOK,
-                                              OWNER_TRIGGER_REPLAY, OWNER_ITEM_MOVE):
+                                              OWNER_TRIGGER_REPLAY, OWNER_ITEM_MOVE, OWNER_DRAFT):
             return self._send(404, {"error": "not found"})
         # Browsers send Origin on every POST, same-origin included, so a missing one is refused too:
         # an absent header must not read as "trusted".
@@ -2976,6 +2999,8 @@ class OwnerHandler(_Handler):
                 return self._send(200, self.console.replay_trigger(self._body()))
             if self.path == OWNER_ITEM_MOVE:        # 1.17.0: record a re-parent intent on an item's thread
                 return self._send(200, self.console.item_move(self._body()))
+            if self.path == OWNER_DRAFT:            # 1.19.0: owner-draft autosave (per-key text)
+                return self._send(200, self.console.save_draft(self._body()))
             self._send(200, {"record": self.console.write(kind, self._body(), "owner")})
         except RequestError as e:
             self._send(e.code, {**e.extra, "error": str(e)})
