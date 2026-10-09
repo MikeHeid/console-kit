@@ -489,6 +489,13 @@
     if (s.register_note) {
       statusPop.appendChild(el('p', { className: 'ck-status-note' }, [s.register_note]));
     }
+    // Operator Shift view — the "weekly review you'd screenshot for a cofounder"
+    // surface. Rendered as a button at the bottom of the status drawer because that's where
+    // operators go to look at "how is the system doing" — Shift answers "how am I doing".
+    const shiftBtn = el('button', { type: 'button', className: 'ck-btn ck-btn-primary ck-status-shift' },
+      ['Operator shift →']);
+    shiftBtn.addEventListener('click', () => { closeStatusPop(); openShift('week'); });
+    statusPop.appendChild(shiftBtn);
   }
 
   // A brief "this changed" pop (0.7.0). CSS runs it only without reduced motion.
@@ -1693,6 +1700,7 @@
     cmds.push({ kind: 'action', id: 'close-panel', label: 'Close panel', hint: 'g b' });
     cmds.push({ kind: 'action', id: 'show-shortcuts', label: 'Show keyboard shortcuts', hint: '?' });
     cmds.push({ kind: 'action', id: 'open-delegate', label: 'Focus Delegate bar', hint: '.' });
+    cmds.push({ kind: 'action', id: 'open-shift', label: 'Operator shift view (weekly summary)', hint: '' });
     return cmds;
   }
 
@@ -1825,6 +1833,7 @@
     if (c.kind === 'action') {
       if (c.id === 'close-panel') { if (panelEl.getAttribute('data-open') === 'true') closePanel(); return; }
       if (c.id === 'show-shortcuts') { openShortcutHelp(); return; }
+      if (c.id === 'open-shift') { openShift('week'); return; }
       if (c.id === 'open-delegate') {
         if (panelEl.getAttribute('data-open') !== 'true') openPanel(null, 'inbox');
         const bar = panelEl.querySelector('.ck-delegate-bar');
@@ -4738,7 +4747,33 @@
       launchIdeaState.step = 3;
       renderLaunchIdea();
     });
-    wrap.appendChild(el('div', { className: 'ck-actions' }, [back, next]));
+    // agent-mediated grill. Writes a /message with intent "grill" to the item,
+    // carrying the pitch; the grill-me skill picks it up and writes N adversarial
+    // questions back through /question (they appear in the Inbox like any other agent
+    // question). The static axes stay — this augments, doesn't replace.
+    const agentGrill = el('button', { type: 'button', className: 'ck-btn ck-launch-btn',
+      'aria-label': 'Ask an agent to grill this idea with questions tailored to the item' },
+      ['⚡ Grill with agent']);
+    agentGrill.addEventListener('click', async () => {
+      const pitch = (launchIdeaState.pitch || '').trim();
+      const title = (launchIdeaState.title || '').trim();
+      if (!pitch && !title) {
+        announce('Add a title or pitch first.', { tone: 'error' });
+        return;
+      }
+      agentGrill.disabled = true;
+      const text = (title ? '# ' + title + '\n\n' : '') + pitch;
+      const r = await apiPost('/message',
+        { item: launchIdeaState.itemId, text: text, intent: 'grill' },
+        'launch-grill-' + launchIdeaState.itemId + '-' + Date.now());
+      agentGrill.disabled = false;
+      if (r && r.error) {
+        announce('Not sent: ' + r.error, { tone: 'error', sticky: true });
+      } else {
+        announce('Grill request sent to the agent fleet. Questions arrive in the Inbox.', { tone: 'ok' });
+      }
+    });
+    wrap.appendChild(el('div', { className: 'ck-actions' }, [back, agentGrill, next]));
     return wrap;
   }
   function renderLaunchSpawn() {
@@ -6733,6 +6768,172 @@
   // Fetch today's locks (and anything else needed to describe them) from the Feed, format as
   // Markdown, and present them in a modal with Copy + Close. Server-side the Feed is already
   // the newest-first stream over the Store, so a window of 200 covers a very busy day.
+  // ---- Operator Shift view  ------------------------------------------------
+  // "What have I decided this week, and did any of it actually ship?" — a self-report
+  // the operator can screenshot for a cofounder, a team review, or a weekly update.
+  // Everything is computed in-browser from view.questions + view.pr_backlinks +
+  // view.issue_backlinks. No new server endpoint.
+  const SHIFT_WINDOWS = { today: 'Today', week: 'This week', month: 'This month' };
+  function shiftWindowStart(name) {
+    const now = new Date();
+    if (name === 'today') return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    if (name === 'month') return new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    // Default: this week, starting Monday local time (ISO week).
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const dow = (d.getDay() + 6) % 7;  // Monday = 0
+    d.setDate(d.getDate() - dow);
+    return d.getTime();
+  }
+  function computeShift(windowName) {
+    const since = shiftWindowStart(windowName);
+    const qs = Object.values((view && view.questions) || {});
+    const inWindow = qs.filter(q => {
+      const owners = (q.answers || []).filter(a => a.by === 'owner' && a.locked);
+      const head = owners.length ? owners[owners.length - 1] : null;
+      return head && Date.parse(head.ts) >= since;
+    });
+    // Median time-to-answer: question.ts → head owner lock.ts.
+    const diffs = [];
+    for (const q of inWindow) {
+      const qts = q.question && q.question.ts ? Date.parse(q.question.ts) : null;
+      const owners = (q.answers || []).filter(a => a.by === 'owner' && a.locked);
+      const head = owners.length ? owners[owners.length - 1] : null;
+      if (qts && head) diffs.push(Date.parse(head.ts) - qts);
+    }
+    diffs.sort((a, b) => a - b);
+    const median = diffs.length ? diffs[Math.floor(diffs.length / 2)] : null;
+    // Items advanced: unique item ids that got a new lock in the window.
+    const items = new Set(inWindow.map(q => q.question && q.question.item).filter(Boolean));
+    // PRs merged tied to a ruling, Issues closed tied to a ruling.
+    const prBacks = (view && view.pr_backlinks) || {};
+    const issBacks = (view && view.issue_backlinks) || {};
+    const mergedPRs = new Map();   // key: number → pr
+    const closedIssues = new Map();
+    for (const q of inWindow) {
+      const qid = q.question && q.question.qid;
+      if (!qid) continue;
+      for (const pr of (prBacks[qid] || [])) {
+        if (pr && pr.state === 'merged') mergedPRs.set(pr.number, pr);
+      }
+      for (const is of (issBacks[qid] || [])) {
+        if (is && is.state === 'closed') closedIssues.set(is.number, is);
+      }
+    }
+    // Living rulings currently stale (not scoped to window — "what still needs you").
+    const stale = qs.filter(q => q.state === 'stale').length;
+    return {
+      windowName, since,
+      locked: inWindow.length,
+      medianMs: median,
+      itemsAdvanced: items.size,
+      itemsAdvancedList: [...items].sort(),
+      mergedPRs: [...mergedPRs.values()].sort((a, b) => a.number - b.number),
+      closedIssues: [...closedIssues.values()].sort((a, b) => a.number - b.number),
+      stale,
+      questionIds: inWindow.map(q => q.question && q.question.qid).filter(Boolean).sort()
+    };
+  }
+  function fmtDur(ms) {
+    if (ms == null) return '—';
+    if (ms < 60_000) return Math.max(1, Math.round(ms / 1000)) + 's';
+    if (ms < 3_600_000) return Math.round(ms / 60_000) + 'm';
+    if (ms < 86_400_000) return (ms / 3_600_000).toFixed(1) + 'h';
+    return (ms / 86_400_000).toFixed(1) + 'd';
+  }
+  function composeShiftMarkdown(s) {
+    const label = SHIFT_WINDOWS[s.windowName] || s.windowName;
+    const lines = [];
+    lines.push('# Operator shift — ' + label);
+    lines.push('');
+    lines.push('_' + new Date().toISOString().slice(0, 10) + '_');
+    lines.push('');
+    lines.push('## Numbers');
+    lines.push('');
+    lines.push('- **' + s.locked + '** ruling' + (s.locked === 1 ? '' : 's') + ' locked');
+    lines.push('- **' + s.itemsAdvanced + '** item' + (s.itemsAdvanced === 1 ? '' : 's') + ' advanced');
+    lines.push('- Median time-to-answer: **' + fmtDur(s.medianMs) + '**');
+    lines.push('- **' + s.mergedPRs.length + '** merged PR'
+      + (s.mergedPRs.length === 1 ? '' : 's') + ' tied to a ruling');
+    lines.push('- **' + s.closedIssues.length + '** issue'
+      + (s.closedIssues.length === 1 ? '' : 's') + ' closed tied to a ruling');
+    if (s.stale) lines.push('- **' + s.stale + '** Living ruling'
+      + (s.stale === 1 ? '' : 's') + ' still need review');
+    lines.push('');
+    if (s.itemsAdvancedList.length) {
+      lines.push('## Items advanced');
+      lines.push('');
+      for (const it of s.itemsAdvancedList) lines.push('- ' + it);
+      lines.push('');
+    }
+    if (s.mergedPRs.length) {
+      lines.push('## Shipped (merged PRs tied to a ruling)');
+      lines.push('');
+      for (const pr of s.mergedPRs) lines.push('- [#' + pr.number + '](' + pr.url + ')');
+      lines.push('');
+    }
+    if (s.closedIssues.length) {
+      lines.push('## Resolved (closed issues tied to a ruling)');
+      lines.push('');
+      for (const is of s.closedIssues) lines.push('- [#' + is.number + '](' + is.url + ')');
+      lines.push('');
+    }
+    return lines.join('\n');
+  }
+  let shiftTeardown = null;
+  function openShift(initialWindow) {
+    if (document.getElementById('ck-shift')) return;
+    const dlg = el('div', { id: 'ck-shift', className: 'ck-shift', role: 'dialog',
+      'aria-modal': 'true', 'aria-label': 'Operator shift view' });
+    let currentWindow = initialWindow || 'week';
+    const header = el('div', { className: 'ck-shift-head' });
+    header.appendChild(el('h2', {}, ['Operator shift']));
+    const seg = el('div', { className: 'ck-shift-segment', role: 'tablist', 'aria-label': 'Shift window' });
+    for (const [k, lab] of Object.entries(SHIFT_WINDOWS)) {
+      const b = el('button', { type: 'button', className: 'ck-shift-seg-btn', role: 'tab',
+        'aria-selected': k === currentWindow ? 'true' : 'false' }, [lab]);
+      b.addEventListener('click', () => { currentWindow = k; paint(); });
+      seg.appendChild(b);
+    }
+    header.appendChild(seg);
+    dlg.appendChild(header);
+    const body = el('div', { className: 'ck-shift-body' });
+    dlg.appendChild(body);
+    const ta = el('textarea', { className: 'ck-shift-text', readonly: 'readonly', rows: '16',
+      spellcheck: 'false', 'aria-label': 'Operator shift as Markdown' });
+    body.appendChild(ta);
+    const copyBtn = el('button', { type: 'button', className: 'ck-btn ck-btn-primary' }, ['Copy']);
+    const closeBtn = el('button', { type: 'button', className: 'ck-btn' }, ['Close']);
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(ta.value);
+        announce('Copied ' + ta.value.length + ' chars.', { tone: 'ok' });
+      } catch (_e) {
+        ta.select();
+        announce('The text is selected — press Ctrl+C to copy.', { tone: 'info' });
+      }
+    });
+    closeBtn.addEventListener('click', closeShift);
+    dlg.appendChild(el('div', { className: 'ck-shift-actions' }, [copyBtn, closeBtn]));
+    dlg.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closeShift(); } });
+    dlg.addEventListener('click', e => { if (e.target === dlg) closeShift(); });
+    document.body.appendChild(dlg);
+    shiftTeardown = attachDialogAccessibility(dlg);
+    function paint() {
+      const s = computeShift(currentWindow);
+      ta.value = composeShiftMarkdown(s);
+      for (const b of seg.querySelectorAll('.ck-shift-seg-btn')) {
+        b.setAttribute('aria-selected', b.textContent === SHIFT_WINDOWS[currentWindow] ? 'true' : 'false');
+      }
+    }
+    paint();
+    requestAnimationFrame(() => copyBtn.focus());
+  }
+  function closeShift() {
+    const dlg = document.getElementById('ck-shift');
+    if (shiftTeardown) { try { shiftTeardown(); } catch (_e) {} shiftTeardown = null; }
+    if (dlg) dlg.remove();
+  }
+
   async function openDigest(window) {
     if (document.getElementById('ck-digest')) return;
     const dlg = el('div', { id: 'ck-digest', className: 'ck-digest', role: 'dialog',

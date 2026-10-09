@@ -2746,6 +2746,92 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   overflow-y: auto;
 }
 
+/* ========= Operator Shift view (1.30.0) =====================================
+   Weekly summary modal. Opened from the status drawer and the command palette.
+   Segmented control picks today/week/month; Markdown pre-filled in a textarea
+   so a single Copy sends it to clipboard. */
+.ck-shift {
+  position: fixed; inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex; align-items: center; justify-content: center;
+  padding: 32px;
+  z-index: 2147483100;
+}
+.ck-shift > .ck-shift-head,
+.ck-shift > .ck-shift-body,
+.ck-shift > .ck-shift-actions {
+  background: var(--c-surface);
+}
+.ck-shift-head {
+  width: min(720px, 100%);
+  padding: 16px 20px 10px;
+  border: 1px solid var(--c-border);
+  border-bottom: 0;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ck-shift-head h2 { margin: 0; font-size: 18px; color: var(--c-fg); }
+.ck-shift-segment {
+  display: inline-flex;
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.ck-shift-seg-btn {
+  background: var(--c-surface);
+  border: 0;
+  color: var(--c-fg-muted);
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 28px;
+}
+.ck-shift-seg-btn[aria-selected="true"] {
+  background: var(--c-accent);
+  color: var(--c-accent-fg);
+}
+.ck-shift-seg-btn:hover:not([aria-selected="true"]),
+.ck-shift-seg-btn:focus-visible:not([aria-selected="true"]) {
+  color: var(--c-fg);
+  background: var(--c-surface-alt);
+}
+.ck-shift-body {
+  width: min(720px, 100%);
+  padding: 0 20px;
+  border-left: 1px solid var(--c-border);
+  border-right: 1px solid var(--c-border);
+}
+.ck-shift-text {
+  width: 100%;
+  min-height: 320px;
+  padding: 12px 14px;
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--c-fg);
+  resize: vertical;
+}
+.ck-shift-actions {
+  width: min(720px, 100%);
+  padding: 14px 20px 16px;
+  border: 1px solid var(--c-border);
+  border-top: 0;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  display: flex; justify-content: flex-end; gap: 10px;
+}
+.ck-status-shift {
+  margin-top: 10px;
+  width: 100%;
+  justify-content: center;
+}
+
 /* ========= Visual variant chips (1.29.0) ====================================
    v0-style version chip beside each visual's title when the item carries
    multiple variants. Prev / Next walk the sibling set oldest-first; the

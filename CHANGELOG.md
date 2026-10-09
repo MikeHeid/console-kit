@@ -2771,3 +2771,61 @@ defense-in-breadth HTML sanitization in the server.
   a malformed visual id (vanishingly unlikely — it's a 24
   hex chars store record id — but still) cannot inject
   attribute-selector syntax.
+
+## Shift (1.30.0)
+
+Two long-standing recommendations from the five-reviewer
+advisory finally land. The product strategist's **Operator
+Shift view** gives the operator a report they'd screenshot
+for a cofounder or team review; the AI-web guru's
+**agent-mediated grill** turns the 1.26 static-axis Launch
+Idea step 2 into a round-trip with real agent attention.
+
+- **Operator Shift modal.** Reachable from the status chip
+  drawer and the command palette (`Ctrl+K` → "Operator
+  shift"). Picks a window (Today / This week / This month)
+  and composes a Markdown summary from `view.questions` +
+  `view.pr_backlinks` + `view.issue_backlinks`:
+  - **N rulings locked** in the window
+  - **N items advanced** (items with a new lock)
+  - **Median time-to-answer** (question.ts → head owner
+    lock.ts, formatted as seconds/minutes/hours/days)
+  - **N merged PRs tied to a ruling** (deeplinked)
+  - **N closed issues tied to a ruling** (deeplinked)
+  - **N Living rulings still need review** (not scoped to
+    the window — "what still waits on you")
+  - Lists for each: item ids, PR/issue chips with URLs
+  Copy button sends the whole Markdown to clipboard. Browser-
+  only compute; no new server endpoint, no new data pipe.
+- **`intent: grill`** added to `schema.INTENTS`. The owner
+  writes `/message` with `intent: grill` on an item,
+  carrying the pitch; the fleet picks it up and the
+  `grill-me` skill writes N adversarial questions back
+  through the regular `/question` path. Because the grill
+  intent is in `OWNER_INTENTS`, only the owner door can
+  write it — an agent cannot forge a grill request on
+  itself.
+- **"⚡ Grill with agent" button** in Launch Idea step 2.
+  Writes the grill message. Static axes stay — the two
+  augment each other: static axes for speed, agent grill
+  for depth.
+- **`grill-me` skill updated** to recognise the new
+  `intent: grill` trigger alongside the pre-1.30 slash
+  command entry point. Each question answered becomes a
+  locked ruling, so the audit trail picks up the reasoning
+  automatically.
+
+### Trust
+
+- Shift is a pure client computation. Nothing is sent to the
+  server. The composed Markdown lives in a textarea the
+  operator can edit before copying.
+- `/message` with `intent: grill` is a regular message write:
+  same `_check_message` guards (owner intent → `by: owner`,
+  move/fork field exclusion), same per-minute throttle, same
+  `MAX_TEXT` cap. No new attack surface.
+- Agent-authored grill questions arrive via the existing
+  `/question` route and face every schema check the regular
+  question path enforces.
+- The grill button is disabled while in flight; a failure
+  surfaces as a sticky error toast, not a swallowed error.
