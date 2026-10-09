@@ -2733,6 +2733,11 @@ class Console:
         # Portfolio aggregator: when was the most recent per-peer fetch?
         peers_recent = self._portfolio.last_fetched()
         peers_age = int(now - peers_recent) if peers_recent is not None else None
+        # expose the spawn-semaphore counters so the status chip drawer shows
+        # "Agents: N/MAX total" and operators discover the per-item cap before hitting it.
+        with self._working_lock:
+            by = self.read_working_by()
+            working_global = sum(len(m) for m in by.values())
         body.update({
             "boot_id": self._boot,
             "uptime_s": int(now - self._started_at),
@@ -2742,6 +2747,9 @@ class Console:
             "chat_per_minute": CHAT_PER_MINUTE,
             "cron_last_tick_age_s": cron_age,
             "peers_last_fetched_age_s": peers_age,
+            "working_global": working_global,
+            "working_global_max": MAX_WORKING_GLOBAL,
+            "working_per_item_max": MAX_WORKING_PER_ITEM,
         })
         return body
 
@@ -2816,9 +2824,25 @@ class Console:
         bucket = agent or N.UNNAMED
         with self._working_lock:
             by = self.read_working_by()
-            by[bucket] = {**by.get(bucket, {}), **{i: now for i in items}}
-            if len(by[bucket]) > MAX_WORKING:  # one agent holds at most MAX_WORKING marks: its newest
-                by[bucket] = dict(sorted(by[bucket].items(), key=lambda kv: kv[1])[-MAX_WORKING:])
+            new_bucket = {**by.get(bucket, {}), **{i: now for i in items}}
+            if len(new_bucket) > MAX_WORKING:  # one agent holds at most MAX_WORKING marks: its newest
+                new_bucket = dict(sorted(new_bucket.items(), key=lambda kv: kv[1])[-MAX_WORKING:])
+            # enforce the global and per-item caps BEFORE writing. Compute the WOULD-BE state
+            # with this bucket replaced, then refuse the write if either cap is exceeded.
+            would_be = {**by, bucket: new_bucket}
+            global_count = sum(len(m) for m in would_be.values())
+            if global_count > MAX_WORKING_GLOBAL:
+                raise RequestError(
+                    429, f"would push the global working set to {global_count}; cap is {MAX_WORKING_GLOBAL}. "
+                         f"Close an item or wait for an agent to sync before marking more.")
+            # Per-item: count distinct agent-buckets that would hold a mark on each of the new items.
+            for item in items:
+                holders = sum(1 for b_items in would_be.values() if item in b_items)
+                if holders > MAX_WORKING_PER_ITEM:
+                    raise RequestError(
+                        429, f"item {item!r} would have {holders} agents active; cap is {MAX_WORKING_PER_ITEM}. "
+                             f"Wait for one to sync before another starts.")
+            by[bucket] = new_bucket
             self._write_working(by)
         self._bump()  # the page shows "agent active" without waiting out a poll
         return self._merged(by)
@@ -3463,7 +3487,15 @@ def owner_server(console: Console, verify: Callable[[str | None], dict], port: i
 
 
 WORKING_TTL = 3600         # seconds an "agent active" mark stays true without being renewed
-MAX_WORKING = 32
+MAX_WORKING = 32           # per-bucket (per-agent) marks; also the input validator on one /working POST
+# real spawn semaphore. Adversarial review found MAX_WORKING was only an input validator —
+# an agent could fan out N buckets each at the cap, so a Launch-Idea could in principle have 100 agents
+# marked active. These caps gate the total working-set size and the per-item concurrency:
+#   - MAX_WORKING_GLOBAL — total marks across every agent (every bucket × every item)
+#   - MAX_WORKING_PER_ITEM — the number of distinct agents allowed to hold a mark on ONE item
+# A /working POST that would push either cap over is refused by name with 429.
+MAX_WORKING_GLOBAL = 64
+MAX_WORKING_PER_ITEM = 8
 TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 SOCKET_PATH_MAX = 107  # sun_path is 108 bytes on Linux, one of them the terminating NUL
 

@@ -2746,6 +2746,65 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   overflow-y: auto;
 }
 
+/* ========= Active agents fold (1.28.0) ======================================
+   Visibility into which named agents are currently holding a working mark on
+   this item. Compact, open-by-default; collapses if the operator wants it out
+   of the way. The pulsing dot reuses the existing `ck-arrive` motion token so
+   reduced-motion respects it. */
+.ck-active-agents {
+  margin: 10px 16px;
+  padding: 0;
+  background: var(--c-built-bg, var(--c-surface-alt));
+  border: 1px solid color-mix(in srgb, var(--c-built, #1a7f37) 40%, var(--c-border));
+  border-left: 3px solid var(--c-built, #1a7f37);
+  border-radius: var(--radius-sm);
+}
+.ck-active-agents-summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+}
+.ck-active-agents-summary:focus-visible {
+  outline: 2px solid var(--c-built, #1a7f37);
+  outline-offset: 2px;
+}
+.ck-active-agents-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c-built, #1a7f37);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ck-active-agents-dot { animation: ck-active-pulse 1.6s ease-in-out infinite; }
+  @keyframes ck-active-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c-built, #1a7f37) 60%, transparent); }
+    50%      { box-shadow: 0 0 0 6px color-mix(in srgb, var(--c-built, #1a7f37) 0%, transparent); }
+  }
+}
+.ck-active-agents-h { font-weight: 600; color: var(--c-fg); font-size: 13px; }
+.ck-active-agents-tally { font-size: 12px; }
+.ck-active-agents-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ck-active-agents-row {
+  padding: 2px 0;
+  font-size: 13px;
+}
+.ck-active-agents-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--c-fg);
+}
+.ck-active-agents-since { font-size: 12px; }
+
 /* ========= Tickets fold (1.26.0) ============================================
    Children of items — lightweight work units. Grouped by status; closed stack
    collapsed. Create form is a nested <details> at the bottom of the fold. */

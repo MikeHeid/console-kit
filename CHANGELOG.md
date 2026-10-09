@@ -2660,3 +2660,59 @@ owner door.
   subresource from loading in the console. Everything the
   console needs is inlined or served under `/api/*` from the
   same owner door.
+
+## Active (1.28.0)
+
+The adversarial reviewer's 1.26 veto on uncapped agent spawn
+has been sitting as a 1.28 prereq since; this release lands
+it. Plus the operability counterpart: operators can see
+which named agents are currently holding a mark on an item,
+without a terminal and without reading `working.json` by
+hand.
+
+- **Real spawn semaphore.** Pre-1.28 `MAX_WORKING=32` was
+  only an input validator on one `/working` POST; an agent
+  could fan out `N` buckets each at the cap, so a
+  Launch-Idea or Branch-Out could in principle leave 100
+  agents marked active. 1.28 adds two real caps enforced on
+  every write: `MAX_WORKING_GLOBAL=64` (total marks across
+  every agent × every item) and `MAX_WORKING_PER_ITEM=8`
+  (distinct agents allowed to hold a mark on one item). A
+  `/working` POST that would push either over returns `429`
+  by name with a one-line message telling the operator what
+  to do (close an item, or wait for an agent to sync).
+  Enforcement happens under `_working_lock` so concurrent
+  writes cannot squeeze past.
+- **"Active agents" fold** on every item panel. Reads
+  `cursor.working_by` (already served; no new network path)
+  and lists every named agent currently holding a working
+  mark on this item, with a pulsing green dot, the agent's
+  name (or "unnamed session" for the untagged bucket), and
+  "since &lt;relative time&gt;". Hidden entirely when nothing is
+  active, so the fold is zero-noise. Pulse honors
+  `prefers-reduced-motion`.
+- **Status chip exposes the caps.** `/api/status` now carries
+  `working_global`, `working_global_max`, and
+  `working_per_item_max`; the drawer renders
+  **"Agents at work: 7/64 (max 8/item)"** so operators
+  discover the cap by looking at the status chip before they
+  trip it.
+
+### Trust
+
+- Both caps are enforced *before* `_write_working`, with
+  the lock held. A refused write writes nothing — nothing is
+  half-marked.
+- The owner door still has no `/working` route; `/working`
+  is agent-door only (Unix socket, 0600 under a 0700 dir).
+  The owner CANNOT bump another agent's bucket, so the cap
+  cannot be bypassed through the gate.
+- The 429 message holds no owner content and no secret: it
+  carries the item id (same shape already shown in every
+  Feed row and inbox title) and the two caps, which are
+  constants in the kit.
+- The "Active agents" fold renders bucket names (agent
+  identifiers) that are already visible across the Feed and
+  every question card via `agentLabel`. No new data surface.
+- Status counters are owner-door-only; `/api/status` has
+  always been Access-gated.

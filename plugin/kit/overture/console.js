@@ -473,6 +473,9 @@
       ['Uptime',    fmtUptime(s.uptime_s)],
       ['Live polls', (s.waiters != null ? s.waiters : '?') + ' / ' + (s.max_waiters != null ? s.max_waiters : '?')],
       ['Chat quota', (s.chat_remaining != null ? s.chat_remaining : '?') + ' / ' + (s.chat_per_minute != null ? s.chat_per_minute : '?') + ' per minute'],
+      ['Agents at work', (s.working_global != null ? s.working_global : '?') + ' / '
+        + (s.working_global_max != null ? s.working_global_max : '?')
+        + (s.working_per_item_max != null ? ' (max ' + s.working_per_item_max + '/item)' : '')],
       ['Cron tick', fmtAge(s.cron_last_tick_age_s)],
       ['Peers fetched', fmtAge(s.peers_last_fetched_age_s)],
     ];
@@ -2702,6 +2705,11 @@
       // create-ticket form. Opened by Launch Idea when it spawns tickets; opened by
       // the operator for ad-hoc bugs / research notes on this item.
       body.appendChild(renderTicketsFold(itemId));
+      // Active agents on this item : a fold listing every named agent currently
+      // holding a working mark on this item, with the time it was marked. Reads
+      // cursor.working_by (no new server call). Hidden when nothing is active.
+      const activeFold = renderActiveAgentsFold(itemId);
+      if (activeFold) body.appendChild(activeFold);
 
       // Thread
       body.appendChild(renderThread(itemId));
@@ -4990,6 +4998,39 @@
   // of items, not a replacement; this surface renders the open and closed stacks, the
   // blocking relationships, and a create form. No workflow engine, no custom fields.
   const TICKET_KIND_LABELS = { task: 'Task', bug: 'Bug', research: 'Research', grilling: 'Grilling' };
+  // list every named agent + the unnamed "agent" bucket holding a working mark
+  // on this item. Reads cursor.working_by; no new server call. Returns null when nothing
+  // is active so the fold is simply absent from the panel.
+  function renderActiveAgentsFold(itemId) {
+    const by = (cursor && cursor.working_by) || {};
+    const rows = [];
+    for (const [bucket, marks] of Object.entries(by)) {
+      if (marks && Object.prototype.hasOwnProperty.call(marks, itemId)) {
+        rows.push({ name: bucket, since: marks[itemId] });
+      }
+    }
+    if (!rows.length) return null;
+    rows.sort((a, b) => (a.since || '').localeCompare(b.since || ''));
+    const details = el('details', { className: 'ck-active-agents', open: 'open' });
+    const summary = el('summary', { className: 'ck-active-agents-summary' }, [
+      el('span', { className: 'ck-active-agents-dot', 'aria-hidden': 'true' }),
+      el('span', { className: 'ck-active-agents-h' },
+        ['Active ' + (rows.length === 1 ? 'agent' : 'agents')]),
+      el('span', { className: 'ck-active-agents-tally ck-muted' }, [' · ' + rows.length])
+    ]);
+    details.appendChild(summary);
+    const list = el('ul', { className: 'ck-active-agents-list', 'aria-label': 'Agents active on ' + itemId });
+    for (const r of rows) {
+      const label = r.name === 'agent' ? 'unnamed session' : r.name;
+      list.appendChild(el('li', { className: 'ck-active-agents-row' }, [
+        el('span', { className: 'ck-active-agents-name' }, [label]),
+        el('span', { className: 'ck-active-agents-since ck-muted' }, [' · since ' + relTime(r.since)])
+      ]));
+    }
+    details.appendChild(list);
+    return details;
+  }
+
   function renderTicketsFold(itemId) {
     const details = el('details', { className: 'ck-tickets-fold' });
     const summary = el('summary', { className: 'ck-tickets-summary' });
