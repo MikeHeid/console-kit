@@ -1092,6 +1092,57 @@ def _prs_push(a) -> int:
     return 0
 
 
+def _issues_push(a) -> int:
+    """`issues-push`: mirror of `_prs_push` against gh issue list. See prs-push for the full contract."""
+    from overture import issues as IS
+
+    def refuse(why: str, rc: int = 1) -> int:
+        print(f"refused, nothing sent: {why}", file=sys.stderr)
+        return rc
+
+    state = os.path.realpath(a.state)
+    found = R.enclosing(a.project)
+    if found is None or found[1].get("state") != state:
+        return refuse(f"{Path(a.project).resolve()} is not a project registered on the console at {state}")
+    root = Path(found[0])
+    if not 1 <= a.days <= IS.MAX_DAYS:
+        return refuse(f"--days is a whole number from 1 to {IS.MAX_DAYS}")
+    if not 1 <= a.limit <= IS.MAX_LIMIT:
+        return refuse(f"--limit is a whole number from 1 to {IS.MAX_LIMIT}")
+    door = _door(a.state)
+    if door.project is None and not door.sock.is_socket():
+        return refuse(f"no console server answers for {state}: no {door.sock}, and server.json hosts no project "
+                      f"there", 2)
+    got = []
+    for args in IS.gh_lists(a.days, a.limit):
+        out = G.gh(args, root)
+        if isinstance(out, G.Unavailable):
+            return refuse(f"gh is {out.reason}")
+        rc, stdout, stderr = out
+        if rc != 0:
+            return refuse(f"`gh {' '.join(args[:3])}` failed ({rc}): {stderr.strip()[:500] or 'no message'}")
+        try:
+            got.append(json.loads(stdout))
+        except ValueError as e:
+            return refuse(f"`gh {' '.join(args[:3])}` did not print JSON: {e}")
+    try:
+        body = IS.from_gh(got[0], got[1], got[2], a.days)
+    except IS.PushError as e:
+        return refuse(str(e))
+    why = IS.snapshot_problem(body)
+    if why:
+        return refuse(why)
+    try:
+        code, out = door.request("POST", "/issues", body, agent=a.agent)
+    except OSError as e:
+        return refuse(f"the console server is not answering on {door.sock}: {e}", 2)
+    if code != 200:
+        print(f"refused ({code}): {out.get('error')}", file=sys.stderr)
+        return 1
+    sys.stdout.write(_json(out))
+    return 0
+
+
 def _refused_note(files: list, n: int, why: str | None, rc: int = 1) -> int:
     """A batch ask stopped at files[n]: say what was posted and what was not, so a re-run sends only the rest."""
     if why:
@@ -1292,6 +1343,14 @@ def main(argv=None) -> int:
                    "(default: 30, at most 365)")
     s.add_argument("--limit", type=int, default=50, help="at most this many open PRs, and as many merged or "
                    "closed ones (default: 50, at most 100)")
+    s = sub.add_parser("issues-push", description="Run `gh issue list` HERE, in your own process, for the GitHub "
+                       "repository of this checkout, and send the console server its open issues and those closed "
+                       "in the last --days, as data. The server never talks to GitHub (1.27.0, mirrors prs-push).")
+    s.add_argument("--project", type=Path, default=Path.cwd(), help="the project root (default: here)")
+    s.add_argument("--days", type=int, default=30, help="closed issues from this many days back "
+                   "(default: 30, at most 365)")
+    s.add_argument("--limit", type=int, default=50, help="at most this many open issues, and as many closed "
+                   "ones (default: 50, at most 100)")
     s = sub.add_parser("server", description="Host this console on the one console server (K3): `add NAME` "
                        "writes the project to server.json beside your registry. You run this, never a session.")
     ss = s.add_subparsers(dest="server_cmd", required=True)
@@ -1432,6 +1491,8 @@ def _run(a, bell: Path) -> int:
         return _history_push(a)
     if a.cmd == "prs-push":
         return _prs_push(a)
+    if a.cmd == "issues-push":
+        return _issues_push(a)
     if a.cmd == "page-snapshot":
         return _page_snapshot(a)
     if a.cmd == "server" and a.server_cmd == "token":

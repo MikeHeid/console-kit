@@ -366,6 +366,11 @@ class ServerTests(unittest.TestCase):
         h = dict(headers or {})
         if method == "POST" and origin:  # what a browser on the console's own page sends
             h.setdefault("Origin", f"https://{HOSTNAME}")
+            # 1.27.0: CSRF double-submit — the browser carries the server's boot-scoped
+            # token in its HTML config block and echoes it on every POST. Tests read the
+            # token off the live Console instance and set it the same way.
+            if hasattr(self, "console") and getattr(self.console, "_csrf", None):
+                h.setdefault("X-Overture-CSRF", self.console._csrf)
         if tok is not None:
             h["Cf-Access-Jwt-Assertion"] = tok
         data = None
@@ -762,8 +767,10 @@ class ServerTests(unittest.TestCase):
         """
         import socket as so
         s = so.create_connection(("127.0.0.1", self.port), timeout=10)
+        csrf = self.console._csrf
         head = (f"POST /api/answer HTTP/1.1\r\nHost: x\r\nOrigin: https://{HOSTNAME}\r\n"
                 f"Cf-Access-Jwt-Assertion: {token()}\r\nContent-Type: application/json\r\n"
+                f"X-Overture-CSRF: {csrf}\r\n"
                 f"Content-Length: {content_length}\r\nConnection: close\r\n\r\n").encode()
         s.sendall(head)
         data = b""
@@ -2985,12 +2992,29 @@ for _ in range(200):
         pass
     time.sleep(0.05)
 
+_csrf = {"v": None}
+def _grab_csrf():
+    import re as _re
+    if _csrf["v"] is not None:
+        return _csrf["v"]
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    c.request("GET", "/", headers={"Cf-Access-Jwt-Assertion": "x"})
+    r = c.getresponse(); raw = r.read().decode("utf-8", "replace"); c.close()
+    m = _re.search(r'"csrf":\s*"([^"]+)"', raw)
+    if m:
+        _csrf["v"] = m.group(1)
+    return _csrf["v"]
+
 def owner(method, path, body=None):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
     h = {"Cf-Access-Jwt-Assertion": "x", "Origin": "https://" + p["host"]}
     data = None if body is None else json.dumps(body).encode()
     if data is not None:
         h["Content-Type"] = "application/json"
+    if method == "POST":
+        tok = _grab_csrf()
+        if tok:
+            h["X-Overture-CSRF"] = tok
     c.request(method, path, body=data, headers=h)
     r = c.getresponse(); raw = r.read(); c.close()
     try:
@@ -3402,6 +3426,20 @@ class _OneServer:
         m = MS.PROJECT_PATH.match(path)
         return SV.agent_request(self.sock, method, path, body, token=self.tokens.get(m.group(1)) if m else None)
 
+    def _csrf_for(self, name: str) -> str | None:
+        """1.27.0: lazy-fetch and cache the per-project CSRF token from the served HTML config block."""
+        if not hasattr(self, "_csrf_cache"):
+            self._csrf_cache = {}
+        if name in self._csrf_cache:
+            return self._csrf_cache[name]
+        import re as _re
+        conn = http.client.HTTPConnection("127.0.0.1", self.info["ports"][name], timeout=30)
+        conn.request("GET", "/", headers={"Cf-Access-Jwt-Assertion": token()})
+        r = conn.getresponse(); raw = r.read().decode("utf-8", "replace"); conn.close()
+        m = _re.search(r'"csrf":\s*"([^"]+)"', raw)
+        self._csrf_cache[name] = m.group(1) if m else None
+        return self._csrf_cache[name]
+
     def owner(self, name, method, path, body=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.info["ports"][name], timeout=30)
         h = {"Cf-Access-Jwt-Assertion": token()}
@@ -3409,6 +3447,9 @@ class _OneServer:
         if body is not None:
             data = json.dumps(body).encode()
             h.update({"Content-Type": "application/json", "Origin": f"https://{name}.example.com"})
+            tok = self._csrf_for(name)
+            if tok:
+                h["X-Overture-CSRF"] = tok
         conn.request(method, path, body=data, headers=h)
         r = conn.getresponse()
         raw = r.read()
@@ -3497,9 +3538,9 @@ class OneServerTests(_OneServer, unittest.TestCase):
         self.assertIn("subprocess.Popen", seen)
 
     AGENT_GETS = ("/view", "/check", "/health", "/history-wants", "/no-such-route")
-    AGENT_POSTS = ("/items", "/prs", "/cursor", "/working", "/reanchor", "/visual", "/visual-export", "/question",
-                   "/message", "/transcript", "/history-blob", "/history-specs", "/page-snapshot", "/anchor-proposal",
-                   "/refactor-advice", "/playbook", "/item-move", "/no-such-route")
+    AGENT_POSTS = ("/items", "/prs", "/issues", "/cursor", "/working", "/reanchor", "/visual", "/visual-export",
+                   "/question", "/message", "/transcript", "/history-blob", "/history-specs", "/page-snapshot",
+                   "/anchor-proposal", "/refactor-advice", "/playbook", "/item-move", "/no-such-route")
 
     def test_the_seam_is_the_only_admission_point(self):
         # K4 replaces `authorize` alone, so this is behaviour, not source text: with `authorize` refusing, EVERY

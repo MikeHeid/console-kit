@@ -86,6 +86,7 @@ from . import pagesnap as PS
 from . import playbooks as PB
 from . import triggers as TR
 from . import prs as PR
+from . import issues as IS
 from . import tickets as TK
 from . import names as N
 from . import peers as PE
@@ -631,10 +632,15 @@ SECURITY_HEADERS = (
     # adversarial review flagged that the brief claimed cross-origin isolation
     # was set but no COOP header actually was. COOP: same-origin isolates the owner
     # window from any opener (ad hoc tab opens pointing here lose the WindowProxy),
-    # which is safe for every response and adds no subresource constraints. Full
-    # COEP require-corp is a 1.27 item because it requires an iframe audit of every
-    # /api/* that embeds under /console.
+    # which is safe for every response and adds no subresource constraints.
     ("Cross-Origin-Opener-Policy", "same-origin"),
+    # COEP require-corp. The main page and every iframe-loaded /api/* resource
+    # (/api/visual, /api/visual-render, /api/page-staged, /api/mermaid.js, /api/wrapper.css,
+    # /api/cytoscape.js) all set it. Those iframe resources also set CORP: cross-origin
+    # via `_send_raw`, so the nested-context load passes the browser's require-corp check.
+    # Everything the console loads is same-origin or vendored, so no legitimate subresource
+    # is blocked. Together with COOP same-origin this enables cross-origin isolation.
+    ("Cross-Origin-Embedder-Policy", "require-corp"),
 )
 
 
@@ -934,6 +940,10 @@ class Console:
         self._chat_times: collections.deque[float] = collections.deque()
         self._cron_last_tick: float | None = None  # 1.23.0: last successful cron minute-tick (epoch seconds)
         self._started_at = time.time()             # 1.23.0: wall time at boot, for uptime in /api/status
+        # CSRF double-submit token. Boot-scoped; a restart invalidates every open
+        # page's token, which the live-loop already surfaces as a boot change. Belt-and-
+        # braces with the existing Origin check on every write.
+        self._csrf = secrets.token_urlsafe(32)
 
     # -- live updates (0.7.0) --------------------------------------------------
 
@@ -1097,12 +1107,54 @@ class Console:
         except Exception as e:  # noqa: BLE001 — backlinks never fault the page
             sys.stderr.write(f"console pr_backlinks: {type(e).__name__}: {e}\n")
             out["view"] = {**out["view"], "pr_backlinks": {}}
+        # Issues → Rulings backlinks. Same pattern as PRs; scans issue title AND body
+        # (issue bodies carry the discussion, and discussions are where qids tend to land).
+        try:
+            out["view"] = {**out["view"], "issue_backlinks": self._compute_issue_backlinks()}
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"console issue_backlinks: {type(e).__name__}: {e}\n")
+            out["view"] = {**out["view"], "issue_backlinks": {}}
         return out
 
     # scan PR titles for qid literals ("A/Q1", "A.1.2/Q7"). The ruling card renders
     # a chip linking to each matching PR. Cheap: at most MAX_PRS * MAX_QUESTIONS regex sub-
     # string checks, nothing network.
     _QID_WORD = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?/Q\d+")
+
+    def _live_qids(self) -> set[str]:
+        """Current qids off the live view — shared across pr_backlinks and issue_backlinks."""
+        return set(V.build(self.store, self.items(), {}, names=self.names.mapping()).get("questions", {}).keys())
+
+    def _compute_issue_backlinks(self) -> dict:
+        """scan every stored issue's title AND body for qid literals. The body is
+        where discussion-pattern references usually land (issue templates, repro steps)."""
+        try:
+            doc = IS.load(self.cfg.state)
+        except OSError:
+            return {}
+        issues = doc.get("issues") if isinstance(doc, dict) else None
+        if not isinstance(issues, list):
+            return {}
+        qids = self._live_qids()
+        if not qids:
+            return {}
+        out: dict[str, list[dict]] = {}
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            hay = str(issue.get("title", "")) + "\n" + str(issue.get("body", ""))
+            matched: set[str] = set()
+            for m in self._QID_WORD.findall(hay):
+                if m in qids and m not in matched:
+                    matched.add(m)
+                    out.setdefault(m, []).append({
+                        "number": issue.get("number"),
+                        "url": issue.get("url"),
+                        "state": issue.get("state"),
+                        "closed_at": issue.get("closed_at"),
+                    })
+        return out
+
     def _compute_pr_backlinks(self) -> dict:
         try:
             prs_doc = PR.load(self.cfg.state)
@@ -1201,6 +1253,25 @@ class Console:
     def prs(self) -> dict:
         """The owner's PRs view: the steward's last push, or `pushed: false` and the note saying why (F63)."""
         return PR.load(self.cfg.state)
+
+    def push_issues(self, body: object, agent: str | None) -> dict:
+        """GitHub Issues snapshot; mirrors `push_prs` with the same jail/schema/validate/store
+        discipline. The server never talks to GitHub — gh runs agent-side in the steward's own process.
+        """
+        why = IS.snapshot_problem(body)
+        if why:
+            raise RequestError(400, why)
+        with self._lock:
+            try:
+                doc = IS.store_snapshot(self.cfg.state, body, agent)
+            except ValueError as e:
+                raise RequestError(413, str(e)) from None
+        self._bump()
+        return {"issues": len(doc["issues"]), "repo": doc["repo"], "pushed_at": doc["pushed_at"]}
+
+    def issues(self) -> dict:
+        """the owner's Issues view, mirroring `prs()`."""
+        return IS.load(self.cfg.state)
 
     def run_playbook(self, body: object) -> dict:
         """0.11.0: fan out a named playbook's steps as owner `message` writes, in order.
@@ -2015,7 +2086,9 @@ class Console:
         can edit would put its script in the owner's browser.
         """
         # `version` is the running kit's, the value /health reports: the footer shows it (owner, 2026-10-01).
-        block = P.console_block(json.dumps({"api": "/api", "project": self.cfg.project, "version": __version__}))
+        # carry the CSRF token so the browser can send it on every POST as X-Overture-CSRF.
+        block = P.console_block(json.dumps({"api": "/api", "project": self.cfg.project,
+                                            "version": __version__, "csrf": self._csrf}))
         return PS.render(self.cfg.state, block)
 
     def push_page_snapshot(self, body: object) -> dict:
@@ -2940,6 +3013,12 @@ class OwnerHandler(_Handler):
             except OSError as e:   # STATE itself gone odd: named in the log, never a dropped connection
                 sys.stderr.write(f"console prs: {e}\n")
                 return self._send(503, {"error": "the pull requests could not be read just now"})
+        if self.path == "/api/issues":  # mirror of /api/prs for GitHub Issues
+            try:
+                return self._send(200, self.console.issues())
+            except OSError as e:
+                sys.stderr.write(f"console issues: {e}\n")
+                return self._send(503, {"error": "the issues could not be read just now"})
         if self.path == "/api/page-staged":   # Q29: the proposal's preview, framed sandbox="" and sandboxed here too
             data = self.console.staged_page()
             if data is None:
@@ -3174,6 +3253,11 @@ class OwnerHandler(_Handler):
         # an absent header must not read as "trusted".
         if self.headers.get("Origin") != f"https://{self.console.cfg.hostname}":
             return self._send(403, {"error": "a write from another site, or with no Origin, is refused"})
+        # CSRF double-submit — the HTML carried the boot's CSRF token in its config block;
+        # every POST must echo it in X-Overture-CSRF. Belt-and-braces with the Origin check; also
+        # guards against a cross-origin page that spoofs Origin (rare, but not impossible).
+        if self.headers.get("X-Overture-CSRF") != self.console._csrf:
+            return self._send(403, {"error": "missing or stale CSRF token; reload the console"})
         try:
             if self.path == "/api/relock":
                 return self._send(200, {"records": self.console.relock(self._body())})
@@ -3263,6 +3347,8 @@ class AgentHandler(_Handler):
                 return self._send(200, self.console.push_items(self._body()))
             if self.path == "/prs":   # the ONLY way pull requests reach a server; gh ran in the steward
                 return self._send(200, self.console.push_prs(self._body(), agent))
+            if self.path == "/issues":  # the ONLY way GitHub Issues reach a server; mirrors /prs
+                return self._send(200, self.console.push_issues(self._body(), agent))
             if self.path == "/page-snapshot":   # Q28: the ONLY way a page reaches a server; git ran in the steward
                 self.max_body = PS.MAX_BODY   # per instance, safe for the same reason as /history-blob above
                 return self._send(200, self.console.push_page_snapshot(self._body()))
