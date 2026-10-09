@@ -107,6 +107,7 @@ OWNER_ROUTES = {"/api/message": "message", "/api/answer": "answer", "/api/lock":
 OWNER_FAVORITE = "/api/favorite"
 OWNER_PLAYBOOK = "/api/playbook"
 OWNER_TRIGGER_REPLAY = "/api/trigger-replay"
+OWNER_ITEM_MOVE = "/api/item-move"
 # The live console (0.7.0). A long poll: the page asks "has anything changed
 # since seq S?" and the server answers the moment something does, or after at
 # most WAIT_MAX seconds with "no". Well inside Cloudflare's 100 s response
@@ -1277,6 +1278,51 @@ class Console:
             plan.append({"index": index, "kind": step["kind"], "item": step.get("item"),
                          "text": step.get("text") or "", "would_run": True, "reason": ""})
         return {"name": pb.name, "description": pb.description, "steps": plan}
+
+    def item_move(self, body: object) -> dict:
+        """1.17.0: record the owner's intent to re-parent `item` under `parent` (or null for root).
+
+        Writes a `message` with intent "move" to the item's thread; the adapter is still the source
+        of truth for parent relations, but the move is now visible in the Feed and in the item's
+        thread. The project's steward sees it on next watch and updates items() accordingly.
+
+        Validates that `item` exists in the register and that `parent` either exists or is null.
+        Refuses a move to self or to a descendant (would form a cycle under the pushed items).
+        """
+        if (not isinstance(body, dict)
+                or set(body) - {"item", "parent", "nonce", "text"}
+                or not isinstance(body.get("item"), str)
+                or not isinstance(body.get("nonce"), str)
+                or "parent" not in body):
+            raise RequestError(400, '/api/item-move takes {"item": "<id>", "parent": "<id>"|null, '
+                                    '"nonce": "<nonce>"} with optional "text"')
+        items = self.items()
+        if body["item"] not in items:
+            raise RequestError(404, f"item {body['item']!r} is not in the register")
+        parent = body["parent"]
+        if parent is not None:
+            if not isinstance(parent, str):
+                raise RequestError(400, "`parent` must be an item id or null")
+            if parent not in items:
+                raise RequestError(404, f"target parent {parent!r} is not in the register")
+            if parent == body["item"]:
+                raise RequestError(400, "an item cannot be its own parent")
+            # Walk up the pushed parent chain of `parent` and refuse if we hit `item` (cycle).
+            cur = parent
+            seen = set()
+            while cur and cur not in seen:
+                seen.add(cur)
+                if cur == body["item"]:
+                    raise RequestError(400, f"moving {body['item']!r} under {parent!r} would form a cycle")
+                cur = ((items.get(cur) or {}).get("parent") if isinstance(items.get(cur), dict) else None)
+        text = body.get("text")
+        if text is not None and not isinstance(text, str):
+            raise RequestError(400, "`text` must be a string if given")
+        write_body = {"item": body["item"], "nonce": body["nonce"],
+                      "intent": "move", "move_to": parent,
+                      "text": text or (f"Move under {parent}" if parent else "Move to top level")}
+        rec = self.write("message", write_body, "owner")
+        return {"record": rec}
 
     def replay_trigger(self, body: object) -> dict:
         """0.27.0: fire a trigger from the owner's browser. Bypasses the webhook token + rate limit
@@ -2907,7 +2953,7 @@ class OwnerHandler(_Handler):
         kind = OWNER_ROUTES.get(self.path)
         if kind is None and self.path not in ("/api/relock", "/api/lock-all", "/api/page-publish",
                                               "/api/refactor", OWNER_FAVORITE, OWNER_PLAYBOOK,
-                                              OWNER_TRIGGER_REPLAY):
+                                              OWNER_TRIGGER_REPLAY, OWNER_ITEM_MOVE):
             return self._send(404, {"error": "not found"})
         # Browsers send Origin on every POST, same-origin included, so a missing one is refused too:
         # an absent header must not read as "trusted".
@@ -2928,6 +2974,8 @@ class OwnerHandler(_Handler):
                 return self._send(200, self.console.run_playbook(self._body()))
             if self.path == OWNER_TRIGGER_REPLAY:   # 0.27.0: re-fire a trigger from the Inbox log
                 return self._send(200, self.console.replay_trigger(self._body()))
+            if self.path == OWNER_ITEM_MOVE:        # 1.17.0: record a re-parent intent on an item's thread
+                return self._send(200, self.console.item_move(self._body()))
             self._send(200, {"record": self.console.write(kind, self._body(), "owner")})
         except RequestError as e:
             self._send(e.code, {**e.extra, "error": str(e)})
@@ -2999,6 +3047,8 @@ class AgentHandler(_Handler):
                 # The agent socket is user-only (0600, in a 0700 dir): same trust surface as the owner door
                 # for owner-privileged actions, matching items-push / prs-push / page-snapshot.
                 return self._send(200, self.console.run_playbook(self._body()))
+            if self.path == "/item-move":  # 1.17.0: record a re-parent intent on an item (owner-privileged)
+                return self._send(200, self.console.item_move(self._body()))
             kind = AGENT_ROUTES.get(self.path)
             if kind is None:
                 return self._send(404, {"error": "not found"})

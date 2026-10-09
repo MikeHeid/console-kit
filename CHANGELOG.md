@@ -1913,6 +1913,49 @@ every section.
   hidden when nothing is new.
 - Browser-only; no server changes.
 
+## `agent.py item-move` — re-parent intent (1.17.0)
+
+Closes the remaining open piece from the numbered-refs brief
+(Brief 2 §4.3) with the simpler semantics: **the ref stays, the
+move is a signal the adapter picks up next.**
+
+### New owner CLI
+
+    agent.py item-move AB-5 --to AB-2         # move AB-5 under AB-2
+    agent.py item-move XX-9 --to-root         # move XX-9 to top level
+    agent.py item-move AB-5 --to AB-2 --text "needed under the new epic"
+
+### What writes
+
+- A `message` record on the item's thread with the new intent
+  **`move`** and a `move_to` field (target parent id, or `null`
+  for root).
+- The project's adapter stays the source of truth for parents;
+  the move is a documented intent, not an override.
+- The message surfaces in the item's thread and the Feed; the
+  steward picks it up on next watch.
+
+### Guards
+
+- Target parent must exist in the register (`404` otherwise).
+- A move that would form a cycle through pushed parents is
+  refused by name.
+- An item moving to itself is refused.
+- The chat thread never accepts `intent: move` (the schema
+  check named-refuses the mismatch).
+- Fields validated at the schema layer: `move_to` must be an
+  item id or `null`; the fork-only fields (`focus`, `mode`,
+  `roles`, …) stay refused on a move; a move on CHAT_ITEM is
+  refused.
+
+### Trust surface
+
+- The agent-door `/item-move` route is user-only (0600 Unix
+  socket in a 0700 dir) — same trust surface as `items-push`,
+  `prs-push`, `page-snapshot`, `playbook`.
+- The owner-door `/api/item-move` is Access-authed like every
+  other owner route.
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent

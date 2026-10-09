@@ -75,7 +75,7 @@ QUESTION_KINDS = ("single", "multi", "free")
 # "chat" (0.7.0) is a general message in the inbox's chat, which whichever
 # session is watching answers (owner, 2026-09-29).
 # "visual" (0.8.0) asks for a picture of an item: a Mermaid block or an HTML mock.
-INTENTS = ("fork", "process", "chat", "visual")
+INTENTS = ("fork", "process", "chat", "visual", "move")
 OWNER_INTENTS = frozenset(INTENTS)
 # The chat's thread (0.7.0). It is not a register item: it can never be one,
 # because ITEM_ID refuses a leading "@", so no project item can share its
@@ -173,7 +173,7 @@ OPTIONAL = {
     # 0.7.0: `evidence`. A kit before it refuses a question carrying it, by name.
     "question": frozenset({"forked_from", "star_by", "evidence"}),
     # 0.8.0: `step`. A kit before it refuses a message carrying it, by name.
-    "message": frozenset({"reply_to", "intent", "focus", "mode", "roles", "follow_up_of", "about_qid", "step"}),
+    "message": frozenset({"reply_to", "intent", "focus", "mode", "roles", "follow_up_of", "about_qid", "step", "move_to"}),
     "answer": frozenset({"supersedes", "reason"}),
     # 0.5.0: the conditions a RE-lock was taken against, computed by the server.
     # Written only when they differ from the question's `valid_if`, so a store
@@ -447,10 +447,26 @@ def _check_message(rec: dict) -> list[str]:
     if intent == "fork":
         if "mode" not in rec:
             errs.append("a fork says its mode: explore or tighten")
-    else:
+    elif intent == "move":
+        # 1.17.0: the owner records a re-parent intent. move_to is the new parent id, or null to
+        # move to a top-level (parentless) position. The project's adapter stays the source of
+        # truth; the move is a message in the item's thread that the view surfaces as pending
+        # until items.json catches up.
+        if "move_to" not in rec:
+            errs.append("intent 'move' needs a `move_to` field (the target parent id, or null for root)")
+        else:
+            mt = rec["move_to"]
+            if mt is not None and (not isinstance(mt, str) or not ITEM_ID.match(mt)):
+                errs.append(f"move_to {mt!r} must be an item id or null")
+        if chat:
+            errs.append("intent 'move' belongs to an item's thread, not the chat")
         present = [f for f in ("focus", "mode", "roles", "follow_up_of", "about_qid", "step") if f in rec]
         if present:
-            errs.append(f"{', '.join(present)} belong(s) to a fork: set intent 'fork' or leave them out")
+            errs.append(f"{', '.join(present)} belong(s) to a fork; a 'move' takes `move_to`")
+    else:
+        present = [f for f in ("focus", "mode", "roles", "follow_up_of", "about_qid", "step", "move_to") if f in rec]
+        if present:
+            errs.append(f"{', '.join(present)} belong(s) to a fork or move: set the right intent or leave them out")
     if "focus" in rec and rec["focus"] not in FOCUSES:
         errs.append(f"focus {rec['focus']!r} is not one of {', '.join(FOCUSES)}")
     if "mode" in rec and rec["mode"] not in MODES:

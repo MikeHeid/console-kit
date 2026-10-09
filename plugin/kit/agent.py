@@ -756,6 +756,35 @@ def _sync_dashboard_write(root: Path, page_rel: str, items: dict) -> int:
     return 0
 
 
+def _item_move(a) -> int:
+    """1.17.0: record a re-parent intent on an item via the agent socket (owner-privileged).
+
+    The item move is written as a `message` with intent "move" to the item's thread; the project's
+    adapter stays the source of truth for parent relations. The move surfaces in the Feed and the
+    item's thread until items() catches up.
+    """
+    import time as _t
+    door = _door(a.state)
+    if door.project is None and not door.sock.is_socket():
+        print(f"no console server answers for {a.state}: no {door.sock}, and server.json hosts no project "
+              f"there", file=sys.stderr)
+        return 2
+    parent = None if a.to_root else a.to
+    body = {"item": a.item, "parent": parent, "nonce": f"move-{a.item}-{int(_t.time())}"}
+    if a.text:
+        body["text"] = a.text
+    try:
+        code, out = door.request("POST", "/item-move", body, agent=a.agent)
+    except OSError as e:
+        print(f"the console server is not answering on {door.sock}: {e}", file=sys.stderr)
+        return 2
+    if code != 200:
+        print(f"refused ({code}): {out.get('error')}", file=sys.stderr)
+        return 1
+    sys.stdout.write(_json(out))
+    return 0
+
+
 def _playbook_run(a) -> int:
     """0.18.0: run a named playbook via the agent socket. Returns {records, skipped} from the server."""
     import time as _t
@@ -1200,6 +1229,15 @@ def main(argv=None) -> int:
                        "through this console's agent socket. Each step lands as an owner message write; the "
                        "steward's watch picks them up as it does any delegation.")
     s.add_argument("name", help="the playbook's slug (file basename without .json)")
+    s = sub.add_parser("item-move", description="1.17.0: record the owner's intent to re-parent an item. "
+                       "Writes a `message` with intent 'move' to the item's thread; the project's adapter "
+                       "stays the source of truth for parents, but the move is now in the Feed and the "
+                       "item's thread until items() catches up.")
+    s.add_argument("item", help="the item id to re-parent")
+    moveto = s.add_mutually_exclusive_group(required=True)
+    moveto.add_argument("--to", default=None, help="the target parent's item id")
+    moveto.add_argument("--to-root", action="store_true", help="move to top level (no parent)")
+    s.add_argument("--text", default=None, help="optional note; defaults to \"Move under <parent>\"")
     s = sub.add_parser("sync-dashboard", description="0.9.13: insert a <details id=item-X data-ck-item=X> stub "
                        "into the dashboard page for every item not already there. Nested by parent via per-item "
                        "markers so re-runs preserve hand-edits inside each node.")
@@ -1356,6 +1394,8 @@ def _run(a, bell: Path) -> int:
         return _portfolio(a)
     if a.cmd == "playbook":
         return _playbook_run(a)
+    if a.cmd == "item-move":
+        return _item_move(a)
     if a.cmd == "portfolio-token":
         import hashlib as _h
         print("Create a service token in Cloudflare Zero Trust → Access → Service Auth.")
