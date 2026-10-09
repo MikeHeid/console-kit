@@ -1849,6 +1849,33 @@ to the preformatted source; other-language fragments (`py`,
   everything else; the toggle re-paints the same body container.
 - Copy still copies the **raw** body regardless of what's shown.
 
+## Web skins (1.14.0)
+
+Three palette overlays beyond the Primer default — the owner
+cycles the skin independently of the auto/light/dark theme and
+each choice persists per project.
+
+- **Primer** (default) — the existing GitHub-aligned palette.
+- **Solarized** — warm, cream/mustard base with teal / rust
+  accents. Light + dark variants.
+- **Nord** — cool blue-grey base with muted accents. Light +
+  dark variants.
+- **Contrast** — accessibility-forward: pure black-on-white
+  (or white-on-black) with saturated accents.
+
+Mechanism:
+
+- `document.documentElement.dataset.skin` is set to the chosen
+  key (`solarized` / `nord` / `contrast`); unset for Primer.
+- CSS keys off `:root[data-skin="…"]` with the same
+  `prefers-color-scheme: dark` + `:root[data-theme="dark"]`
+  pattern as the base palette.
+- A new `◉`/`S`/`N`/`C` button in the panel header cycles the
+  skins; the theme (sun/moon/auto) stays its own button
+  alongside.
+- Choice persists in `localStorage` as `skin`; it reaches
+  nothing outside the browser.
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent
