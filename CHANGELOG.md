@@ -1976,6 +1976,36 @@ label slice.
 - No new routes — everything comes from the existing view
   (`view.questions`, `view.threads[CHAT_ITEM]`).
 
+## Draft autosave to server (1.19.0)
+
+Unfinished compose text — chat messages half-typed, answer
+drafts, visual briefs, follow-up seat picks — now mirrors
+across the owner's browsers. Write at home, finish at the office.
+
+- **Server state**: new `STATE/drafts.json`, dir-relative /
+  O_NOFOLLOW, same path as `items.json` and `refs.json`. One
+  entry per shaped key: `{text, ts}`. Capped at 500 keys and
+  1 MiB total; a key's text is capped at 20 000 characters
+  (matching the schema's message cap). Over-cap entries are
+  pruned oldest-first on write.
+- **New owner-only route** `POST /api/draft` with
+  `{key, text, nonce}`. Empty text removes the entry.
+- **View payload** now carries `view.drafts: {key: text}` so a
+  fresh page load merges server drafts into the in-session
+  map.
+- **Browser side**: a `setDraft(key, value)` helper replaces
+  every direct `draftTexts[key] = …` write (17 sites). The
+  helper updates the in-session map and schedules a debounced
+  server save (1500 ms after the last keystroke); a `clear`
+  path is the same helper with an empty string.
+- **Merge policy**: on view fetch, server-only drafts (where
+  the local map has no key) are copied into the local map.
+  Local text that hasn't synced yet never gets stomped by an
+  old server value.
+- **Trust**: route is Access-authed, same as every other owner
+  route. Drafts are per-owner; peers and agents cannot read or
+  write them.
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent

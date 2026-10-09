@@ -35,6 +35,39 @@
   let fromInbox = false;
   let pendingNonces = {};
   let draftTexts = {};
+  const draftSaveTimers = {};
+  const DRAFT_SAVE_DELAY_MS = 1500;
+
+  // setDraft: update the in-session map and schedule a debounced server save, so a draft typed on
+  // one browser becomes visible to the owner's other browsers after the next view fetch.
+  function setDraft(key, value) {
+    const text = (value == null) ? '' : String(value);
+    if (text === '') { if (key in draftTexts) delete draftTexts[key]; }
+    else draftTexts[key] = text;
+    scheduleDraftSave(key, text);
+  }
+  function scheduleDraftSave(key, text) {
+    if (!key) return;
+    if (draftSaveTimers[key]) clearTimeout(draftSaveTimers[key]);
+    draftSaveTimers[key] = setTimeout(() => {
+      delete draftSaveTimers[key];
+      saveDraftToServer(key, text);
+    }, DRAFT_SAVE_DELAY_MS);
+  }
+  async function saveDraftToServer(key, text) {
+    try {
+      await apiPost('/draft', { key, text }, 'draft-' + key + '-' + Date.now());
+    } catch (e) { /* best effort */ }
+  }
+  function syncServerDrafts(serverDrafts) {
+    if (!serverDrafts || typeof serverDrafts !== 'object') return;
+    for (const key of Object.keys(serverDrafts)) {
+      const serverText = serverDrafts[key];
+      if (typeof serverText !== 'string' || !serverText) continue;
+      // Server-draft merge is a passive read: use the server value locally without saving back.
+      if (!(key in draftTexts)) draftTexts[key] = serverText;
+    }
+  }
   const draftSeats = {};  // seat picker key -> {seats, other, roar}: kept across a re-render, like draftTexts
   const draftModes = {};  // form key -> the mode radio picked: kept across a re-render
   let currentFork = null; // the answers sheet's fork filter (spec §7.6), or the round the form walks
@@ -578,6 +611,7 @@
       if (liveVer === null && typeof data.ver === 'string') liveVer = data.ver;  // Q24: the first wait has a baseline
       checkPromise = null; // a new view: "why stale" is checked afresh
       cursor = data.cursor;
+      syncServerDrafts(view && view.drafts);
       noteArrivals();
       updateInboxButton();
       updateItemButtons();
@@ -2514,7 +2548,7 @@
     const text = el('textarea', { className: 'ck-textarea', rows: '2', id: noteId,
       placeholder: step === 'refine' ? 'e.g. The spec still says 16 columns' : 'e.g. What does a zone own?' });
     if (draftTexts[key] !== undefined) text.value = draftTexts[key];
-    text.addEventListener('input', () => { draftTexts[key] = text.value; });
+    text.addEventListener('input', () => { setDraft(key, text.value); });
     form.appendChild(el('label', { for: noteId, className: 'ck-field-label' }, ['Note (optional)']));
     form.appendChild(text);
     const err = el('p', { className: 'ck-error-msg', role: 'status', 'aria-live': 'polite' });
@@ -2535,7 +2569,7 @@
         err.textContent = 'Not sent: ' + result.error;
         announce('Error: ' + result.error);
       } else {
-        delete draftTexts[key];
+        setDraft(key, '');
         openForms.delete(key);
         announce(w.title + ' requested.');
         renderPanel();
@@ -2577,7 +2611,7 @@
     const text = el('textarea', { className: 'ck-textarea', rows: '3', id: noteId,
       placeholder: 'e.g. The grid page at phone width, with the session block open' });
     if (draftTexts[key] !== undefined) text.value = draftTexts[key];
-    text.addEventListener('input', () => { draftTexts[key] = text.value; });
+    text.addEventListener('input', () => { setDraft(key, text.value); });
     form.appendChild(el('label', { for: noteId, className: 'ck-field-label' }, ['What should it show?']));
     form.appendChild(text);
     const err = el('p', { className: 'ck-error-msg', role: 'status', 'aria-live': 'polite' });
@@ -2590,7 +2624,7 @@
       const result = await apiPost('/message', { item: itemId, intent: 'visual', text: text.value.trim() }, key);
       send.disabled = false;
       if (result.error) { err.textContent = 'Not sent: ' + result.error; announce('Error: ' + result.error); }
-      else { delete draftTexts[key]; openForms.delete(key); announce('Visual requested.'); renderPanel(); }
+      else { setDraft(key, ''); openForms.delete(key); announce('Visual requested.'); renderPanel(); }
     });
     form.appendChild(el('div', { className: 'ck-actions' }, [send]));
     return form;
@@ -3282,7 +3316,7 @@
     const prior = q.answers && q.answers.length ? q.answers[q.answers.length - 1] : null;
     if (draftTexts[draftKey] !== undefined) ownTextEl.value = draftTexts[draftKey];
     else if (prior && prior.own_text) ownTextEl.value = prior.own_text;
-    ownTextEl.addEventListener('input', () => { draftTexts[draftKey] = ownTextEl.value; });
+    ownTextEl.addEventListener('input', () => { setDraft(draftKey, ownTextEl.value); });
     ownWordsArea.appendChild(ownTextEl);
     form.appendChild(ownWordsArea);
 
@@ -3337,7 +3371,7 @@
       if (result.error) {
         announce('Error: ' + result.error);
       } else {
-        delete draftTexts[draftKey];
+        setDraft(draftKey, '');
         renderPanel();
       }
     });
@@ -3706,7 +3740,7 @@
     });
     const draftKey = 'msg-' + itemId;
     if (draftTexts[draftKey]) inputTextarea.value = draftTexts[draftKey];
-    inputTextarea.addEventListener('input', () => { draftTexts[draftKey] = inputTextarea.value; });
+    inputTextarea.addEventListener('input', () => { setDraft(draftKey, inputTextarea.value); });
     authorInput.appendChild(inputTextarea);
     const sendBtn = el('button', { className: 'ck-btn ck-btn-primary', type: 'button', style: 'margin-top: 8px;' },
       ['Send']);
@@ -3719,7 +3753,7 @@
       if (result.error) {
         announce('Error: ' + result.error);
       } else {
-        delete draftTexts[draftKey];
+        setDraft(draftKey, '');
         inputTextarea.value = '';
         renderPanel();
       }
@@ -4211,7 +4245,7 @@
     const text = el('textarea', { className: 'ck-textarea', rows: '2', id: noteId,
       placeholder: 'e.g. Does this hold for the tour rig?' });
     if (draftTexts[key] !== undefined) text.value = draftTexts[key];
-    text.addEventListener('input', () => { draftTexts[key] = text.value; });
+    text.addEventListener('input', () => { setDraft(key, text.value); });
     form.appendChild(el('label', { for: noteId, className: 'ck-field-label' }, ['Note for the seats (optional)']));
     form.appendChild(text);
     form.appendChild(err);
@@ -4235,7 +4269,7 @@
         err.textContent = 'Not sent: ' + result.error;
         announce('Error: ' + result.error);
       } else {
-        delete draftTexts[key];
+        setDraft(key, '');
         delete draftSeats[id];
         delete draftModes[key];
         openForms.delete(key);
@@ -4327,7 +4361,7 @@
     const text = el('textarea', { className: 'ck-textarea', rows: '2', id: noteId,
       placeholder: 'e.g. Which option survives a second site?' });
     if (draftTexts[key] !== undefined) text.value = draftTexts[key];
-    text.addEventListener('input', () => { draftTexts[key] = text.value; });
+    text.addEventListener('input', () => { setDraft(key, text.value); });
     form.appendChild(el('label', { for: noteId, className: 'ck-field-label' }, ['Note for the seats (optional)']));
     form.appendChild(text);
     form.appendChild(cost);
@@ -4353,7 +4387,7 @@
         err.textContent = 'Not sent: ' + result.error;
         announce('Error: ' + result.error);
       } else {
-        delete draftTexts[key];
+        setDraft(key, '');
         delete draftSeats[id];
         delete draftModes[key];
         openForms.delete(key);
@@ -4395,7 +4429,7 @@
     const text = el('textarea', { className: 'ck-textarea', rows: '2', 'aria-label': 'What should they look at (optional)',
       placeholder: 'What should they look at? (optional)' });
     if (draftTexts[key] !== undefined) text.value = draftTexts[key];
-    text.addEventListener('input', () => { draftTexts[key] = text.value; });
+    text.addEventListener('input', () => { setDraft(key, text.value); });
     form.appendChild(text);
 
     const send = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' }, [followUp ? 'Start the follow-up' : 'Start the deliberation']);
@@ -4416,7 +4450,7 @@
       send.disabled = false;
       if (result.error) announce('Error: ' + result.error);
       else {
-        delete draftTexts[key];
+        setDraft(key, '');
         delete draftSeats[key];
         openForms.delete(followUp ? 'fu-' + followUp : 'fork-' + itemId);  // sent, so the form closes
         announce('Deliberation requested.');
