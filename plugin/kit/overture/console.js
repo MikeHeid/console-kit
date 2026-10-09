@@ -1187,8 +1187,10 @@
   // Command palette: one search box over items, playbooks, peers, tabs, actions.
   // Fuzzy filter is a simple case-insensitive subsequence; ranking favours start-of-label hits
   // and then prefers item > question > playbook > peer > tab > action, so a typed id wins.
-  const PALETTE_KINDS_ORDER = ['item', 'question', 'playbook', 'peer', 'tab', 'action'];
+  const PALETTE_KINDS_ORDER = ['item', 'question', 'chat', 'playbook', 'peer', 'tab', 'action'];
   let paletteState = { items: [], idx: 0, query: '', open: false };
+
+  const PALETTE_CHAT_RECENT = 50;
 
   function buildPaletteCommands() {
     const cmds = [];
@@ -1199,14 +1201,29 @@
       const it = items[id] || {};
       const refPrefix = it.ref ? it.ref + ' · ' : '';
       cmds.push({ kind: 'item', id, label: refPrefix + id + (it.title ? ' · ' + it.title : ''),
-                  hint: 'open', ref: it.ref || '' });
+                  hint: 'open', ref: it.ref || '',
+                  // full-text search payload (title only; questions carry their own).
+                  search: (it.title || '').toLowerCase() });
     }
     const qs = (view && view.questions) || {};
     for (const qid of Object.keys(qs)) {
       const q = qs[qid] && qs[qid].question;
       if (!q || !q.item) continue;
       cmds.push({ kind: 'question', id: qid, label: qid + (q.text ? ' · ' + q.text.slice(0, 60) : ''),
-        hint: (qs[qid].state || 'unlocked'), item: q.item });
+        hint: (qs[qid].state || 'unlocked'), item: q.item,
+        // full question text (lowercased) for substring hits beyond the 60-char label.
+        search: (q.text || '').toLowerCase() });
+    }
+    // chat messages, up to the newest N, so a palette search finds that thing you said.
+    const chatMsgs = ((view && view.threads && view.threads[CHAT_ITEM]) || [])
+      .slice().sort((a, b) => b.seq - a.seq).slice(0, PALETTE_CHAT_RECENT);
+    for (const m of chatMsgs) {
+      if (!m || !m.text) continue;
+      const who = m.by === 'owner' ? 'You' : (m.agent || 'Agent');
+      const snippet = m.text.length > 80 ? m.text.slice(0, 80) + '…' : m.text;
+      cmds.push({ kind: 'chat', id: m.id || String(m.seq), label: who + ': ' + snippet,
+                  hint: relTime(m.ts), chatTs: m.ts,
+                  search: (m.text || '').toLowerCase() });
     }
     for (const pb of (view && view.playbooks) || []) {
       cmds.push({ kind: 'playbook', id: pb.name, label: 'Playbook: ' + pb.name,
@@ -1227,19 +1244,21 @@
   function filterPalette(cmds, query) {
     const q = (query || '').trim().toLowerCase();
     if (!q) {
-      return cmds.slice().sort(byPaletteKind).slice(0, 40);
+      return cmds.slice().filter(c => c.kind !== 'chat').sort(byPaletteKind).slice(0, 40);
     }
     const scored = [];
     // A pure dotted-number query (e.g. "1.2") is treated as a ref lookup — exact wins over startswith.
     const isRefLookup = /^[1-9][0-9]*(\.[1-9][0-9]*)*$/.test(q);
     for (const c of cmds) {
       const lab = c.label.toLowerCase();
+      const search = c.search || '';
       let score;
       if (isRefLookup && c.ref === q) score = -1;             // exact ref match: top of the list
       else if (isRefLookup && c.ref && c.ref.startsWith(q + '.')) score = 0;   // "1" matches "1.2" descendants
       else if (lab.startsWith(q)) score = 0;
       else if (lab.includes(q)) score = 1;
-      else if (subsequence(lab, q)) score = 2;
+      else if (search && search.includes(q)) score = 2;        // full-text body hit
+      else if (subsequence(lab, q)) score = 3;
       else continue;
       scored.push({ c, score });
     }
@@ -1320,6 +1339,15 @@
     }
     if (c.kind === 'item') { openPanel(c.id, 'item'); return; }
     if (c.kind === 'question') { openPanel(c.item, 'item'); return; }
+    if (c.kind === 'chat') {
+      // Open the Inbox on the Chat tab; the chat log scrolls to its end on render so the message
+      // the owner was searching for is usually visible without further navigation.
+      if (panelEl.getAttribute('data-open') !== 'true') openPanel(null, 'inbox');
+      currentMode = 'inbox';
+      currentTab = 'chat';
+      renderPanel();
+      return;
+    }
     if (c.kind === 'playbook') {
       apiPost('/playbook', { name: c.id }, 'palette-pb-' + c.id + '-' + Date.now())
         .then(r => {
@@ -1367,6 +1395,7 @@
     if (c.kind === 'tab') return here + '#' + c.id;
     if (c.kind === 'item') return here + '#item=' + encodeURIComponent(c.id);
     if (c.kind === 'question') return here + '#qid=' + encodeURIComponent(c.id);
+    if (c.kind === 'chat') return here + '#chat';
     if (c.kind === 'peer') {
       const peer = ((portfolioState.data && portfolioState.data.peers) || []).find(p => p && p.name === c.id);
       return (peer && peer.url) || null;
