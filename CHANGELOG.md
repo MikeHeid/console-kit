@@ -2272,3 +2272,82 @@ without touching desktop behaviour.
   before writing anything; a conflict leaves the file untouched.
 - `STATE/refs.json` is written whole, dir-relative, O_NOFOLLOW —
   same path as `items.json`.
+
+## Visible truth (1.23.0)
+
+A five-reviewer sweep (UX principal, DevOps/SRE, product
+strategist, accessibility auditor, UI code review) converged on
+one gap: the console confirms nothing visibly, degrades
+invisibly, and makes destructive actions look identical to
+read-only ones. 1.23.0 closes the honesty gap without touching
+the information architecture.
+
+- **Visible toast surface.** Every `announce()` call now
+  mirrors as a bottom-right toast (`ok` / `error` / `info`
+  tones, 4 s auto-dismiss, dedupe within 1.5 s, errors stick
+  until clicked, honors `prefers-reduced-motion`). The
+  off-screen `aria-live` region still announces to assistive
+  tech. Pre-1.23 sighted operators saw nothing when a lock,
+  playbook, or dismiss succeeded.
+- **`apiPost` fix.** The POST helper no longer mutates its
+  caller's `body` (uses `{...body, nonce}`), parses JSON
+  tolerantly (an HTML 502 page no longer surfaces as
+  `"Unexpected token '<'"`), normalises every non-OK response
+  to `{error}`, and accepts `{quiet, refresh}` options so
+  background saves can opt out of the "Sent" announcement and
+  the full-view refetch.
+- **Draft-autosave is quiet and honest.** The `/draft` autosave
+  used to announce "Sent" every 1.5 s of typing pauses and
+  silently drop server errors — operators believed their
+  draft was saved when the server returned `{error}`. Autosave
+  now calls `apiPost` with `{quiet:true, refresh:false}`,
+  checks `data.error`, and shows "Draft not saved — will retry
+  on next edit" inline next to any compose that opts in via
+  `data-ck-draft-key`.
+- **Danger button variant + two-click confirm.** New
+  `.ck-btn-danger` (muted red resting state, red fill on
+  hover) + a `data-armed` state for one-shot irreversible
+  actions. First click arms the button and relabels it "Click
+  again to withdraw"; a 4 s timeout disarms if the operator
+  looks away. Applied to Withdraw (destructive) while Keep
+  (stop checking) stays primary.
+- **Owner-visible status chip.** New `/api/status` (owner door,
+  Access-gated) returns version, register, agent, boot id,
+  uptime, live-poll waiters vs `MAX_WAITERS`, chat quota
+  remaining in the rolling minute, age of the last cron
+  minute-tick, and age of the most recent Portfolio peer
+  fetch. A green/amber/red pill in the panel's top-right
+  reflects it; click opens a drawer with every row. Polls
+  every 30 s while the panel is open; stops cleanly on close.
+- **Readiness probe.** `/health` keeps answering 200 even when
+  the register is unreadable (liveness: a restart won't help,
+  so no supervisor restart loop), but a new sibling `/ready`
+  on the same opt-in loopback port returns 503 in that case so
+  external monitors can distinguish.
+- **Install-vs-upgrade banner.** `install_notice.py` now
+  detects prior-version flag files in `~/.local/state/overture`
+  and shows the appropriate script: first install still prints
+  `register` + `start`; an upgrade prints `restart overture.service`
+  only (no re-register, no stray `start`). A rollback re-fires
+  because the per-version flag path shifts with `__version__`.
+- **Contrast tokens.** `--c-border` darkened from `#d0d7de`
+  (1.4:1 on `#fff`) to `#8c959f` (≈3.1:1) so WCAG 2.2 1.4.11
+  passes on input, select, chip, and inbox-row borders.
+  `--c-fg-muted` darkened from `#656d76` (4.4:1 on
+  `--c-surface-alt`) to `#5a6069` (≈4.9:1) so WCAG 1.4.3
+  passes on timestamps, hints, and option labels on both
+  surfaces. `--c-border-light` moves to the former
+  `--c-border` value so divider roles stay quiet.
+
+### Trust
+
+- `/api/status` holds no owner content and no secret: version
+  string, counters, and the same two words of state the
+  owner door already serves on `/view`.
+- Status polling is scoped to the panel's open window; a
+  closed dock holds no interval.
+- The new `/ready` route is reachable only on the same opt-in
+  loopback port as `/health`; the proxy-header / Host /
+  loopback refusals still gate it.
+- No new secrets, no new disk writes beyond what install
+  notice already does, and no change to peer federation.

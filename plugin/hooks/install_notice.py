@@ -74,6 +74,23 @@ def _already_shown() -> bool:
         return True   # cannot read the flag → err on the side of silence
 
 
+def _prior_versions() -> list[str]:
+    """Every version this hook has fired on before, oldest first.
+
+    Enables install-vs-upgrade branching: an empty list means first install, any entry
+    means an upgrade (or downgrade). A rollback to an older version whose flag was
+    deleted re-fires naturally through `_already_shown`.
+    """
+    try:
+        return sorted(
+            p.name.removeprefix("install-notice-seen-")
+            for p in _state_root().glob("install-notice-seen-*")
+            if p.is_file() and p.name != f"install-notice-seen-{VERSION}"
+        )
+    except OSError:
+        return []
+
+
 def _mark_shown() -> None:
     try:
         _state_root().mkdir(parents=True, exist_ok=True)
@@ -87,34 +104,83 @@ def _is_windows_native() -> bool:
     return platform.system() == "Windows"
 
 
-def _instructions() -> str:
-    lines: list[str] = []
-    lines.append("Welcome to Overture " + VERSION + ".")
-    lines.append("")
-    lines.append("Register this project's server agent before Overture can serve its console:")
-    lines.append("")
+def _install_lines() -> list[str]:
+    """First-install banner body: register + start the user service."""
+    lines: list[str] = [
+        "Welcome to Overture " + VERSION + ".",
+        "",
+        "Register this project's server agent before Overture can serve its console:",
+        "",
+    ]
     if _is_windows_native():
-        lines.append("  # On Windows, the server runs inside WSL (POSIX only).")
-        lines.append("  # In WSL (Ubuntu-24.04 recommended):")
-        lines.append("")
-        lines.append("    wsl -d Ubuntu-24.04 -- python3 ~/.local/share/overture/kit/plugin/kit/agent.py register")
-        lines.append("")
-        lines.append("  # Then in PowerShell, start the user service:")
-        lines.append("")
-        lines.append("    wsl -d Ubuntu-24.04 -- systemctl --user start overture.service")
+        lines += [
+            "  # On Windows, the server runs inside WSL (POSIX only).",
+            "  # In WSL (Ubuntu-24.04 recommended):",
+            "",
+            "    wsl -d Ubuntu-24.04 -- python3 ~/.local/share/overture/kit/plugin/kit/agent.py register",
+            "",
+            "  # Then in PowerShell, start the user service:",
+            "",
+            "    wsl -d Ubuntu-24.04 -- systemctl --user start overture.service",
+        ]
     else:
-        lines.append("  # Linux / macOS / WSL:")
-        lines.append("")
-        lines.append("    python3 ~/.local/share/overture/kit/plugin/kit/agent.py register")
-        lines.append("")
-        lines.append("  # Then start the user service:")
-        lines.append("")
-        lines.append("    systemctl --user start overture.service")
-    lines.append("")
-    lines.append("  Full install guide: https://github.com/MikeHeid/overture#install")
-    lines.append("")
-    lines.append("  Tip: this reminder shows once per version; it will fire again the next time")
-    lines.append("  you upgrade. Nothing to clean up.")
+        lines += [
+            "  # Linux / macOS / WSL:",
+            "",
+            "    python3 ~/.local/share/overture/kit/plugin/kit/agent.py register",
+            "",
+            "  # Then start the user service:",
+            "",
+            "    systemctl --user start overture.service",
+        ]
+    lines += [
+        "",
+        "  Full install guide: https://github.com/MikeHeid/overture#install",
+        "",
+        "  Tip: this reminder shows once per version; it will fire again the next time",
+        "  you upgrade. Nothing to clean up.",
+    ]
+    return lines
+
+
+def _upgrade_lines(prior: list[str]) -> list[str]:
+    """Upgrade banner body: restart the user service to pick up the new binary.
+
+    The register step from the first install is skipped — the agent is already registered
+    and the socket path has not moved. On a running service the correct action is a
+    restart, not a start.
+    """
+    from_ver = prior[-1] if prior else "an earlier version"
+    lines: list[str] = [
+        f"Upgraded to Overture {VERSION} (from {from_ver}).",
+        "",
+        "Restart the server to pick up the new binary:",
+        "",
+    ]
+    if _is_windows_native():
+        lines += [
+            "  # In PowerShell:",
+            "",
+            "    wsl -d Ubuntu-24.04 -- systemctl --user restart overture.service",
+        ]
+    else:
+        lines += [
+            "  # Linux / macOS / WSL:",
+            "",
+            "    systemctl --user restart overture.service",
+        ]
+    lines += [
+        "",
+        "  Changelog: https://github.com/MikeHeid/overture/blob/main/CHANGELOG.md",
+        "",
+        "  Tip: this reminder shows once per version; nothing to clean up.",
+    ]
+    return lines
+
+
+def _instructions() -> str:
+    prior = _prior_versions()
+    lines = _upgrade_lines(prior) if prior else _install_lines()
     return "\n".join(lines)
 
 

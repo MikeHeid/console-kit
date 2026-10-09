@@ -920,6 +920,8 @@ class Console:
         self._boot = secrets.token_hex(4)
         self._waiters = 0
         self._chat_times: collections.deque[float] = collections.deque()
+        self._cron_last_tick: float | None = None  # 1.23.0: last successful cron minute-tick (epoch seconds)
+        self._started_at = time.time()             # 1.23.0: wall time at boot, for uptime in /api/status
 
     # -- live updates (0.7.0) --------------------------------------------------
 
@@ -1199,6 +1201,7 @@ class Console:
                 return
             now = _dt.datetime.now()
             tick_key = (now.year, now.month, now.day, now.hour, now.minute)
+            self._cron_last_tick = time.time()  # 1.23.0: readable by /api/status for operator visibility
             try:
                 for trigger in self.triggers.all().values():
                     if trigger.cron is None:
@@ -2522,6 +2525,42 @@ class Console:
             body["register_note"] = IT.UNREADABLE
         return ok, body
 
+    def status(self) -> dict:
+        """1.23.0: operator-visible health + runtime counters, served from the owner door.
+
+        The console header renders a status chip from this: `ok` summary, boot id so a
+        restart invalidates stale UI assumptions, uptime in seconds, how many live polls
+        are open (vs `max_waiters`), chat quota remaining in the current minute, when
+        the cron tick last ran, and when the Portfolio aggregator last got a peer answer.
+        Holds no owner content and no secret.
+        """
+        ok, body = self.health()
+        now = time.time()
+        # Chat budget remaining in the current rolling minute.
+        with self._lock:
+            cutoff = now - 60.0
+            while self._chat_times and self._chat_times[0] < cutoff:
+                self._chat_times.popleft()
+            chat_used = len(self._chat_times)
+        chat_remaining = max(0, CHAT_PER_MINUTE - chat_used)
+        # Age of the last cron tick in seconds, or None if the thread has not ticked yet.
+        last_tick = self._cron_last_tick
+        cron_age = int(now - last_tick) if last_tick is not None else None
+        # Portfolio aggregator: when was the most recent per-peer fetch?
+        peers_recent = self._portfolio.last_fetched()
+        peers_age = int(now - peers_recent) if peers_recent is not None else None
+        body.update({
+            "boot_id": self._boot,
+            "uptime_s": int(now - self._started_at),
+            "waiters": self._waiters,
+            "max_waiters": MAX_WAITERS,
+            "chat_remaining": chat_remaining,
+            "chat_per_minute": CHAT_PER_MINUTE,
+            "cron_last_tick_age_s": cron_age,
+            "peers_last_fetched_age_s": peers_age,
+        })
+        return body
+
     # "Agent active" (owner, 2026-09-29): an agent that picks up a request marks
     # the items it is working on, and its next cursor post (synced, or an error)
     # clears them. "Awaiting agent" alone only says the owner wrote last, which
@@ -2778,6 +2817,12 @@ class OwnerHandler(_Handler):
             return self._check()
         if self.path == "/api/usage":  # 0.8.6: the footer's probe
             return self._send(200, read_usage(self.console.cfg))
+        if self.path == "/api/status":  # 1.23.0: owner-visible health + counters for the header status chip
+            try:
+                return self._send(200, self.console.status())
+            except Exception as e:  # noqa: BLE001 — status must never fault the owner page
+                sys.stderr.write(f"console status: {type(e).__name__}: {e}\n")
+                return self._send(503, {"error": "the status could not be read just now"})
         if self.path == "/api/prs":   # the steward's last prs-push, read only: no owner route writes it
             try:
                 return self._send(200, self.console.prs())
@@ -3178,10 +3223,18 @@ class HealthHandler(_Handler):
             return self._send(403, {"error": why})
         if self.command != "GET":
             return self._send(405, {"error": "method not allowed"})
-        if self.path != "/health":
-            return self._send(404, {"error": "this port answers /health only"})
-        ok, body = self.console.health()
-        self._send(200 if ok else 503, body)
+        if self.path == "/health":
+            # Liveness: a restart cannot fix an unreadable items snapshot, so a degraded
+            # register still answers 200 — a 503 here would invite a supervisor restart loop.
+            ok, body = self.console.health()
+            return self._send(200 if ok else 503, body)
+        if self.path == "/ready":
+            # Readiness: strict. A degraded register answers 503 so a readiness probe can
+            # route traffic elsewhere or page an operator; the body stays intact.
+            ok, body = self.console.health()
+            ready = ok and body.get("register") == "ok"
+            return self._send(200 if ready else 503, body)
+        return self._send(404, {"error": "this port answers /health and /ready only"})
 
     do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _dispatch
 

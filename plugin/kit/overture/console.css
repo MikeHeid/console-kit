@@ -13,9 +13,9 @@
     --c-surface: #ffffff;
     --c-surface-alt: #eaecef;
     --c-fg: #1f2328;
-    --c-fg-muted: #656d76;
-    --c-border: #d0d7de;
-    --c-border-light: #e6eaef;
+    --c-fg-muted: #5a6069;
+    --c-border: #8c959f;
+    --c-border-light: #d0d7de;
     --c-accent: #0969da;
     --c-accent-fg: #ffffff;
     --c-open: #57606a;
@@ -442,6 +442,35 @@
 }
 .ck-btn-primary:hover, .ck-btn-primary:focus {
   background: color-mix(in srgb, var(--c-accent) 85%, black);
+}
+/* Destructive-action variant (1.23.0). Resting: muted red border + red text so the
+   affordance is distinctly dangerous without shouting on load. On hover/focus the
+   button fills with red for an unmistakable commit signal. Use for Withdraw, Delete,
+   and other irreversible operator actions; always inside a wrapper that already
+   requires reason text or a two-click confirmation. */
+.ck-btn-danger {
+  background: var(--c-surface);
+  color: var(--c-blocked, #cf222e);
+  border-color: color-mix(in srgb, var(--c-blocked, #cf222e) 60%, var(--c-border));
+}
+.ck-btn-danger:hover, .ck-btn-danger:focus {
+  background: var(--c-blocked, #cf222e);
+  color: #fff;
+  border-color: var(--c-blocked, #cf222e);
+}
+/* Two-click confirm state: the first click re-labels and arms. Honor
+   reduced-motion by skipping the pulse. */
+.ck-btn-danger[data-armed="true"] {
+  background: var(--c-blocked, #cf222e);
+  color: #fff;
+  border-color: var(--c-blocked, #cf222e);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ck-btn-danger[data-armed="true"] { animation: ck-armed-pulse 1.4s ease-in-out infinite; }
+  @keyframes ck-armed-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c-blocked, #cf222e) 40%, transparent); }
+    50%      { box-shadow: 0 0 0 4px color-mix(in srgb, var(--c-blocked, #cf222e) 10%, transparent); }
+  }
 }
 
 /* --- Lock receipt --- */
@@ -2220,6 +2249,138 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 .ck-new-dot { color: var(--c-accent); font-size: 10px; }
 .ck-new-text { flex: 1; }
 .ck-new-dismiss { padding: 3px 10px; font-size: 12px; }
+
+/* ========= Visible feedback toasts (1.23.0) ===============================================
+   Mirrors every announce() call as a visible toast for sighted users. The off-screen
+   aria-live region still announces to assistive tech. Positioned bottom-right of the
+   viewport so it never overlaps the operator's active work region in the dock panel.
+   Honors prefers-reduced-motion by replacing the slide with a plain fade. */
+#ck-toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 2147483000;  /* above the dock, below system dialogs */
+  pointer-events: none;
+  max-width: min(360px, calc(100vw - 32px));
+}
+.ck-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-fg);
+  border: 1px solid var(--c-border);
+  box-shadow: var(--shadow-md);
+  font-size: 13px;
+  line-height: 1.4;
+  transform: translateX(16px);
+  opacity: 0;
+  transition: transform 180ms ease-out, opacity 180ms ease-out;
+}
+.ck-toast.ck-toast-in { transform: translateX(0); opacity: 1; }
+.ck-toast.ck-toast-out { transform: translateX(16px); opacity: 0; }
+.ck-toast[data-tone="ok"] {
+  border-color: var(--c-built, var(--c-border));
+  border-left-width: 3px;
+}
+.ck-toast[data-tone="error"] {
+  border-color: var(--c-blocked, var(--c-border));
+  border-left-width: 3px;
+  background: var(--c-blocked-bg, var(--c-surface));
+}
+.ck-toast-msg { flex: 1; overflow-wrap: anywhere; }
+.ck-toast-close {
+  background: transparent;
+  border: 0;
+  padding: 0 4px;
+  min-width: 24px;
+  min-height: 24px;
+  color: var(--c-fg-muted);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  border-radius: 4px;
+}
+.ck-toast-close:hover { color: var(--c-fg); background: var(--c-surface-alt); }
+@media (prefers-reduced-motion: reduce) {
+  .ck-toast { transition: opacity 120ms linear; transform: none; }
+  .ck-toast.ck-toast-in { transform: none; }
+  .ck-toast.ck-toast-out { transform: none; }
+}
+
+/* ========= Status chip (1.23.0) ============================================
+   A pill in the panel's top-right corner that reflects /api/status at a glance.
+   Dot color encodes tone (ok/degraded/down). Click opens a drawer anchored below
+   the chip with uptime, waiters, chat quota, cron tick age, and peer freshness.
+   Positioned absolute so it floats over whatever mode the panel is in. */
+.ck-status-chip {
+  position: absolute;
+  top: 10px;
+  right: 56px;              /* clear the close button at the right edge */
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  min-height: 24px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--c-fg-muted);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.ck-status-chip:hover,
+.ck-status-chip:focus-visible { border-color: var(--c-accent); color: var(--c-fg); }
+.ck-status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--c-fg-muted);
+}
+.ck-status-chip[data-tone="ok"] .ck-status-dot        { background: var(--c-built, #1a7f37); }
+.ck-status-chip[data-tone="degraded"] .ck-status-dot  { background: var(--c-claimed, #9a6700); }
+.ck-status-chip[data-tone="down"] .ck-status-dot      { background: var(--c-blocked, #cf222e); }
+.ck-status-chip[data-tone="down"] .ck-status-word     { color: var(--c-blocked, #cf222e); }
+.ck-status-pop {
+  position: absolute;
+  top: 42px;
+  right: 16px;
+  z-index: 6;
+  min-width: 260px;
+  max-width: calc(100vw - 32px);
+  padding: 10px 12px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  font-size: 13px;
+}
+.ck-status-pop-title { font-weight: 600; margin-bottom: 6px; }
+.ck-status-row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+.ck-status-k { color: var(--c-fg-muted); }
+.ck-status-v { font-variant-numeric: tabular-nums; }
+.ck-status-row[data-state="error"] { color: var(--c-blocked); }
+.ck-status-note {
+  margin: 8px 0 0; padding: 6px 8px; border-radius: var(--radius-sm);
+  background: var(--c-surface-alt); color: var(--c-fg-muted); font-size: 12px;
+}
+
+/* Draft autosave inline hint. Rendered next to any textarea whose wrapper carries
+   data-ck-draft-key; empty on success, "Draft not saved — will retry on next edit"
+   on failure. Keeps the user from thinking a cleared autosave persisted. */
+.ck-draft-hint {
+  font-size: 12px;
+  color: var(--c-fg-muted);
+  margin-top: 4px;
+  min-height: 1em;
+}
+.ck-draft-hint[data-state="error"] { color: var(--c-blocked); }
 
 /* ========= Mobile viewport polish (1.22.0) ================================================
    Below 640px: ensure every interactive element has a ≥36px tap target, modals fit the viewport,
