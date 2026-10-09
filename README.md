@@ -1,11 +1,9 @@
-# Overture
-
-```
-    ___                __
-   / _ \_  _____ ____/ /___  _______
-  / // / |/ / -_) __/ __/ // / __/ -_)
- /____/|___/\__/_/  \__/\_,_/_/  \__/
-```
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/overture-logo-dark.svg">
+    <img alt="Overture" src="docs/brand/overture-logo-light.svg" height="72">
+  </picture>
+</h1>
 
 > **Overture is the self-hosted owner-operator layer for AI software
 > development: one web cockpit, behind your own Cloudflare Access, that
