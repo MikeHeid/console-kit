@@ -1542,7 +1542,10 @@
     const now = Date.now();
     if (now - shortcutGpfx < 1500) {
       shortcutGpfx = 0;
-      const tab = ({ i: 'inbox', f: 'feed', p: 'prs', s: 'favorite', o: 'portfolio', c: 'chat' })[e.key];
+      // new tabs — 'y' = playbooks (p is PRs), 't' = triggers. Favorite/chat shortcuts
+      // still work even though they're behind the "More ▾" dropdown.
+      const tab = ({ i: 'inbox', f: 'feed', p: 'prs', y: 'playbooks', t: 'triggers',
+                     s: 'favorite', o: 'portfolio', c: 'chat' })[e.key];
       if (tab) {
         e.preventDefault();
         if (panelEl.getAttribute('data-open') !== 'true') openPanel(null, 'inbox');
@@ -1593,7 +1596,8 @@
       ['Ctrl/Cmd + K', 'Open the command palette'],
       ['Alt + Enter', 'Copy a shareable link to the selected palette row'],
       ['g i', 'Open Inbox tab'], ['g f', 'Open Feed tab'], ['g p', 'Open PRs tab'],
-      ['g s', 'Open Favorite tab'], ['g o', 'Open Portfolio tab'], ['g c', 'Open Chat tab'],
+      ['g y', 'Open Playbooks tab'], ['g t', 'Open Triggers tab'],
+      ['g o', 'Open Portfolio tab'], ['g s', 'Open Favorite tab'], ['g c', 'Open Chat tab'],
       ['g b', 'Close panel (back to board)'],
       ['.',   'Focus the Delegate bar'],
       ['j / k', 'Next / previous row'],
@@ -1636,7 +1640,8 @@
   function buildPaletteCommands() {
     const cmds = [];
     const tabs = [['inbox', 'Inbox', 'g i'], ['feed', 'Feed', 'g f'], ['prs', 'PRs', 'g p'],
-                  ['favorite', 'Favorite', 'g s'], ['portfolio', 'Portfolio', 'g o'], ['chat', 'Chat', 'g c']];
+                  ['playbooks', 'Playbooks', 'g y'], ['triggers', 'Triggers', 'g t'],
+                  ['portfolio', 'Portfolio', 'g o'], ['favorite', 'Favorite', 'g s'], ['chat', 'Chat', 'g c']];
     for (const [id, label, hint] of tabs) cmds.push({ kind: 'tab', id, label, hint });
     for (const id of Object.keys(items || {})) {
       const it = items[id] || {};
@@ -1994,6 +1999,10 @@
       renderFeed(body);
     } else if (currentTab === 'prs') {
       renderPRs(body);
+    } else if (currentTab === 'playbooks') {   // promoted from the Delegate bar's select
+      renderPlaybooksTab(body);
+    } else if (currentTab === 'triggers') {    // promoted from the collapsible log section
+      renderTriggersTab(body);
     } else if (currentTab === 'favorite') {
       renderFavorites(body);
     } else if (currentTab === 'portfolio') {
@@ -2010,42 +2019,144 @@
     }
   }
 
-  // The inbox's tabs. Order: Inbox Feed PRs Favorite Portfolio Chat.
-  const TABS = [['inbox', 'Inbox'], ['feed', 'Feed'], ['prs', 'PRs'],
-                ['favorite', 'Favorite'], ['portfolio', 'Portfolio'], ['chat', 'Chat']];
+  // The inbox's tabs. Playbooks and Triggers promoted to the main bar; Favorite
+  // and Chat demoted behind a "More ▾" dropdown. Order: Inbox Feed PRs Playbooks Triggers
+  // Portfolio   (More ▾: Favorite, Chat). Keyboard shortcuts (g c, g s) still work.
+  const TABS = [
+    ['inbox', 'Inbox'],
+    ['feed', 'Feed'],
+    ['prs', 'PRs'],
+    ['playbooks', 'Playbooks'],
+    ['triggers', 'Triggers'],
+    ['portfolio', 'Portfolio'],
+    ['favorite', 'Favorite'],
+    ['chat', 'Chat']
+  ];
+  // Which TABS are shown directly in the bar vs. folded behind "More ▾".
+  const TABS_PRIMARY_IDS = ['inbox', 'feed', 'prs', 'playbooks', 'triggers', 'portfolio'];
 
+  function tabNote(id) {
+    const unread = unreadCount();
+    if (id === 'inbox' && view && view.inbox && view.inbox.length) return String(view.inbox.length);
+    if (id === 'feed' && unread) return unread + ' new';
+    if (id === 'playbooks' && view && Array.isArray(view.playbooks) && view.playbooks.length) {
+      return String(view.playbooks.length);
+    }
+    if (id === 'triggers' && view && Array.isArray(view.triggers) && view.triggers.length) {
+      return String(view.triggers.length);
+    }
+    if (id === 'favorite' && view && view.favorites && view.favorites.length) return String(view.favorites.length);
+    if (id === 'portfolio') {
+      const n = portfolioAwaitingTotal();
+      if (n) return n + ' ?you';
+    }
+    if (id === 'chat' && view && view.chat && view.chat.awaiting_agent) return '●';
+    return '';
+  }
+  function makeTabButton(id, label) {
+    const selected = currentTab === id;
+    const b = el('button', { className: 'ck-tab', type: 'button', role: 'tab', id: 'ck-tab-' + id,
+      'aria-selected': selected ? 'true' : 'false', 'aria-controls': 'ck-tabpanel',
+      tabindex: selected ? '0' : '-1' }, [label]);
+    const note = tabNote(id);
+    if (note) b.appendChild(el('span', { className: 'ck-tab-note' }, [' ' + note]));
+    if (id === 'chat' && note) b.setAttribute('aria-label', 'Chat, waiting on an agent');
+    b.addEventListener('click', () => selectTab(id));
+    b.addEventListener('keydown', e => {
+      const n = TABS.findIndex(t => t[0] === id);
+      let to = null;
+      if (e.key === 'ArrowRight') to = TABS[(n + 1) % TABS.length][0];
+      else if (e.key === 'ArrowLeft') to = TABS[(n + TABS.length - 1) % TABS.length][0];
+      else if (e.key === 'Home') to = TABS[0][0];
+      else if (e.key === 'End') to = TABS[TABS.length - 1][0];
+      if (to) { e.preventDefault(); selectTab(to); }
+    });
+    return b;
+  }
   function renderTabs() {
     const bar = el('div', { className: 'ck-tabs', role: 'tablist', 'aria-label': 'Inbox views' });
-    const unread = unreadCount();
-    TABS.forEach(([id, label]) => {
-      const selected = currentTab === id;
-      const b = el('button', { className: 'ck-tab', type: 'button', role: 'tab', id: 'ck-tab-' + id,
-        'aria-selected': selected ? 'true' : 'false', 'aria-controls': 'ck-tabpanel', tabindex: selected ? '0' : '-1' },
-      [label]);
-      let note = '';
-      if (id === 'inbox' && view && view.inbox && view.inbox.length) note = String(view.inbox.length);
-      if (id === 'feed' && unread) note = unread + ' new';
-      if (id === 'favorite' && view && view.favorites && view.favorites.length) note = String(view.favorites.length);
-      if (id === 'portfolio') {
-        const n = portfolioAwaitingTotal();
-        if (n) note = n + ' ?you';
+    // Primary tabs sit directly in the bar.
+    for (const [id, label] of TABS) {
+      if (TABS_PRIMARY_IDS.indexOf(id) < 0) continue;
+      bar.appendChild(makeTabButton(id, label));
+    }
+    // Overflow tabs land behind a "More ▾" dropdown so the bar stays sized for one row.
+    // Current-tab-is-in-overflow raises the chip to show which view the operator is in.
+    const overflow = TABS.filter(([id]) => TABS_PRIMARY_IDS.indexOf(id) < 0);
+    if (overflow.length) {
+      const activeOverflow = overflow.find(([id]) => id === currentTab);
+      const label = activeOverflow ? activeOverflow[1] : 'More';
+      const more = el('button', { className: 'ck-tab ck-tab-more', type: 'button',
+        'aria-haspopup': 'menu', 'aria-expanded': 'false',
+        'aria-label': activeOverflow ? ('More tabs — currently in ' + activeOverflow[1]) : 'More tabs',
+        'aria-selected': activeOverflow ? 'true' : 'false' },
+        [label, el('span', { 'aria-hidden': 'true', className: 'ck-tab-more-caret' }, [' ▾'])]);
+      // Current overflow tab shows its note (same as a primary tab) so the operator sees state.
+      if (activeOverflow) {
+        const note = tabNote(activeOverflow[0]);
+        if (note) more.appendChild(el('span', { className: 'ck-tab-note' }, [' ' + note]));
+      } else {
+        // Fold any non-active overflow note (e.g. a chat ● when sitting on Inbox) into the "More" button
+        // so the operator still sees the agent is waiting.
+        const anyNote = overflow.find(([id]) => id !== currentTab && tabNote(id));
+        if (anyNote) more.appendChild(el('span', { className: 'ck-tab-note' }, [' ' + tabNote(anyNote[0])]));
       }
-      if (id === 'chat' && view && view.chat && view.chat.awaiting_agent) note = '●';
-      if (note) b.appendChild(el('span', { className: 'ck-tab-note' }, [' ' + note]));
-      if (id === 'chat' && note) b.setAttribute('aria-label', 'Chat, waiting on an agent');
-      b.addEventListener('click', () => selectTab(id));
-      b.addEventListener('keydown', e => {
-        const n = TABS.findIndex(t => t[0] === id);
-        let to = null;
-        if (e.key === 'ArrowRight') to = TABS[(n + 1) % TABS.length][0];
-        else if (e.key === 'ArrowLeft') to = TABS[(n + TABS.length - 1) % TABS.length][0];
-        else if (e.key === 'Home') to = TABS[0][0];
-        else if (e.key === 'End') to = TABS[TABS.length - 1][0];
-        if (to) { e.preventDefault(); selectTab(to); }
+      more.addEventListener('click', () => openMoreMenu(more, overflow));
+      more.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
+          e.preventDefault();
+          openMoreMenu(more, overflow);
+        }
       });
-      bar.appendChild(b);
-    });
+      bar.appendChild(more);
+    }
     return bar;
+  }
+
+  // pop a lightweight menu listing the overflow tabs. Click or Enter closes +
+  // selects. Esc closes. Click-outside closes. Focus returns to the "More" button.
+  let moreMenuOpen = null;
+  function openMoreMenu(anchor, overflow) {
+    closeMoreMenu();
+    const menu = el('div', { className: 'ck-more-menu', role: 'menu' });
+    for (const [id, label] of overflow) {
+      const item = el('button', { type: 'button', className: 'ck-more-item', role: 'menuitem' }, [label]);
+      const note = tabNote(id);
+      if (note) item.appendChild(el('span', { className: 'ck-tab-note' }, [' ' + note]));
+      item.addEventListener('click', () => { closeMoreMenu(); selectTab(id); });
+      menu.appendChild(item);
+    }
+    anchor.setAttribute('aria-expanded', 'true');
+    anchor.parentNode.appendChild(menu);
+    const rect = anchor.getBoundingClientRect();
+    const panelRect = panelEl.getBoundingClientRect();
+    menu.style.left = (rect.left - panelRect.left) + 'px';
+    menu.style.top = (rect.bottom - panelRect.top + 4) + 'px';
+    const items = menu.querySelectorAll('.ck-more-item');
+    if (items.length) items[0].focus();
+    const onKey = e => {
+      if (e.key === 'Escape') { e.preventDefault(); closeMoreMenu(); anchor.focus(); }
+      else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const idx = Array.prototype.indexOf.call(items, document.activeElement);
+        const next = e.key === 'ArrowDown' ? (idx + 1) % items.length : (idx - 1 + items.length) % items.length;
+        items[next].focus();
+      }
+    };
+    const onOutside = e => {
+      if (!menu.contains(e.target) && e.target !== anchor) closeMoreMenu();
+    };
+    menu.addEventListener('keydown', onKey);
+    setTimeout(() => document.addEventListener('click', onOutside, true), 0);
+    moreMenuOpen = { menu, anchor, onOutside };
+  }
+  function closeMoreMenu() {
+    if (!moreMenuOpen) return;
+    const { menu, anchor, onOutside } = moreMenuOpen;
+    document.removeEventListener('click', onOutside, true);
+    if (menu && menu.parentNode) menu.parentNode.removeChild(menu);
+    if (anchor) anchor.setAttribute('aria-expanded', 'false');
+    moreMenuOpen = null;
   }
 
   function selectTab(id) {
@@ -2118,6 +2229,11 @@
     // Nothing to show when the cursor is already at view.seq.
     const banner = renderNewBanner();
     if (banner) body.appendChild(banner);
+    // Living Rulings badge : a top-of-fold chip counting rulings whose code anchor no
+    // longer holds. The feature is the product's most defensible mechanic; pre-1.25 it read as a
+    // footnote inside each stale question card. Clicking filters the list to the stale ones.
+    const stale = renderLivingRulingsBadge();
+    if (stale) body.appendChild(stale);
     // Priority ribbon: the oldest awaiting-you questions across self + every peer. Lazy — the
     // portfolio fetch is kicked off here, so the ribbon fills on the next redraw if a peer is
     // configured. Nothing to show when there's no awaiting work anywhere.
@@ -2835,9 +2951,12 @@
 
     const bodyEl = el('div', { className: 'ck-q-body' });
 
-    // Stale banner
+    // Stale banner (this is the "Living Rulings" surface — the mechanic that
+    // flags when a locked ruling's anchor in the code no longer holds. Headline added
+    // so operators recognise the feature by name, not just by its symptom.)
     if (state === 'stale' && q.failing && q.failing.length > 0) {
       const banner = el('div', { className: 'ck-stale-banner' }, [
+        el('div', { className: 'ck-stale-tag' }, ['Living ruling']),
         el('strong', {}, ['Assumptions changed since you locked this'])
       ]);
       const list = el('ul', { className: 'ck-stale-list' });
@@ -2852,8 +2971,8 @@
       // 0.5.0: say which condition failed and why, and let the owner re-lock
       // the answer as it stands once they have checked the change.
       const tools = el('div', { className: 'ck-actions' });
-      const [whyBtn, whySlot] = disclosure('Why stale?', 'why-' + qData.qid, () => renderWhyStale(qData.qid));
-      whyBtn.setAttribute('aria-label', 'Why is this stale: ' + truncateText(qData.text, 40));
+      const [whyBtn, whySlot] = disclosure('What changed?', 'why-' + qData.qid, () => renderWhyStale(qData.qid));
+      whyBtn.setAttribute('aria-label', 'See what changed under this ruling: ' + truncateText(qData.text, 40));
       const [reBtn, reSlot] = disclosure('Still holds: re-lock…', 'relock-' + qData.qid, () => renderRelock(q));
       reBtn.setAttribute('aria-label', 'Re-lock this answer as it stands: ' + truncateText(qData.text, 40));
       tools.appendChild(whyBtn);
@@ -2886,6 +3005,13 @@
     if (state === 'locked' || state === 'stale') {
       // Show receipt
       bodyEl.appendChild(renderReceipt(qData, headAnswer));
+      // Rulings → PRs — if a tracked PR's title mentions this qid, render
+      // a chip linking to it, so an operator can trace a merged outcome back to the
+      // ruling that caused it. Server-side scan in page_payload().
+      const backlinks = view && view.pr_backlinks && view.pr_backlinks[qData.qid];
+      if (Array.isArray(backlinks) && backlinks.length) {
+        bodyEl.appendChild(renderPrBacklinks(backlinks));
+      }
       // Actions — fix #5: unique aria-label
       const actions = el('div', { className: 'ck-actions' });
       const truncText = truncateText(qData.text, 40);
@@ -3404,6 +3530,104 @@
   // Trigger log (0.16.0): the Inbox shows configured triggers + the last N firings so webhook / cron are
   // not opaque. The log is bounded in-process (100 entries); older firings drop off on server restart.
   let triggerLogOpen = false;
+  // Playbooks tab — list each playbook with description, Preview + Run.
+  // Reads view.playbooks (already shipped since 0.11), so no new data pipe is needed.
+  function renderPlaybooksTab(body) {
+    const books = (view && Array.isArray(view.playbooks)) ? view.playbooks : [];
+    body.appendChild(el('h2', { className: 'ck-section-heading' }, ['Playbooks']));
+    body.appendChild(el('p', { className: 'ck-muted' }, [
+      'Named sequences of agent writes under .overture/playbooks/*.json. Run from here, or fire from a trigger.'
+    ]));
+    if (!books.length) {
+      const empty = el('div', { className: 'ck-firstrun' });
+      empty.appendChild(el('div', { className: 'ck-firstrun-title' }, ['No playbooks yet']));
+      empty.appendChild(el('p', { className: 'ck-firstrun-pitch' }, [
+        'Add a JSON file under ', el('code', {}, ['.overture/playbooks/']),
+        ' with ', el('code', {}, ['{"name": "...", "steps": [...]}']),
+        '. The server picks it up on the next page load.'
+      ]));
+      body.appendChild(empty);
+      return;
+    }
+    const list = el('ul', { className: 'ck-playbook-list' });
+    for (const pb of books) {
+      if (!pb || typeof pb.name !== 'string') continue;
+      const row = el('li', { className: 'ck-playbook-row' });
+      const stepCount = Array.isArray(pb.steps) ? pb.steps.length : null;
+      const head = el('div', { className: 'ck-playbook-head' }, [
+        el('code', { className: 'ck-playbook-name' }, [pb.name]),
+        stepCount != null ? el('span', { className: 'ck-playbook-steps ck-muted' },
+          [' · ' + stepCount + ' step' + (stepCount === 1 ? '' : 's')]) : null
+      ].filter(Boolean));
+      row.appendChild(head);
+      if (pb.description) {
+        row.appendChild(el('p', { className: 'ck-playbook-desc' }, [pb.description]));
+      }
+      const actions = el('div', { className: 'ck-actions' });
+      const previewBtn = el('button', { type: 'button', className: 'ck-btn' }, ['Preview']);
+      previewBtn.addEventListener('click', () => openPlaybookPreview(pb.name));
+      const runBtn = el('button', { type: 'button', className: 'ck-btn ck-btn-primary' }, ['Run now']);
+      runBtn.addEventListener('click', async () => {
+        runBtn.disabled = true;
+        const r = await apiPost('/playbook', { name: pb.name }, 'tab-run-' + pb.name + '-' + Date.now());
+        runBtn.disabled = false;
+        if (r && r.error) announce('Not run: ' + r.error, { tone: 'error', sticky: true });
+        else announce('Playbook ran.', { tone: 'ok' });
+      });
+      actions.appendChild(previewBtn);
+      actions.appendChild(runBtn);
+      row.appendChild(actions);
+      list.appendChild(row);
+    }
+    body.appendChild(list);
+  }
+
+  // Triggers tab — list every configured trigger (webhook + cron) and the firing log.
+  // Replay button for each row. Reads view.triggers + view.trigger_log (already shipped).
+  function renderTriggersTab(body) {
+    const trgs = (view && Array.isArray(view.triggers)) ? view.triggers : [];
+    const log = (view && Array.isArray(view.trigger_log)) ? view.trigger_log : [];
+    body.appendChild(el('h2', { className: 'ck-section-heading' }, ['Triggers']));
+    body.appendChild(el('p', { className: 'ck-muted' }, [
+      'Webhook and cron triggers fire a named playbook from .overture/triggers.json.'
+    ]));
+    if (!trgs.length && !log.length) {
+      const empty = el('div', { className: 'ck-firstrun' });
+      empty.appendChild(el('div', { className: 'ck-firstrun-title' }, ['No triggers configured']));
+      empty.appendChild(el('p', { className: 'ck-firstrun-pitch' }, [
+        'Edit ', el('code', {}, ['.overture/triggers.json']),
+        ' with a webhook token or a cron spec that fires a playbook. ',
+        'See the install guide for examples.'
+      ]));
+      body.appendChild(empty);
+      return;
+    }
+    if (trgs.length) {
+      body.appendChild(el('div', { className: 'ck-section-heading' }, ['Configured']));
+      const list = el('ul', { className: 'ck-trigger-list' });
+      for (const t of trgs) {
+        if (!t || typeof t.name !== 'string') continue;
+        const row = el('li', { className: 'ck-trigger-row' });
+        row.appendChild(el('code', { className: 'ck-trigger-name' }, [t.name]));
+        if (t.playbook) {
+          row.appendChild(el('span', { className: 'ck-muted' },
+            [' → ', el('code', {}, [t.playbook])]));
+        }
+        const kinds = Array.isArray(t.kinds) ? t.kinds : [];
+        if (kinds.length) row.appendChild(el('span', { className: 'ck-trigger-kinds ck-muted' },
+          [' · ' + kinds.join(' · ')]));
+        row.appendChild(renderTriggerReplayButton(t.name));
+        list.appendChild(row);
+      }
+      body.appendChild(list);
+    }
+    if (log.length) {
+      body.appendChild(el('div', { className: 'ck-section-heading' }, ['Recent firings']));
+      // Reuse the existing trigger-log renderer so the two surfaces stay consistent.
+      body.appendChild(renderTriggerLog([], log));
+    }
+  }
+
   function renderTriggerLog(triggers, log) {
     const wrap = el('details', { className: 'ck-item-chart ck-triggers' });
     if (triggerLogOpen) wrap.setAttribute('open', '');
@@ -3893,6 +4117,30 @@
 
   // Render receipt showing picks and rejected
   // Fix #6: wrap rejected in <s> with visually-hidden text for screen readers
+  // Render PR chips threaded to a ruling. Each chip opens the PR in a new tab.
+  // Merged PRs get a visibly distinct variant so the operator can see "this ruling shipped".
+  function renderPrBacklinks(backlinks) {
+    const wrap = el('div', { className: 'ck-pr-backlinks', role: 'group',
+      'aria-label': 'Pull requests that cite this ruling' });
+    wrap.appendChild(el('span', { className: 'ck-pr-backlinks-label' }, ['Shipped as: ']));
+    for (const pr of backlinks) {
+      if (!pr || typeof pr.number !== 'number') continue;
+      const merged = pr.state === 'merged' || !!pr.merged_at;
+      const chip = el('a', {
+        className: 'ck-pr-chip' + (merged ? ' ck-pr-chip-merged' : ''),
+        href: typeof pr.url === 'string' ? pr.url : '#',
+        target: '_blank',
+        rel: 'noopener',
+        'aria-label': 'Open pull request #' + pr.number + (merged ? ' (merged)' : ' (' + (pr.state || 'open') + ')')
+      }, [
+        el('span', { className: 'ck-pr-chip-glyph', 'aria-hidden': 'true' }, [merged ? '●' : '○']),
+        el('span', {}, ['#' + pr.number])
+      ]);
+      wrap.appendChild(chip);
+    }
+    return wrap;
+  }
+
   function renderReceipt(qData, answer) {
     const receipt = el('div', { className: 'ck-receipt' }, [
       el('div', { className: 'ck-receipt-heading' }, ['Your answer'])
@@ -6111,12 +6359,57 @@
     peers.sort((a, b) => String(a && a.name || '').localeCompare(String(b && b.name || '')));
     if (self) grid.appendChild(renderPortfolioCard(self, true));
     for (const p of peers) grid.appendChild(renderPortfolioCard(p, false));
+    // when no peers AND no self (true empty state), render the upgrade seam
+    // instead of the muted paragraph. If self is present but no peers, render the
+    // "add a second project" nudge below the self card so operators discover federation.
     if (!self && !peers.length) {
-      grid.appendChild(el('p', { className: 'ck-muted' },
-        ['No peers configured. Add some in .overture/portfolio.json and ',
-         el('code', {}, ['agent.py portfolio-token']),
-         ' for setup.']));
+      grid.appendChild(renderPortfolioUpgrade('empty'));
+    } else if (self && !peers.length) {
+      grid.appendChild(renderPortfolioUpgrade('solo'));
     }
+  }
+
+  // Portfolio upgrade card : the natural monetization seam — one project is free,
+  // many projects (portfolio federation) is where team pricing lives. Even without any
+  // paid tier, this card teaches operators the feature exists.
+  function renderPortfolioUpgrade(variant) {
+    const card = el('div', { className: 'ck-portfolio-upgrade', role: 'region',
+      'aria-label': 'Add a second project to your portfolio' });
+    const title = variant === 'solo'
+      ? 'Supervise more than one project at once'
+      : 'Add your first project';
+    const pitch = variant === 'solo'
+      ? 'This console is for one project. Point it at another Overture instance to see every project\'s awaiting-you questions in one place.'
+      : 'Overture becomes a portfolio when you point this console at other projects running their own Overture.';
+    card.appendChild(el('div', { className: 'ck-portfolio-upgrade-title' }, [title]));
+    card.appendChild(el('p', { className: 'ck-portfolio-upgrade-pitch' }, [pitch]));
+    const step = el('div', { className: 'ck-portfolio-upgrade-step' });
+    step.appendChild(el('div', { className: 'ck-portfolio-upgrade-steplabel' },
+      ['Add a peer from the other project\'s machine:']));
+    const pre = el('pre', { className: 'ck-portfolio-upgrade-code', tabindex: '0' });
+    pre.textContent =
+      '# On the other project\'s machine:\n' +
+      '/overture:portfolio-add https://this-console.your-domain.example\n\n' +
+      '# Or edit .overture/portfolio.json by hand (see the docs).';
+    step.appendChild(pre);
+    const copyBtn = el('button', { type: 'button', className: 'ck-btn ck-btn-quiet ck-portfolio-upgrade-copy' },
+      ['Copy']);
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText('/overture:portfolio-add https://this-console.your-domain.example');
+        announce('Copied', { tone: 'ok' });
+      } catch (_e) {
+        announce('Could not copy — select and copy manually', { tone: 'error' });
+      }
+    });
+    step.appendChild(copyBtn);
+    card.appendChild(step);
+    card.appendChild(el('p', { className: 'ck-portfolio-upgrade-doc' }, [
+      'Setup guide: ',
+      Object.assign(el('a', { href: 'https://github.com/MikeHeid/overture#portfolio',
+        target: '_blank', rel: 'noopener' }), { textContent: 'github.com/MikeHeid/overture#portfolio' })
+    ]));
+    return card;
   }
 
   function renderPortfolioCard(row, isSelf) {
@@ -6324,6 +6617,38 @@
                   text, ts: qr.ts || '', isSelf: true, url: '' });
     }
     return rows;
+  }
+
+  // "Living Rulings" is the product's most defensible mechanic — a locked ruling
+  // whose code anchor no longer holds raises itself for review. Pre-1.25 it read as a
+  // footnote; the badge elevates the count to top-of-fold on the Inbox. Zero → no badge.
+  function renderLivingRulingsBadge() {
+    const qs = view && view.questions ? view.questions : {};
+    const stale = Object.values(qs).filter(q => q && q.state === 'stale');
+    if (!stale.length) return null;
+    const chip = el('button', {
+      type: 'button',
+      className: 'ck-living-rulings',
+      'aria-label': stale.length + ' living rulings need review'
+    }, [
+      el('span', { className: 'ck-living-rulings-glyph', 'aria-hidden': 'true' }, [GLYPH.stale]),
+      el('span', { className: 'ck-living-rulings-count' }, [String(stale.length)]),
+      el('span', { className: 'ck-living-rulings-label' },
+        [' Living ruling' + (stale.length === 1 ? '' : 's') + ' need review']),
+    ]);
+    chip.addEventListener('click', () => {
+      // Narrow the filter to stale only, so the list focuses on what the badge named.
+      const f = inboxFilters();
+      memSet('inbox-filters', { ...f, awaiting_you: false, unlocked: false, stale: true, locked: false });
+      renderPanel();
+      // After the panel re-renders, bring the first stale question into view and focus it.
+      requestAnimationFrame(() => {
+        const first = panelEl.querySelector('.ck-question[data-state="stale"] summary, .ck-question[data-state="stale"]');
+        if (first && first.scrollIntoView) first.scrollIntoView({ block: 'start', behavior: reducedMotion && reducedMotion.matches ? 'auto' : 'smooth' });
+        if (first && first.focus) try { first.focus(); } catch (_e) {}
+      });
+    });
+    return chip;
   }
 
   function renderPriorityRibbon() {

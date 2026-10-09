@@ -1068,6 +1068,48 @@ class Console:
             out["view"] = {**out["view"], "drafts": DR.as_view(DR.load(self.cfg.state)["keys"])}
         except (DR.DraftError, OSError):
             out["view"] = {**out["view"], "drafts": {}}
+        # Rulings → PRs backlinks. Each locked ruling has a stable qid like "A/Q1";
+        # PR titles that mention a qid literally are threaded back to the question card so
+        # operators can see which shipped work ties to which ruling. Owner-door only (needs
+        # the PRs snapshot, which never travels to the agent door's /view).
+        try:
+            out["view"] = {**out["view"], "pr_backlinks": self._compute_pr_backlinks()}
+        except Exception as e:  # noqa: BLE001 — backlinks never fault the page
+            sys.stderr.write(f"console pr_backlinks: {type(e).__name__}: {e}\n")
+            out["view"] = {**out["view"], "pr_backlinks": {}}
+        return out
+
+    # scan PR titles for qid literals ("A/Q1", "A.1.2/Q7"). The ruling card renders
+    # a chip linking to each matching PR. Cheap: at most MAX_PRS * MAX_QUESTIONS regex sub-
+    # string checks, nothing network.
+    _QID_WORD = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?/Q\d+")
+    def _compute_pr_backlinks(self) -> dict:
+        try:
+            prs_doc = PR.load(self.cfg.state)
+        except OSError:
+            return {}
+        prs = prs_doc.get("prs") if isinstance(prs_doc, dict) else None
+        if not isinstance(prs, list):
+            return {}
+        qids: set[str] = set()
+        for q in V.build(self.store, self.items(), {}, names=self.names.mapping()).get("questions", {}).keys():
+            qids.add(q)
+        if not qids:
+            return {}
+        out: dict[str, list[dict]] = {}
+        for pr in prs:
+            if not isinstance(pr, dict):
+                continue
+            title = str(pr.get("title", ""))
+            # Pull every qid-shaped token from the title, intersect with real qids.
+            for m in self._QID_WORD.findall(title):
+                if m in qids:
+                    out.setdefault(m, []).append({
+                        "number": pr.get("number"),
+                        "url": pr.get("url"),
+                        "state": pr.get("state"),
+                        "merged_at": pr.get("merged_at"),
+                    })
         return out
 
     def push_items(self, body: object) -> dict:

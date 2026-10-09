@@ -517,6 +517,19 @@
   color: var(--c-blocked);
 }
 .ck-stale-banner strong { display: block; margin-bottom: 4px; }
+/* 1.25.0: "Living ruling" tag identifying the feature by name. */
+.ck-stale-tag {
+  display: inline-block;
+  padding: 1px 8px;
+  margin-bottom: 6px;
+  border-radius: 10px;
+  background: var(--c-blocked, #cf222e);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
 .ck-stale-list {
   margin: 6px 0 0 0;
   padding-left: 18px;
@@ -2420,6 +2433,242 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   min-height: 1em;
 }
 .ck-draft-hint[data-state="error"] { color: var(--c-blocked); }
+
+/* ========= Playbooks + Triggers tabs (1.25.0) ===============================
+   Promoted from the Delegate bar's select / collapsible log. */
+.ck-playbook-list, .ck-trigger-list {
+  list-style: none;
+  margin: 10px 16px;
+  padding: 0;
+}
+.ck-playbook-row, .ck-trigger-row {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+}
+.ck-playbook-head {
+  display: flex; align-items: baseline; gap: 6px;
+  margin-bottom: 4px;
+}
+.ck-playbook-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--c-fg);
+}
+.ck-playbook-steps { font-size: 12px; }
+.ck-playbook-desc {
+  margin: 4px 0 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--c-fg);
+}
+.ck-trigger-row {
+  display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap;
+}
+.ck-trigger-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--c-fg);
+}
+.ck-trigger-kinds { font-size: 12px; }
+
+/* ========= More ▾ overflow menu (1.25.0) ====================================
+   Lightweight dropdown anchored to the "More" tab button; folds Favorite + Chat
+   (and anything else moved out of the main bar). */
+.ck-tab-more { position: relative; }
+.ck-tab-more-caret { color: var(--c-fg-muted); }
+.ck-more-menu {
+  position: absolute;
+  z-index: 20;
+  min-width: 140px;
+  padding: 4px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+}
+.ck-more-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: var(--c-fg);
+  text-align: left;
+  font-size: 13px;
+  cursor: pointer;
+  min-height: 32px;
+}
+.ck-more-item:hover,
+.ck-more-item:focus-visible {
+  background: var(--c-surface-alt);
+}
+.ck-more-item:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+}
+
+/* ========= Rulings → PRs backlinks (1.25.0) =================================
+   A chip strip under a locked ruling showing every tracked PR whose title mentions
+   the qid. Merged PRs render filled (the ruling shipped); open/closed render as
+   outlines. The chip opens the PR in a new tab via its own URL. */
+.ck-pr-backlinks {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 6px 10px;
+  background: var(--c-built-bg, var(--c-surface-alt));
+  border: 1px solid color-mix(in srgb, var(--c-built, #1a7f37) 40%, var(--c-border));
+  border-left: 3px solid var(--c-built, #1a7f37);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.ck-pr-backlinks-label {
+  color: var(--c-fg-muted);
+  margin-right: 4px;
+}
+.ck-pr-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-fg);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+  min-height: 24px;
+}
+.ck-pr-chip:hover,
+.ck-pr-chip:focus-visible {
+  border-color: var(--c-accent);
+  background: var(--c-surface-alt);
+}
+.ck-pr-chip-glyph { color: var(--c-fg-muted); }
+.ck-pr-chip-merged {
+  background: var(--c-built, #1a7f37);
+  color: #fff;
+  border-color: var(--c-built, #1a7f37);
+}
+.ck-pr-chip-merged .ck-pr-chip-glyph { color: #fff; }
+.ck-pr-chip-merged:hover,
+.ck-pr-chip-merged:focus-visible {
+  background: color-mix(in srgb, var(--c-built, #1a7f37) 85%, black);
+  border-color: color-mix(in srgb, var(--c-built, #1a7f37) 85%, black);
+}
+
+/* ========= Portfolio upgrade card (1.25.0) ==================================
+   The seam between "one project (free)" and "many projects (federation)". Even
+   without paid tiering today, this card teaches operators the feature exists.
+   Visually distinct from a muted empty paragraph so it reads as "upgrade" not
+   "error". */
+.ck-portfolio-upgrade {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 20px 24px;
+  background: var(--c-surface);
+  border: 1px dashed var(--c-accent);
+  border-radius: var(--radius-md);
+}
+.ck-portfolio-upgrade-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--c-fg);
+}
+.ck-portfolio-upgrade-pitch {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--c-fg);
+}
+.ck-portfolio-upgrade-step {
+  position: relative;
+  padding: 12px 14px;
+  background: var(--c-surface-alt);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+}
+.ck-portfolio-upgrade-steplabel {
+  font-size: 13px;
+  color: var(--c-fg-muted);
+  margin-bottom: 8px;
+}
+.ck-portfolio-upgrade-code {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--c-bg);
+  border: 1px solid var(--c-border-light);
+  border-radius: var(--radius-sm);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--c-fg);
+  overflow-x: auto;
+  white-space: pre;
+}
+.ck-portfolio-upgrade-copy {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  min-height: 24px;
+}
+.ck-portfolio-upgrade-doc {
+  margin: 10px 0 0;
+  font-size: 13px;
+}
+.ck-portfolio-upgrade-doc a { color: var(--c-accent); }
+
+/* ========= Living Rulings badge (1.25.0) ====================================
+   A top-of-fold chip in the Inbox that elevates the stale-check mechanic from
+   footnote-inside-a-card to a visible pulse. Clicking narrows the filter to
+   stale rulings only and scrolls the first one into view. Hidden when zero. */
+.ck-living-rulings {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 16px;
+  padding: 10px 14px;
+  background: var(--c-blocked-bg, var(--c-surface-alt));
+  color: var(--c-fg);
+  border: 1px solid color-mix(in srgb, var(--c-blocked, #cf222e) 50%, var(--c-border));
+  border-left: 4px solid var(--c-blocked, #cf222e);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  width: calc(100% - 32px);
+  min-height: 36px;
+}
+.ck-living-rulings:hover,
+.ck-living-rulings:focus-visible {
+  background: color-mix(in srgb, var(--c-blocked, #cf222e) 10%, var(--c-surface));
+}
+.ck-living-rulings:focus-visible {
+  outline: 2px solid var(--c-blocked, #cf222e);
+  outline-offset: 2px;
+}
+.ck-living-rulings-glyph { font-size: 15px; line-height: 1; }
+.ck-living-rulings-count {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: var(--c-blocked, #cf222e);
+  color: #fff;
+}
+.ck-living-rulings-label { color: var(--c-fg); }
 
 /* ========= First-run hero (1.24.0) ==========================================
    Replaces the pre-1.24 muted-paragraph empty state ("before the steward's first
