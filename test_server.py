@@ -413,7 +413,11 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.req("GET", "/api/board", tok=token(key=OTHER))[0], 403)
         self.assertEqual(calls, [])  # refused before the register is read at all
         code, body = self.req("GET", "/api/board", tok=token())
-        self.assertEqual((code, body), (200, {"shape": "s", "values": {"pct": "5%"}}))
+        # 1.20.1: the server adds `items_tree` to values (kit-computed from items.json); the test
+        # asserts on the project's own `pct` plus the shape, and tolerates the extra kit key.
+        self.assertEqual(code, 200)
+        self.assertEqual(body["shape"], "s")
+        self.assertEqual(body["values"].get("pct"), "5%")
         self.assertEqual(len(calls), 1)
 
     def test_a_stored_items_file_that_fails_its_check_is_503_on_both_views_and_names_no_path(self):
@@ -1921,7 +1925,7 @@ class Phase4Tests(_Live, unittest.TestCase):
         # Catches: tags computed only in a test (never served), or config that never reaches the page.
         self.lock_seed()          # the seed cites architect/40-specs/..., outside this specs_dir: no refine
         view = self.get("/api/view")[1]["view"]
-        self.assertEqual(view["config"], {"specs_dir": "specs", "visuals_dir": "visuals"})
+        self.assertEqual(view["config"], {"specs_dir": "specs", "visuals_dir": "visuals", "sections": {}})
         self.assertIn("questions", view["tags"])
         # The seed picked "a" against the ★ "b": deliberate, with its reason.
         [t] = view["tags"]["questions"]["LANE.1/Q1"]
@@ -3494,7 +3498,7 @@ class OneServerTests(_OneServer, unittest.TestCase):
     AGENT_GETS = ("/view", "/check", "/health", "/history-wants", "/no-such-route")
     AGENT_POSTS = ("/items", "/prs", "/cursor", "/working", "/reanchor", "/visual", "/visual-export", "/question",
                    "/message", "/transcript", "/history-blob", "/history-specs", "/page-snapshot", "/anchor-proposal",
-                   "/refactor-advice", "/no-such-route")
+                   "/refactor-advice", "/playbook", "/item-move", "/no-such-route")
 
     def test_the_seam_is_the_only_admission_point(self):
         # K4 replaces `authorize` alone, so this is behaviour, not source text: with `authorize` refusing, EVERY
@@ -3592,7 +3596,9 @@ class OneServerTests(_OneServer, unittest.TestCase):
         self.stop()
         after = snapshot()
         self.assertEqual({k: v for k, v in after.items() if k in before}, before)   # nothing it had was touched
-        self.assertEqual(sorted(set(after) - set(before)), ["items.json", "server.lock"])   # the two it adds, only
+        # 1.20.1: the kit now also writes refs.json alongside items.json (dotted-number refs
+        # assigned on items-push); the test's whitelist grew by one.
+        self.assertEqual(sorted(set(after) - set(before)), ["items.json", "refs.json", "server.lock"])
         for tag, kit in kits.items():                          # the rollback: every released kit starts on it
             self.TK.start_old_server(kit, self.t / f"work-{tag}", fixture, stay=False)
 
@@ -7298,16 +7304,20 @@ class ScanTests(_Live, unittest.TestCase):
         self.assertEqual(self.advise(self.QID)[0], 200)
         old = Path(tempfile.mkdtemp(prefix="ck-old-"))
         self.addCleanup(lambda: __import__("shutil").rmtree(old, ignore_errors=True))
-        arc = subprocess.run(["git", "-C", str(repo), "archive", "v0.8.15", "plugin/kit/overture"],
+        # 1.20.1: v0.8.15 shipped the package as console_kit (renamed to overture at v1.0.0).
+        arc = subprocess.run(["git", "-C", str(repo), "archive", "v0.8.15", "plugin/kit/console_kit"],
                              capture_output=True, timeout=60)
         self.assertEqual(arc.returncode, 0, arc.stderr)
         subprocess.run(["tar", "-x", "-C", str(old)], input=arc.stdout, check=True, timeout=60)
         probe = old / "probe.py"
         probe.write_text(
-            "import json, sys\n"
+            "import json, sys, importlib\n"
             "sys.path.insert(0, sys.argv[1])\n"
             "from pathlib import Path\n"
-            "from overture import store as ST, view as V\n"
+            "try:\n"
+            "    ST = importlib.import_module('overture.store'); V = importlib.import_module('overture.view')\n"
+            "except ModuleNotFoundError:\n"
+            "    ST = importlib.import_module('console_kit.store'); V = importlib.import_module('console_kit.view')\n"
             "st = ST.Store(Path(sys.argv[2]))\n"
             "holds = V.make_evaluator(Path(sys.argv[3]), {})\n"
             "qs = {r['qid']: V.question_state(st, r, holds) for r in st.records() if r['type'] == 'question'}\n"

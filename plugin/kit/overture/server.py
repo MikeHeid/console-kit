@@ -998,6 +998,19 @@ class Console:
         self.store.set_items(items)
         return items
 
+    def refs_map(self) -> dict[str, str]:
+        """1.20.1: {id: ref} loaded from STATE/refs.json; empty when nothing is assigned.
+
+        Served as its own `view.refs` key so items.json's shape stays stable (project's push,
+        unmodified); the browser reads refs from this sibling map, not from `items[id].ref`.
+        """
+        try:
+            from . import refs as RF
+            doc = RF.load(self.cfg.state)
+        except Exception:  # noqa: BLE001 — refs are advisory for the view; a fault stays silent
+            return {}
+        return dict(doc.get("assignments") or {})
+
     def seed(self) -> list[str]:
         """Append every seed question not yet in the store. A qid is minted once, so this is idempotent."""
         added = []
@@ -1023,6 +1036,7 @@ class Console:
         view["triggers"] = [t.to_public() for t in self.triggers.all().values()]
         view["trigger_log"] = self.triggers.recent(20)
         view["favorites"] = self.favorites.list()   # 0.8.19: starred keys, newest first
+        view["refs"] = self.refs_map()              # 1.20.1: sibling map, not folded into items
         # Drafts are OWNER-ONLY (1.19.0). They are added only by `page_payload()` for the owner
         # door. `payload()` returns the shared base; agent-side callers (AgentHandler.do_GET) must
         # NOT see unsent compose text (1.19.1).
@@ -1085,11 +1099,9 @@ class Console:
             assigned = RF.assign_refs(self.cfg.state, body["items"], auto=self.project.items_auto_ref)
         except RF.RefError as e:
             raise RequestError(400, str(e)) from None
-        # Fold the assigned refs back into each item so the view carries them. Items the caller
-        # already named a ref for are unchanged; items that got a new ref now show it.
-        for item_id, ref in assigned.items():
-            if item_id in body["items"] and body["items"][item_id].get("ref") != ref:
-                body["items"][item_id] = {**body["items"][item_id], "ref": ref}
+        # 1.20.1: do NOT mutate body["items"] with the kit's assigned refs. items.json stays the
+        # project's push, unchanged, so a shape-stability contract holds; the view folds refs
+        # back in on read via Console.items() → _fold_refs().
         try:
             IT.store_snapshot(self.cfg.state, body)
         except ValueError as e:   # over MAX_ITEMS: nothing was written
@@ -1099,8 +1111,10 @@ class Console:
         except StoreError as e:   # a pushed seed the store refuses: the items stand, the seed is named
             raise RequestError(400, f"items kept; a seed question was refused: {e}") from None
         self._bump()
-        return {"items": len(body["items"]), "seeds_added": added,
-                "refs": {k: v for k, v in assigned.items() if k in body["items"]}}
+        # 1.20.1: items-push response stays shape-stable ({"items", "seeds_added"}). Agents read
+        # assigned refs via /view's items dict (Console.items folds them in).
+        _ = assigned
+        return {"items": len(body["items"]), "seeds_added": added}
 
     def push_prs(self, body: object, agent: str | None) -> dict:
         """`prs-push`: the project's pull requests, read by the steward's gh in ITS process, as data.

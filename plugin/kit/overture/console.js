@@ -368,10 +368,17 @@
   function appendTextWithRefs(target, body) {
     // Build a reverse map ref -> item id once per call; costs an O(items) walk, keeps the output simple.
     const byRef = {};
+    // 1.20.1: read refs from view.refs sibling map first, fall back to legacy items[id].ref
+    const refsMap = (view && view.refs) || {};
+    for (const id of Object.keys(refsMap)) {
+      const r = refsMap[id];
+      if (typeof r === 'string' && r) byRef[r] = id;
+    }
     const map = items || {};
     for (const id of Object.keys(map)) {
+      if (byRef[refsMap[id]]) continue;
       const r = (map[id] || {}).ref;
-      if (typeof r === 'string' && r) byRef[r] = id;
+      if (typeof r === 'string' && r && !(r in byRef)) byRef[r] = id;
     }
     REF_TOKEN.lastIndex = 0;
     let last = 0;
@@ -581,7 +588,7 @@
       const m = rest.match(INLINE);
       if (!m) { parent.appendChild(document.createTextNode(rest)); break; }
       const token = m[0];
-      // 1.20.0: snake_case guard. An underscore-wrapped match adjacent to a word char on either
+      // snake_case guard. An underscore-wrapped match adjacent to a word char on either
       // side (e.g. `foo_bar_baz`) is an identifier, not italic — pass it through literally.
       if (token.startsWith('_') && token.endsWith('_')) {
         const prev = m.index > 0 ? rest.charAt(m.index - 1) : '';
@@ -1274,9 +1281,10 @@
     for (const [id, label, hint] of tabs) cmds.push({ kind: 'tab', id, label, hint });
     for (const id of Object.keys(items || {})) {
       const it = items[id] || {};
-      const refPrefix = it.ref ? it.ref + ' · ' : '';
+      const r = itemRef(id);   // 1.20.1: read from view.refs sibling map
+      const refPrefix = r ? r + ' · ' : '';
       cmds.push({ kind: 'item', id, label: refPrefix + id + (it.title ? ' · ' + it.title : ''),
-                  hint: 'open', ref: it.ref || '',
+                  hint: 'open', ref: r,
                   // full-text search payload (title only; questions carry their own).
                   search: (it.title || '').toLowerCase() });
     }
@@ -5691,12 +5699,12 @@
     return card;
   }
 
-  // Per-item dotted-number ref assigned by the server (see refs.py). Returns "" when
-  // the item has no ref yet (older project, auto_ref off, or the ref didn't come down in this view).
+  // Per-item dotted-number ref assigned by the server. 1.20.1: read from view.refs (sibling map)
+  // rather than items[id].ref — items.json stays shape-stable with what the project pushed.
   function itemRef(id) {
+    if (view && view.refs && typeof view.refs[id] === 'string') return view.refs[id];
     const data = items && items[id];
-    const ref = data && typeof data.ref === 'string' ? data.ref : '';
-    return ref;
+    return (data && typeof data.ref === 'string') ? data.ref : '';
   }
   function renderItemRefTag(id) {
     const r = itemRef(id);
@@ -6020,9 +6028,15 @@
     // version strings and URLs the same way clickable refs in agent text do.
     if (found.length < PR_MAX_LINKS && items) {
       const byRef = {};
+      // 1.20.1: read refs from view.refs sibling map; fall back to legacy items[id].ref
+      const refsMap = (view && view.refs) || {};
+      for (const id of Object.keys(refsMap)) {
+        const r = refsMap[id];
+        if (typeof r === 'string' && r) byRef[r] = id;
+      }
       for (const id of Object.keys(items)) {
         const r = (items[id] || {}).ref;
-        if (typeof r === 'string' && r) byRef[r] = id;
+        if (typeof r === 'string' && r && !(r in byRef)) byRef[r] = id;
       }
       const REF_IN_TEXT = /(?<![A-Za-z0-9._\-/])([1-9][0-9]*(?:\.[1-9][0-9]*)*)(?![A-Za-z0-9._\-/])/g;
       for (const m of text.matchAll(REF_IN_TEXT)) {
