@@ -539,10 +539,16 @@
     const e = document.createElement(tag);
     if (attrs) {
       for (const k in attrs) {
-        if (k === 'className') e.className = attrs[k];
-        else if (k.startsWith('data')) e.setAttribute(k.replace(/[A-Z]/g, c => '-' + c.toLowerCase()), attrs[k]);
-        else if (k === 'textContent') e.textContent = attrs[k];
-        else e.setAttribute(k, attrs[k]);
+        const v = attrs[k];
+        // skip null / undefined / false so callers can write { disabled: shouldDisable }
+        // without accidentally emitting disabled="null" (which is truthy). Pre-1.30-dot-1 the variant
+        // Prev/Next buttons were permanently disabled because of this.
+        if (v == null || v === false) continue;
+        if (k === 'className') e.className = v;
+        else if (k.startsWith('data')) e.setAttribute(k.replace(/[A-Z]/g, c => '-' + c.toLowerCase()), v);
+        else if (k === 'textContent') e.textContent = v;
+        else if (v === true) e.setAttribute(k, '');
+        else e.setAttribute(k, v);
       }
     }
     if (children) {
@@ -1933,6 +1939,11 @@
   // Open panel
   function openPanel(itemId, mode) {
     lastFocused = document.activeElement;
+    // close any open Launch Idea / Branch Out when the operator navigates to a
+    // different item. Pre-1.30-dot-1 the pane's `itemId` could silently point at the previous
+    // item, so a spawn under this item wrote tickets under the wrong one.
+    if (launchIdeaState && launchIdeaState.itemId !== itemId) closeLaunchIdea();
+    if (branchOutState && branchOutState.itemId !== itemId) closeBranchOut();
     currentItem = itemId;
     currentMode = mode;
     fromInbox = false;
@@ -1971,6 +1982,10 @@
     dropLocksNotOnShow();
     closeStatusPop();                    // tear down the status drawer if it was open
     stopStatus();                        // stop polling when the panel is closed
+    // tear down any open aux pane; it was leaking state and the 380px dead gutter
+    // on panelEl.ck-with-launch when closePanel never explicitly closed it.
+    if (launchIdeaState) closeLaunchIdea();
+    if (branchOutState) closeBranchOut();
     applyDock();
     // Default-open stays dismissed for the session once the owner closes it.
     try { sessionStorage.setItem('ck-inbox-closed', '1'); } catch (e) { /* storage blocked */ }
@@ -1984,6 +1999,14 @@
     dropLocksNotOnShow();
     panelEl.textContent = '';
     pendingLive = false;
+    // persistent chrome (status chip, dock handle, aux pane) was being wiped on every
+    // redraw because it lived as a child of panelEl. The reviewer flagged this: pre-1.30-dot-1 the
+    // status chip was unreachable after the first render, and Launch Idea / Branch Out panes
+    // died mid-wizard on any live tick. Re-attach them AFTER the clear, and skip them from
+    // closing when the item changes — closeAuxPane() handles that explicitly in openPanel().
+    if (statusChip) panelEl.appendChild(statusChip);
+    if (dockHandle) panelEl.appendChild(dockHandle);
+    pendingLive = false;
     if (currentMode === 'inbox') {
       renderInbox();
       markSeen();
@@ -1995,6 +2018,12 @@
     } else if (currentItem) {
       renderItem(currentItem);
     }
+    // Keep the aux pane AT THE END of panelEl so it sits above everything. Re-append after
+    // mode-specific render so a Launch Idea in-flight survives a live tick without the user
+    // noticing. closeAuxPane() is called from openPanel() when currentItem changes, and from
+    // closePanel() when the whole panel is dismissed.
+    const auxPaneEl = document.getElementById('ck-launch-pane');
+    if (auxPaneEl) panelEl.appendChild(auxPaneEl);
   }
 
   // Render inbox mode
@@ -3965,13 +3994,13 @@
         'Variant ' + (idx + 1) + ' of ' + total + ' on this item' },
         ['v' + (idx + 1) + ' of ' + total]);
       titleBits.push(chip);
+      // `el()` now honors boolean false by skipping the attr, so this works correctly.
       const prev = el('button', { type: 'button', className: 'ck-btn ck-btn-quiet ck-visual-walk',
-        'aria-label': 'Previous variant', disabled: idx === 0 ? 'disabled' : null }, ['◂']);
+        'aria-label': 'Previous variant', disabled: idx === 0 }, ['◂']);
       const next = el('button', { type: 'button', className: 'ck-btn ck-btn-quiet ck-visual-walk',
-        'aria-label': 'Next variant', disabled: idx === total - 1 ? 'disabled' : null }, ['▸']);
+        'aria-label': 'Next variant', disabled: idx === total - 1 }, ['▸']);
       prev.addEventListener('click', () => walkToVariant(walkOrder, idx - 1));
       next.addEventListener('click', () => walkToVariant(walkOrder, idx + 1));
-      if (idx === 0) prev.removeAttribute('disabled'), prev.setAttribute('disabled', 'disabled');
       titleBits.push(prev, next);
     }
     titleBits.push(renderStarButton('visual:' + v.id, 'this visual'));
@@ -4825,6 +4854,8 @@
       // Clear the saved draft now that work has shipped.
       setDraft(LAUNCH_IDEA_DRAFT_KEY(launchIdeaState.itemId), '');
       closeLaunchIdea();
+      // redraw so the spawned tickets show in the fold immediately.
+      if (panelEl.getAttribute('data-open') === 'true') renderPanel();
     });
     wrap.appendChild(el('div', { className: 'ck-actions' }, [back, spawn]));
     return wrap;
@@ -5035,6 +5066,8 @@
         announce('Research ticket created.', { tone: 'ok' });
         setDraft(BRANCH_OUT_DRAFT_KEY(branchOutState.itemId), '');
         closeBranchOut();
+        // redraw so the new research ticket appears in the item's fold immediately.
+        if (panelEl.getAttribute('data-open') === 'true') renderPanel();
       }
     });
     // The deliberate-round spawn: write a message with intent "fork" to the item. The
@@ -5171,7 +5204,12 @@
         const r = await apiPost('/ticket-close', { id: t.id }, 'ticket-close-' + t.id);
         close.disabled = false;
         if (r && r.error) announce('Not closed: ' + r.error, { tone: 'error', sticky: true });
-        else announce('Ticket closed.', { tone: 'ok' });
+        else {
+          announce('Ticket closed.', { tone: 'ok' });
+          // redraw so the fold reflects the new status immediately. apiPost refetched
+          // view, but the live loop would see seq already current and skip onLive.
+          if (panelEl.getAttribute('data-open') === 'true') renderPanel();
+        }
       });
       actions.appendChild(close);
       row.appendChild(actions);
@@ -5212,6 +5250,9 @@
       title.value = '';
       bodyTa.value = '';
       announce('Ticket created.', { tone: 'ok' });
+      // redraw so the new ticket appears in the fold immediately. apiPost already
+      // refetched view, but no renderPanel call was reaching the DOM.
+      if (panelEl.getAttribute('data-open') === 'true') renderPanel();
     });
     const actions = el('div', { className: 'ck-actions' }, [create]);
     form.appendChild(el('label', { className: 'ck-ticket-field' }, [
@@ -8268,7 +8309,9 @@
     return t.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + time;
   }
 
-  function fmtAge(ms) {
+  // renamed from fmtAge → fmtAgeMs to end the hoist-shadow collision with the
+  // seconds-based fmtAge at the top of the file (the status drawer needs the seconds variant).
+  function fmtAgeMs(ms) {
     const m = Math.round(ms / 60000);
     if (m < 1) return 'just now';
     if (m < 60) return m + ' min ago';
@@ -8314,7 +8357,7 @@
       stale = age > USAGE_STALE_MS;
       parts.push('Claude usage: ' + usageWindow('5-hour', usage.usage.five_hour) + ', ' +
                  usageWindow('7-day', usage.usage.seven_day));
-      parts.push('as of ' + fmtAge(age));
+      parts.push('as of ' + fmtAgeMs(age));
     } else if (usage.usage_problem) {
       parts.push('Claude usage: ' + usage.usage_problem);
     }

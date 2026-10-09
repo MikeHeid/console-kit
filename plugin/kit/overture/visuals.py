@@ -64,53 +64,84 @@ MAX_DOC_BYTES = 256 * 1024     # a doc is a title, at most MAX_VISUAL_DOC charac
 MAX_INDEX_BYTES = 4 << 20
 NAME = re.compile(r"^([0-9a-f]{8})-([0-9a-f]{12})(\.mmd|\.html)\Z")
 
-# HTML sanitization. The sandboxed iframe already runs under `default-src 'none'` with no
-# `allow-scripts`, so inline `<script>` and `onerror=` can't fire in the browser — but defense-in-
-# breadth is cheap and the adversarial reviewer specifically asked for a server-side strip.
-# Patterns are case-insensitive. Order matters: strip whole dangerous elements first (with their
-# content), then dangerous attributes, then dangerous URL schemes.
+# HTML sanitization — DEFENSE IN BREADTH, NOT A SECURITY BOUNDARY.
+#
+# The real control is the sandboxed iframe (`sandbox=""`/`sandbox="allow-scripts"` with
+# `default-src 'none'`) that the server wraps every stored visual in; nothing here will stop a
+# malicious payload if the sandbox is relaxed. This stripper exists so a visual whose source
+# accidentally carries a `<script>` never gets stored with the dangerous bytes, and so a future
+# sandbox change does not instantly become live XSS. The 1.30-dot-1 review threads called this out
+# plainly: do not treat sanitize_html as a boundary.
+#
+# Patterns are case-insensitive. 1.30-dot-1 hardening:
+#   - leading whitespace capped at `\s{0,8}` so a long `<\s*` prefix cannot drive the regex
+#     quadratic on the 256 KiB input cap (cheap CPU-DoS otherwise)
+#   - `<svg>` added as a dangerous element (SVG islands host <script> and
+#     `<set attributeName=onload …>`)
+#   - `<link>` and `<xml-stylesheet>` added (CSS @import vectors)
+#   - `on*=` strip boundary includes `/`, `"`, `'` (previously only `\s`), so `<img/onerror=…>`
+#     and `<img src="x"/onerror=…>` no longer slip past
+#   - the JS-URL strip now matches UNQUOTED values too (`href=javascript:…` previously slipped)
+#   - sanitize_html loops until the strip count is zero (bounded to _SANITIZE_MAX_PASSES),
+#     defeating nested-tag reconstructions like `<scr<script></script>ipt>`.
 _HTML_STRIP_ELEMENTS = re.compile(
     # <style> is intentionally NOT stripped: CSS is inert under the sandbox's `default-src 'none';
     # style-src 'unsafe-inline'`, and prototypes without CSS are useless. Script-equivalent
     # elements only.
-    r"<\s*(?P<tag>script|iframe|frame|frameset|object|embed|form|applet)\b[^>]*>.*?<\s*/\s*(?P=tag)\s*>",
+    r"<\s{0,8}(?P<tag>script|iframe|frame|frameset|object|embed|form|applet|svg)\b[^>]*>.*?"
+    r"<\s{0,8}/\s{0,8}(?P=tag)\s{0,8}>",
     re.IGNORECASE | re.DOTALL,
 )
-# Self-closing or stray openers for the same dangerous elements, plus <meta http-equiv=refresh> and <base>.
 _HTML_STRIP_SELF = re.compile(
-    r"<\s*(?:script|iframe|frame|frameset|object|embed|form|applet|base)\b[^>]*/?>",
+    r"<\s{0,8}(?:script|iframe|frame|frameset|object|embed|form|applet|base|link|svg|xml-stylesheet)\b[^>]*/?>",
     re.IGNORECASE,
 )
 _HTML_STRIP_META_REFRESH = re.compile(
-    r"<\s*meta\b[^>]*\bhttp-equiv\s*=\s*['\"]?\s*refresh\b[^>]*>",
+    r"<\s{0,8}meta\b[^>]*\bhttp-equiv\s*=\s*['\"]?\s*refresh\b[^>]*>",
     re.IGNORECASE,
 )
-# Event-handler attributes: on* names, in any whitespace- or tag-boundary context.
 _HTML_STRIP_ON = re.compile(
-    r"\s(on[a-z]+)\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
+    r"[\s/\"'](on[a-z]+)\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
     re.IGNORECASE,
 )
-# javascript: and vbscript: URLs on href/src/action/formaction attributes.
 _HTML_STRIP_JS_URL = re.compile(
-    r"\s(href|src|action|formaction|xlink:href)\s*=\s*(?:\"\s*(?:javascript|vbscript|data)\s*:[^\"]*\""
-    r"|'\s*(?:javascript|vbscript|data)\s*:[^']*')",
+    r"\s(href|src|action|formaction|xlink:href)\s*=\s*"
+    r"(?:"
+    r"\"[\s]*(?:javascript|vbscript|data)\s*:[^\"]*\""
+    r"|'[\s]*(?:javascript|vbscript|data)\s*:[^']*'"
+    r"|(?:javascript|vbscript|data)\s*:[^\s>]*"
+    r")",
     re.IGNORECASE,
 )
+
+_SANITIZE_MAX_PASSES = 8
 
 
 def sanitize_html(html: str) -> tuple[str, int]:
-    """strip script/style/iframe/form/meta-refresh/on* /javascript: from HTML before storage.
+    """Strip script/iframe/form/svg/meta-refresh/on*/javascript: from HTML before storage.
 
-    Returns (cleaned, strip_count). Never raises; the sandbox is still the first line of defense,
-    this is layered on top. The output is encoded utf-8 by the caller and stored verbatim.
+    Returns (cleaned, strip_count). Never raises. BREADTH defense only — the sandboxed iframe
+    is the real control. A future feature that relaxes the sandbox must not treat this as the
+    boundary.
+
+    loops up to `_SANITIZE_MAX_PASSES` times so nested reconstructions like
+    `<scr<script></script>ipt>` are stripped on a later pass. `on*=` substitution replaces with a
+    single space so the surrounding tag stays well-formed. Each pass is bounded by MAX_VISUAL
+    (256 KiB) and the capped `\\s{0,8}` prefixes, so total work is O(MAX_VISUAL · passes).
     """
-    count = 0
-    out, n = _HTML_STRIP_ELEMENTS.subn("", html);               count += n
-    out, n = _HTML_STRIP_SELF.subn("", out);                     count += n
-    out, n = _HTML_STRIP_META_REFRESH.subn("", out);             count += n
-    out, n = _HTML_STRIP_ON.subn("", out);                       count += n
-    out, n = _HTML_STRIP_JS_URL.subn("", out);                   count += n
-    return out, count
+    out = html
+    total = 0
+    for _ in range(_SANITIZE_MAX_PASSES):
+        n = 0
+        out, k = _HTML_STRIP_ELEMENTS.subn("", out);     n += k
+        out, k = _HTML_STRIP_SELF.subn("", out);          n += k
+        out, k = _HTML_STRIP_META_REFRESH.subn("", out);  n += k
+        out, k = _HTML_STRIP_ON.subn(" ", out);           n += k
+        out, k = _HTML_STRIP_JS_URL.subn("", out);        n += k
+        total += n
+        if n == 0:
+            break
+    return out, total
 
 
 class VisualError(Exception):

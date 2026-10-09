@@ -2829,3 +2829,88 @@ Idea step 2 into a round-trip with real agent attention.
   question path enforces.
 - The grill button is disabled while in flight; a failure
   surfaces as a sticky error toast, not a swallowed error.
+
+## Patch (1.30.1)
+
+Five-reviewer post-1.30 pass surfaced real correctness bugs
+and defense-in-breadth gaps. 1.30.1 lands them.
+
+- **el() ignores false/null/undefined attrs.** Pre-1.30.1
+  `el('button', { disabled: null })` emitted `disabled="null"`
+  (truthy), permanently disabling the variant Prev/Next
+  buttons shipped in 1.29. One-line fix with wide impact.
+- **Status chip + dock handle survive a redraw.** Pre-1.30.1
+  these were children of `panelEl`, which `renderPanel`
+  wipes; after the first open the status chip polled
+  `/api/status` into a detached DOM node. Now re-attached
+  after every clear.
+- **Launch Idea / Branch Out survive a live tick.** Same
+  parent-is-wiped bug; the pane now re-attaches after every
+  render. `openPanel` closes the pane when the item changes
+  so a spawn can't write under the wrong item. `closePanel`
+  tears down any open pane and strips the dead 380px gutter.
+- **Tickets fold redraws after create / close / spawn.**
+  Pre-1.30.1 the "Ticket created" toast fired but the list
+  stayed empty — `apiPost` refetched the view but the live
+  loop skipped the redraw. Explicit `renderPanel()` after
+  every ticket write.
+- **fmtAge collision fixed.** Two function declarations
+  named `fmtAge` collided via hoisting; the status drawer
+  silently got the milliseconds variant when it needed
+  seconds. Renamed the second to `fmtAgeMs`.
+- **`sanitize_html` hardened.** Loops up to 8 passes to
+  defeat nested-tag reconstructions
+  (`<scr<script></script>ipt>`). Capped leading whitespace
+  at `\s{0,8}` against CPU-DoS. Added `<svg>`, `<link>`,
+  `<xml-stylesheet>` to the strip list. `on*=` boundary
+  includes `/`, `"`, `'` so `<img/onerror=…>` no longer
+  slips. `javascript:` URLs on unquoted attributes are now
+  stripped. **Note**: the CHANGELOG for 1.29 overstated this
+  as "defense in breadth"; the sandboxed iframe
+  (`default-src 'none'` + `sandbox=""`) is still the real
+  control.
+- **CSP tightened on main page.** Added `object-src 'none';
+  base-uri 'none'`. `script-src 'self'` deferred to a release
+  that threads a per-request nonce into the inline script
+  injection — Console inlines all its JS via `publish.py`.
+- **CSRF compare → `hmac.compare_digest`.** Constant-time
+  compare closes the timing side-channel on the token.
+- **Agent-door `/playbook` writes `by="agent"`.** Pre-1.30.1
+  an agent that could author `.overture/playbooks/*.json`
+  could run it via the agent socket and forge owner-only
+  intents under `by: owner`. The schema's OWNER_INTENTS
+  check now refuses forged intents by name instead of
+  trusting the handler.
+- **`_write_working` + `set_cursor` via `atfile.write_at`.**
+  Both pre-1.30.1 wrote to a fixed `.tmp` sibling with
+  `write_text` — no `O_NOFOLLOW`, no `O_EXCL`, no fsync, no
+  lock. Two concurrent `/cursor` POSTs raced on the same
+  temp, and a symlink planted at the path would be followed.
+  Both now use the same atomic path as `drafts.json`,
+  `tickets.json`, `issues.json`.
+- **Tickets load no longer deletes malformed rows.**
+  Pre-1.30.1 any row that failed the current shape check was
+  dropped on load; the next save rewrote the file without
+  it. If an operator ever upgraded past a kind rename, the
+  older tickets disappeared. Now `load` keeps all rows with
+  a well-formed id key; `as_view` filters at render time.
+  A stderr line reports how many rows the parse ignored.
+- **Ticket id bumped from 32 → 64 bits.** `token_urlsafe(4)`
+  had a birthday-collision horizon around 93k tickets.
+  `token_urlsafe(8)` pushes it past 4 billion.
+
+### Trust
+
+- Every file-system write still goes through `atfile.write_at`
+  (O_NOFOLLOW on dir fd, O_EXCL temp file, fsync, rename).
+  The `_working_lock` now covers both the cursor and the
+  working write so they are one atomic sequence.
+- CSRF token lifetime is unchanged (boot-scoped). A rotation
+  endpoint remains a 1.31 item.
+- Sanitizer is clearly labeled as breadth, not boundary. The
+  CSP sandbox around every stored visual is unchanged.
+- Agent-door `/playbook` continues to run the owner's own
+  playbooks from the agent socket; what changed is only the
+  authorship of the resulting message records. `_check_message`
+  still refuses OWNER_INTENTS from `by: agent`, so forged
+  owner intents like `fork` cannot land through this path.
