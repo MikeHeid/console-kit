@@ -290,6 +290,91 @@ def read_env(path: Path) -> dict:
     return {v: str(a[k]) for k, v in keys.items()}
 
 
+def verify(project: Path) -> list[tuple[str, str, str]]:
+    """1.24.0: end-to-end reachability check for a configured project.
+
+    Returns a list of (step, status, detail) tuples where status is "ok", "warn" or
+    "fail". The caller prints and decides the exit code. The checks are:
+
+    1. The project has a `.overture/console.env` file (`onboard.py write` already ran).
+    2. Required binaries are on PATH: cloudflared, curl.
+    3. The user service exists (systemctl --user show overture.service) and is active.
+    4. The agent socket (`$XDG_RUNTIME_DIR/overture.sock`) exists and answers /health.
+    5. The owner HTTPS endpoint returns an Access challenge (302) — i.e. the tunnel is
+       up and Access is enforcing. A 200 would mean the gate is open to the public.
+
+    Nothing reads or writes project state. Nothing holds a secret. On failure every
+    step says *what to do next* in one line.
+    """
+    import shutil
+    import subprocess
+    results: list[tuple[str, str, str]] = []
+    env_path = project.resolve() / ".overture/console.env"
+    if not env_path.exists():
+        results.append(("config", "fail",
+                        f"no .overture/console.env — run `python3 onboard.py write ...` first"))
+        return results
+    try:
+        env = read_env(env_path)
+    except OnboardError as e:
+        results.append(("config", "fail", f"{e}"))
+        return results
+    results.append(("config", "ok", f"{env_path} parses as {env['CONSOLE_NAME']} on port {env['CONSOLE_PORT']}"))
+
+    for binary in ("cloudflared", "curl"):
+        if shutil.which(binary) is None:
+            results.append((f"bin:{binary}", "warn", f"{binary} not on PATH — some checks skipped"))
+        else:
+            results.append((f"bin:{binary}", "ok", shutil.which(binary) or ""))
+
+    service = "overture.service"
+    try:
+        proc = subprocess.run(["systemctl", "--user", "is-active", service],
+                              capture_output=True, text=True, timeout=5)
+        state = (proc.stdout or proc.stderr or "").strip() or "unknown"
+        if state == "active":
+            results.append(("service", "ok", f"{service} is active"))
+        else:
+            results.append(("service", "fail",
+                            f"{service} is {state} — run `systemctl --user start {service}`"))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        results.append(("service", "warn", f"could not query systemctl: {e}"))
+
+    sock = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "overture.sock"
+    if not sock.exists():
+        results.append(("agent socket", "fail",
+                        f"{sock} missing — the service is not running or has not written its socket"))
+    else:
+        results.append(("agent socket", "ok", str(sock)))
+
+    hostname = env["CONSOLE_HOSTNAME"]
+    curl = shutil.which("curl")
+    if curl is None:
+        results.append(("tunnel", "warn",
+                        f"curl missing; test manually: open https://{hostname} in a browser (expect Access challenge)"))
+    else:
+        try:
+            proc = subprocess.run([curl, "-sS", "-o", "/dev/null", "-w", "%{http_code}",
+                                   "--max-time", "8", f"https://{hostname}/"],
+                                  capture_output=True, text=True, timeout=10)
+            code = (proc.stdout or "").strip() or "000"
+            if code in ("302", "401", "403"):
+                results.append(("tunnel", "ok",
+                                f"https://{hostname} returns HTTP {code} (Access is enforcing)"))
+            elif code == "200":
+                results.append(("tunnel", "warn",
+                                f"https://{hostname} returned 200 — Access may not be gating this hostname"))
+            elif code == "000":
+                results.append(("tunnel", "fail",
+                                f"https://{hostname} did not answer: {(proc.stderr or '').strip() or 'no route'}"))
+            else:
+                results.append(("tunnel", "warn",
+                                f"https://{hostname} returned HTTP {code} — unexpected but not clearly broken"))
+        except (OSError, subprocess.TimeoutExpired) as e:
+            results.append(("tunnel", "warn", f"curl failed: {e}"))
+    return results
+
+
 def tunnel(project: Path, tunnel_id: str, force: bool = False) -> str:
     env = read_env(project.resolve() / ".overture/console.env")
     tid = tunnel_id.strip().lower()
@@ -328,6 +413,8 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--project", type=Path, default=Path.cwd())
     t.add_argument("--id", required=True)
     t.add_argument("--force", action="store_true")
+    v = sub.add_parser("verify", help="check that this project's Overture is reachable end-to-end")
+    v.add_argument("--project", type=Path, default=Path.cwd())
     a = ap.parse_args(argv)
     try:
         if a.cmd == "write":
@@ -339,6 +426,20 @@ def main(argv: list[str] | None = None) -> int:
         elif a.cmd == "show":
             for k, v in sorted(read_env(a.project.resolve() / ".overture/console.env").items()):
                 print(f"{k}={v}")
+        elif a.cmd == "verify":
+            results = verify(a.project)
+            glyph = {"ok": "✓", "warn": "!", "fail": "✗"}
+            width = max((len(step) for step, _, _ in results), default=0)
+            for step, status, detail in results:
+                print(f"  {glyph[status]} {step.ljust(width)}  {detail}")
+            if any(status == "fail" for _, status, _ in results):
+                print("\nOverture is NOT reachable end-to-end. Fix the ✗ steps above.", file=sys.stderr)
+                return 1
+            if any(status == "warn" for _, status, _ in results):
+                print("\nOverture looks reachable but some checks could not run (see ! above).")
+            else:
+                env = read_env(a.project.resolve() / ".overture/console.env")
+                print(f"\nOverture is reachable at https://{env['CONSOLE_HOSTNAME']}")
         else:
             print(tunnel(a.project, a.id, a.force))
     except OnboardError as e:

@@ -2895,6 +2895,7 @@ def spec_question(v1: str) -> dict:
 SPAWN_ALLOWED = {
     "overture/gitseam.py": "the one door for git; it starts nothing once the server closes it",
     "agent.py": "run by an agent inside its own jail; the server process never imports it",
+    "onboard.py": "operator setup/verify tool (1.24.0 verify runs curl/systemctl); never imported by the server",
     "tools/": "operator tools (verify_vendor.py runs git on a kit clone); never imported by the server",
 }
 SPAWN_MODULES = ("subprocess", "pty", "multiprocessing")

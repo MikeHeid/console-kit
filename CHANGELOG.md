@@ -2351,3 +2351,78 @@ the information architecture.
   loopback refusals still gate it.
 - No new secrets, no new disk writes beyond what install
   notice already does, and no change to peer federation.
+
+## First thirty seconds (1.24.0)
+
+If 1.23 made the console honest, 1.24 makes it welcoming. The
+UX principal and accessibility auditor both pointed at the
+same moment: the first thirty seconds a new operator spends
+in Overture. The dock button renders a bare "?", the empty
+Inbox shows filesystem paths as "guidance", the dock takes
+50% of a 27" monitor on first open, and the fragment viewer
++ palette + playbook preview + digest + shortcut help leak
+focus the moment you Tab out of them. 1.24 fixes all of it.
+
+- **First-run hero.** The Q24 muted-paragraph empty state is
+  replaced with a real welcome: title, one-sentence pitch,
+  the exact `/overture:items-push 'build the ingest service'`
+  one-liner (with Copy), and the server's filesystem note
+  folded under "How this works". Fires only when the server
+  says there is nothing to show.
+- **Inbox button loads cleanly.** The pre-load `"?"` becomes
+  a muted inbox glyph (`✉`). On load the count renders as a
+  real number — "0" for an empty inbox (muted) instead of a
+  blank chip that reads as "nothing to click on". The dock
+  strip still hides the count when zero (44 px is too narrow
+  for text).
+- **`onboard.py verify`.** A new subcommand that checks the
+  full chain end-to-end: `.overture/console.env` parses,
+  `cloudflared` + `curl` on PATH, `overture.service` is
+  active, agent socket exists, the owner HTTPS endpoint
+  returns an Access challenge (302/401/403). On full success
+  prints `Overture is reachable at https://<hostname>`;
+  otherwise a per-step ✓/!/✗ diagnosis.
+- **Focus trap + return on secondary modals.** Fragment
+  viewer, command palette, playbook preview, digest, and
+  shortcut help each gained `attachDialogAccessibility`:
+  Tab/Shift-Tab stay inside the dialog, focus returns to
+  whatever had it when the dialog opened. The main panel's
+  existing trap was refactored to share the implementation
+  (`trapFocusIn`), eliminating duplicate code.
+- **Textarea accessible names.** Chat compose and Delegate
+  brief both gained `aria-label` (`"Message the agent"` /
+  `"Brief for the delegate"`). Placeholder text alone is not
+  a programmatic label and vanishes on typing. Delegate
+  status moves from `role=alert` (interruptive, double
+  announcement) to `role=status` + `aria-live=polite`.
+- **Dock defaults to 420 px, remembered per project.** The
+  pre-1.24 `50vw` default ate half of a 27" monitor on first
+  open. New default is 420 px; a drag handle on the panel's
+  left edge resizes live and persists to localStorage via
+  `storeKey`. Keyboard: `←` grows, `→` shrinks, `Shift` for
+  48 px steps, `Home`/`End` snap to max/min. Role=separator,
+  with `aria-valuenow`/min/max.
+- **Inbox rows become real buttons.** The recently-answered
+  and awaiting-agent rows had `tabindex="0"` but no
+  `keydown` handler — a keyboard operator could focus them
+  but not open them. Both now have `role="button"` + Enter/
+  Space activation + explicit `aria-label`. The portfolio
+  self card had the same dead-focus-stop pattern; it loses
+  `tabindex` entirely since it has no action.
+
+### Trust
+
+- The dock resize handle writes to localStorage only; no
+  server round-trip. Width is clamped to [320, 60vw] on
+  every apply, so stored junk cannot push the panel off
+  screen.
+- `onboard verify` runs read-only probes: `systemctl is-active`,
+  socket existence check, `curl` with `--max-time 8`. Nothing
+  touches state. The HTTPS probe hits `/` and expects an
+  Access challenge; a 200 is flagged as a warning (the gate
+  may not be enforcing).
+- The first-run hero renders only the server-provided
+  `view.items_note` as textContent — no HTML pass-through.
+- No new secrets, no new network callers, no change to peer
+  federation. The accessibility work is layered on top of
+  the 1.23 toast + chip plumbing without touching it.

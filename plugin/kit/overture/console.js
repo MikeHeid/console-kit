@@ -28,6 +28,10 @@
   let statusPop = null;          // expanded status drawer
   let statusLast = null;         // last /api/status body
   let statusTimer = null;        // 30s refetch interval handle
+  let dockHandle = null;         // drag handle on docked panel's left edge
+  const DOCK_W_MIN = 320;        // px; narrower cuts off the inbox tab strip
+  const DOCK_W_MAX_FRAC = 0.6;   // never eat more than 60% of the viewport
+  const DOCK_W_DEFAULT = 420;
   // AB-2/Q2 (owner): at 1024px and wider the panel is a column docked on the
   // right, not an overlay; it starts collapsed to a strip with an unread badge.
   const DOCK_QUERY = '(min-width: 1024px)';
@@ -709,8 +713,11 @@
     dlg.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closeFragmentViewer(); } });
     dlg.addEventListener('click', e => { if (e.target === dlg) closeFragmentViewer(); });
     document.body.appendChild(dlg);
+    // Tab/Shift-Tab stay inside the dialog; focus returns to the fragment chip on close.
+    fragViewerTeardown = attachDialogAccessibility(dlg);
     requestAnimationFrame(() => closeBtn.focus());
   }
+  let fragViewerTeardown = null;
 
   // Minimal safe Markdown-to-DOM renderer. Blocks: # / ## / ### headings, ordered / unordered
   // lists, fenced ```code``` blocks (preformatted), blockquotes, horizontal rules, paragraphs.
@@ -843,7 +850,9 @@
   }
   function closeFragmentViewer() {
     const dlg = document.getElementById('ck-frag-view');
-    if (dlg) dlg.remove();
+    if (!dlg) return;
+    if (fragViewerTeardown) { try { fragViewerTeardown(); } catch (_e) {} fragViewerTeardown = null; }
+    dlg.remove();
   }
 
   // Format relative time
@@ -1152,8 +1161,11 @@
     if (unread) label += ', ' + unread + ' new since you last looked';
     for (const b of [inboxBtn, dockStrip]) {
       if (!b) continue;
+      // Mark the button as having a real count now; CSS can treat the empty
+      // state differently from "loading" (which uses the inbox glyph).
+      b.setAttribute('data-loaded', 'true');
       const countEl = b.querySelector('.ck-inbox-count');
-      if (countEl) countEl.textContent = total || '';
+      if (countEl) countEl.textContent = total > 0 ? String(total) : '0';
       const newEl = b.querySelector('.ck-new-count');
       if (newEl) {
         const was = newEl.textContent;
@@ -1171,6 +1183,87 @@
 
   // Docked (desktop) or overlay (narrower): one panel, two presentations.
   function isDocked() { return !!(dockMedia && dockMedia.matches); }
+
+  // dock-width persistence + drag resize.
+  function dockWidthMax() { return Math.max(DOCK_W_MIN, Math.floor(window.innerWidth * DOCK_W_MAX_FRAC)); }
+  function clampDockWidth(w) {
+    const n = Math.round(Number(w) || 0);
+    if (!isFinite(n) || n <= 0) return DOCK_W_DEFAULT;
+    return Math.max(DOCK_W_MIN, Math.min(dockWidthMax(), n));
+  }
+  function readStoredDockWidth() {
+    try {
+      const raw = memGet('dock-width');
+      if (raw == null) return DOCK_W_DEFAULT;
+      return clampDockWidth(raw);
+    } catch (_e) { return DOCK_W_DEFAULT; }
+  }
+  function applyDockWidth(w) {
+    const width = clampDockWidth(w == null ? readStoredDockWidth() : w);
+    document.documentElement.style.setProperty('--ck-col', width + 'px');
+    if (dockHandle) {
+      dockHandle.setAttribute('aria-valuenow', String(width));
+      dockHandle.setAttribute('aria-valuemin', String(DOCK_W_MIN));
+      dockHandle.setAttribute('aria-valuemax', String(dockWidthMax()));
+    }
+    return width;
+  }
+  function saveDockWidth(w) {
+    const width = clampDockWidth(w);
+    try { memSet('dock-width', String(width)); } catch (_e) {}
+  }
+  function attachDockResize(handle) {
+    let dragging = false;
+    let pointerId = null;
+    const onMove = e => {
+      if (!dragging) return;
+      // Panel is anchored to the right; width = viewport right - pointer X.
+      const next = window.innerWidth - e.clientX;
+      applyDockWidth(next);
+    };
+    const onUp = e => {
+      if (!dragging) return;
+      dragging = false;
+      try { handle.releasePointerCapture(pointerId); } catch (_e) {}
+      pointerId = null;
+      handle.classList.remove('ck-dock-handle-active');
+      // Persist whatever width ended up applied.
+      const curr = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--ck-col'), 10);
+      saveDockWidth(curr || DOCK_W_DEFAULT);
+    };
+    handle.addEventListener('pointerdown', e => {
+      if (!isDocked()) return;        // handle is CSS-hidden; defence-in-depth
+      e.preventDefault();
+      dragging = true;
+      pointerId = e.pointerId;
+      try { handle.setPointerCapture(pointerId); } catch (_e) {}
+      handle.classList.add('ck-dock-handle-active');
+    });
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onUp);
+    handle.addEventListener('pointercancel', onUp);
+    // Keyboard: ← grows the column (panel is right-anchored, so left = wider),
+    // → shrinks. 16px per step, 48px per Shift+arrow. Home / End snap.
+    handle.addEventListener('keydown', e => {
+      if (!isDocked()) return;
+      const curr = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--ck-col'), 10) || DOCK_W_DEFAULT;
+      let next = curr;
+      const step = e.shiftKey ? 48 : 16;
+      if (e.key === 'ArrowLeft') next = curr + step;
+      else if (e.key === 'ArrowRight') next = curr - step;
+      else if (e.key === 'Home') next = dockWidthMax();
+      else if (e.key === 'End') next = DOCK_W_MIN;
+      else return;
+      e.preventDefault();
+      const applied = applyDockWidth(next);
+      saveDockWidth(applied);
+    });
+    // Re-clamp on viewport resize (max tracks viewport width).
+    window.addEventListener('resize', () => {
+      if (!isDocked()) return;
+      applyDockWidth();
+    });
+  }
 
   // Put the panel's attributes and the page's reserved space in step with the
   // current width and open state. The page keeps the room through classes on
@@ -1356,9 +1449,12 @@
     statusChip.addEventListener('click', toggleStatusPop);
     panelEl.appendChild(statusChip);
 
-    // Until /view has loaded once the count is unknown: "?" says so, where "0"
-    // would read as "nothing waiting". updateInboxButton replaces it.
-    const UNKNOWN = 'Open inbox (not loaded yet)';
+    // Pre-load: show a small inbox glyph (decorative, aria-hidden) instead of a
+    // bare "?". The glyph is a universal icon for "nothing to read yet" that
+    // doesn't ask the user a question, and the aria-label still says the state.
+    // Once /view loads, updateInboxButton replaces the glyph with the real count.
+    const UNKNOWN = 'Open inbox (loading)';
+    const inboxGlyph = () => el('span', { className: 'ck-inbox-glyph', 'aria-hidden': 'true' }, ['✉']);
 
     // Inbox button
     inboxBtn = el('button', {
@@ -1367,11 +1463,12 @@
       'aria-label': UNKNOWN
     }, [
       el('span', {}, ['Inbox']),
-      el('span', { className: 'ck-inbox-count' }, ['?']),
+      el('span', { className: 'ck-inbox-count' }, [inboxGlyph()]),
       el('span', { className: 'ck-agent-count', 'aria-hidden': 'true' }, ['']),
       el('span', { className: 'ck-new-count', 'aria-hidden': 'true' }, [''])
     ]);
     inboxBtn.setAttribute('data-new-empty', 'true');
+    inboxBtn.setAttribute('data-loaded', 'false');
     inboxBtn.addEventListener('click', () => openPanel(null, 'inbox'));
     document.body.appendChild(inboxBtn);
 
@@ -1384,13 +1481,29 @@
       'aria-controls': 'ck-panel'
     }, [
       el('span', { className: 'ck-dock-label' }, ['Inbox']),
-      el('span', { className: 'ck-inbox-count' }, ['?']),
+      el('span', { className: 'ck-inbox-count' }, [inboxGlyph()]),
       el('span', { className: 'ck-agent-count', 'aria-hidden': 'true' }, ['']),
       el('span', { className: 'ck-new-count', 'aria-hidden': 'true' }, [''])
     ]);
     dockStrip.setAttribute('data-new-empty', 'true');
+    dockStrip.setAttribute('data-loaded', 'false');
     dockStrip.addEventListener('click', () => openPanel(null, 'inbox'));
     document.body.appendChild(dockStrip);
+
+    // drag handle on the panel's left edge. Visible only when docked;
+    // pointer-drag resizes the column live and persists to localStorage on release.
+    // ARIA: role=separator, aria-orientation=vertical, with arrow-key support so a
+    // keyboard operator can resize without a pointer.
+    dockHandle = el('div', {
+      className: 'ck-dock-handle',
+      role: 'separator',
+      'aria-orientation': 'vertical',
+      'aria-label': 'Resize dock column',
+      tabindex: '0'
+    });
+    attachDockResize(dockHandle);
+    panelEl.appendChild(dockHandle);
+    applyDockWidth();
 
     dockMedia = window.matchMedia ? window.matchMedia(DOCK_QUERY) : null;
     if (dockMedia) {
@@ -1501,10 +1614,14 @@
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeShortcutHelp(); }
     });
     document.body.appendChild(dlg);
+    // Tab/Shift-Tab stay inside; focus returns to the trigger on close.
+    shortcutHelpTeardown = attachDialogAccessibility(dlg);
     close.focus();
   }
+  let shortcutHelpTeardown = null;
   function closeShortcutHelp() {
     const dlg = document.getElementById('ck-shortcut-help');
+    if (shortcutHelpTeardown) { try { shortcutHelpTeardown(); } catch (_e) {} shortcutHelpTeardown = null; }
     if (dlg) dlg.remove();
   }
 
@@ -1630,8 +1747,11 @@
       if (e.key === 'Enter') { e.preventDefault(); runPaletteSelected(); return; }
     });
     dlg.addEventListener('click', e => { if (e.target === dlg) closePalette(); });
+    // focus plumbing — Tab/Shift-Tab stay inside; focus returns to opener on close.
+    paletteTeardown = attachDialogAccessibility(dlg);
     requestAnimationFrame(() => input.focus());
   }
+  let paletteTeardown = null;
 
   function paintPalette(list) {
     list.textContent = '';
@@ -1707,6 +1827,7 @@
 
   function closePalette() {
     const dlg = document.getElementById('ck-palette');
+    if (paletteTeardown) { try { paletteTeardown(); } catch (_e) {} paletteTeardown = null; }
     if (dlg) dlg.remove();
     paletteState.open = false;
   }
@@ -1747,9 +1868,17 @@
     // Only controls that are rendered: the ← Back button is display:none above
     // 399px, and counting it as `first` let Shift+Tab out of the modal and left
     // Tab from the last control focusing nothing.
-    const focusable = Array.from(panelEl.querySelectorAll(
+    trapFocusIn(panelEl, e);
+  }
+
+  // Generic Tab/Shift-Tab trap inside a dialog element. Used by the main panel's
+  // trapFocus (overlay mode only) and by every secondary dialog (fragment viewer,
+  // palette, playbook preview, digest, shortcut help) via attachDialogAccessibility.
+  function trapFocusIn(root, e) {
+    if (e.key !== 'Tab') return;
+    const focusable = Array.from(root.querySelectorAll(
       'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-    )).filter(e => e.getClientRects().length > 0 && !e.disabled);
+    )).filter(n => n.getClientRects().length > 0 && !n.disabled);
     if (focusable.length === 0) return;
     const first = focusable[0];
     const last = focusable[focusable.length - 1];
@@ -1760,6 +1889,23 @@
       e.preventDefault();
       first.focus();
     }
+  }
+
+  // wrap a secondary dialog with WCAG-correct focus plumbing — Tab/Shift-Tab
+  // stay inside the dialog, and focus returns to whatever had it when the dialog
+  // opened. Returns a `teardown()` the caller invokes on close.
+  function attachDialogAccessibility(dialog, opts) {
+    const returnTo = (opts && opts.returnTo) || document.activeElement;
+    const onKey = e => trapFocusIn(dialog, e);
+    dialog.addEventListener('keydown', onKey);
+    return function teardown() {
+      dialog.removeEventListener('keydown', onKey);
+      // Only restore focus if the opener is still in the DOM AND nothing else has
+      // claimed focus since (e.g. the user clicked somewhere else explicitly).
+      if (returnTo && returnTo.focus && document.contains(returnTo)) {
+        try { returnTo.focus(); } catch (_e) { /* best effort */ }
+      }
+    };
   }
 
   // Open panel
@@ -1910,12 +2056,63 @@
     if (t) t.focus();
   }
 
+  // First-run hero : what someone sees on an Overture instance that has no items yet.
+  // Replaces the pre-1.24 muted-paragraph "Q24" placeholder with: a plain-English pitch, the
+  // real one-liner that pushes an item, and a collapsed "How this works" with the filesystem
+  // paths. Fires only when the server says there is nothing to show.
+  function renderFirstRunHero(serverNote) {
+    const hero = el('div', { className: 'ck-firstrun', role: 'region', 'aria-label': 'Welcome to Overture' });
+    hero.appendChild(el('h2', { className: 'ck-firstrun-title' }, ['Welcome to Overture.']));
+    hero.appendChild(el('p', { className: 'ck-firstrun-pitch' }, [
+      'This is the cockpit where you supervise your AI coding agents. When they hit a decision ',
+      'they need you to make — a schema shape, a product trade-off, a destructive command — they ',
+      'raise it here instead of guessing. You answer, lock the ruling, and they resume.'
+    ]));
+    // The one real action an operator can take right now: push the first item.
+    const push = el('div', { className: 'ck-firstrun-push' });
+    push.appendChild(el('div', { className: 'ck-firstrun-step' }, ['Push your first item from the agent side:']));
+    const pre = el('pre', { className: 'ck-firstrun-code', tabindex: '0' });
+    pre.textContent =
+      '# From inside your project, with Claude Code running:\n' +
+      "/overture:items-push 'build the ingest service'";
+    push.appendChild(pre);
+    const copyBtn = el('button', { type: 'button', className: 'ck-btn ck-btn-quiet ck-firstrun-copy' }, ['Copy']);
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText("/overture:items-push 'build the ingest service'");
+        announce('Copied', { tone: 'ok' });
+      } catch (_e) {
+        announce('Could not copy — select and copy manually', { tone: 'error' });
+      }
+    });
+    push.appendChild(copyBtn);
+    hero.appendChild(push);
+    // The server's own note (filesystem paths etc.) folds behind a disclosure, so it is
+    // discoverable but doesn't shout at a new operator.
+    const details = el('details', { className: 'ck-firstrun-details' });
+    const sum = el('summary', { className: 'ck-firstrun-summary' }, ['How this works']);
+    details.appendChild(sum);
+    const noteP = el('p', { className: 'ck-firstrun-note' });
+    noteP.textContent = serverNote;   // textContent: no HTML
+    details.appendChild(noteP);
+    details.appendChild(el('p', { className: 'ck-firstrun-doc' }, [
+      'Full install + usage: ',
+      Object.assign(el('a', { href: 'https://github.com/MikeHeid/overture#readme',
+        target: '_blank', rel: 'noopener' }), { textContent: 'github.com/MikeHeid/overture' })
+    ]));
+    hero.appendChild(details);
+    return hero;
+  }
+
   // The Inbox tab: rounds to answer as one form each, then loose questions, then what waits on an agent.
   function renderInboxList(body) {
     // Q24: before the steward's first items-push the server has no items, and says why (F63): never a blank.
+    // the muted-paragraph "placeholder" was replaced with a real empty-state hero —
+    // one sentence of what Overture is, the actual command to push the first item, and
+    // a collapsed "How this works" with the filesystem paths. Keeps the Q24 contract
+    // (never a blank) while giving a first-run operator somewhere real to go.
     if (view.items_note) {
-      body.appendChild(el('p', { className: 'ck-items-note', role: 'status',
-        style: 'color: var(--c-fg-muted); padding: 12px 20px;' }, [view.items_note]));
+      body.appendChild(renderFirstRunHero(view.items_note));
     }
     // Fresh-since-last-look banner: counts of what has arrived since the owner's `seen` cursor.
     // Nothing to show when the cursor is already at view.seq.
@@ -2028,7 +2225,10 @@
       const list = el('div', { className: 'ck-inbox-list' });
       for (const it of recentlyAnswered) {
         const itemData = items[it];
-        const row = el('div', { className: 'ck-inbox-item ck-inbox-item-answered', tabindex: '0' }, [
+        // role=button + keydown so a keyboard operator can activate the row (pre-1.24
+        // these rows had tabindex but no Enter/Space handler — a dead focus stop).
+        const row = el('div', { className: 'ck-inbox-item ck-inbox-item-answered', tabindex: '0',
+          role: 'button', 'aria-label': 'Open item ' + it + ' (recently answered)' + (itemData ? ', ' + itemData.title : '') }, [
           el('span', { className: 'ck-q-state', dataState: 'locked' }, [GLYPH.locked || '✓', ' locked']),
           renderItemRefTag(it),
           el('span', { className: 'ck-inbox-item-id' }, [it]),
@@ -2038,6 +2238,10 @@
         row.addEventListener('click', e => {
           if (e.target.closest('.ck-star')) return;
           openFromInbox(it);
+        });
+        row.addEventListener('keydown', e => {
+          if (e.target.closest('.ck-star')) return;
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openFromInbox(it); }
         });
         list.appendChild(row);
         list.appendChild(renderAnsweredFooter(it, rulingsByItem[it]));
@@ -2055,7 +2259,10 @@
       const list = el('div', { className: 'ck-inbox-list' });
       for (const itemId of view.awaiting_agent) {
         const itemData = items[itemId];
-        const item = el('div', { className: 'ck-inbox-item', tabindex: '0' }, [
+        // role=button + keydown so this row can be activated with Enter/Space
+        // (pre-1.24 only click worked, so keyboard-only operators could focus but not open).
+        const item = el('div', { className: 'ck-inbox-item', tabindex: '0',
+          role: 'button', 'aria-label': 'Open item ' + itemId + (itemData ? ', ' + itemData.title : '') }, [
           el('span', { className: 'ck-q-state', dataState: agentActive(itemId) ? 'agent_active' : 'awaiting_agent' }, [
             GLYPH.awaiting_agent, ' ' + agentWords(itemId)
           ]),
@@ -2064,6 +2271,9 @@
           el('span', { className: 'ck-inbox-item-title' }, [itemData ? itemData.title : ''])
         ]);
         item.addEventListener('click', () => openFromInbox(itemId));
+        item.addEventListener('keydown', e => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openFromInbox(itemId); }
+        });
         list.appendChild(item);
       }
       body.appendChild(list);
@@ -3081,11 +3291,14 @@
 
     // Row 4: the owner's brief.
     const text = el('textarea', { className: 'ck-textarea', rows: '2',
+      'aria-label': 'Brief for the delegate',
       placeholder: 'What should the agent look at? (optional for a round; required for a visual)' });
     body.appendChild(text);
 
     // Row 5: send + status.
-    const status = el('div', { className: 'ck-delegate-status', role: 'alert', hidden: 'hidden' });
+    // role=status (polite) replaces role=alert — alert interrupted on every live redraw,
+    // and the inline text already renders visibly, so a courteous announcement is correct.
+    const status = el('div', { className: 'ck-delegate-status', role: 'status', 'aria-live': 'polite', hidden: 'hidden' });
     const send = el('button', { className: 'ck-btn ck-btn-primary', type: 'button' }, ['Delegate']);
     const updateVisibility = () => {
       const kind = body.querySelector('input[name="ck-del-kind"]:checked').value;
@@ -3277,6 +3490,7 @@
     dlg.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closePlaybookPreview(); } });
     dlg.addEventListener('click', e => { if (e.target === dlg) closePlaybookPreview(); });
     document.body.appendChild(dlg);
+    pbPreviewTeardown = attachDialogAccessibility(dlg);
     requestAnimationFrame(() => closeBtn.focus());
     try {
       const resp = await fetch(config.api + '/playbook-plan?name=' + encodeURIComponent(slug),
@@ -3322,8 +3536,10 @@
       body.textContent = 'Could not load preview: ' + (e.message || 'network error');
     }
   }
+  let pbPreviewTeardown = null;
   function closePlaybookPreview() {
     const dlg = document.getElementById('ck-pb-preview');
+    if (pbPreviewTeardown) { try { pbPreviewTeardown(); } catch (_e) {} pbPreviewTeardown = null; }
     if (dlg) dlg.remove();
   }
 
@@ -5591,6 +5807,7 @@
     dlg.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closeDigest(); } });
     dlg.addEventListener('click', e => { if (e.target === dlg) closeDigest(); });
     document.body.appendChild(dlg);
+    digestTeardown = attachDialogAccessibility(dlg);
     requestAnimationFrame(() => ta.focus());
     try {
       const url = config.api + '/feed?kind=lock&limit=200';
@@ -5603,8 +5820,10 @@
       ta.value = 'Could not load the Feed: ' + (e.message || 'network error');
     }
   }
+  let digestTeardown = null;
   function closeDigest() {
     const dlg = document.getElementById('ck-digest');
+    if (digestTeardown) { try { digestTeardown(); } catch (_e) {} digestTeardown = null; }
     if (dlg) dlg.remove();
   }
 
@@ -5903,10 +6122,15 @@
   function renderPortfolioCard(row, isSelf) {
     const ok = !row || row.ok !== false;
     const health = portfolioHealth(row);
-    const card = el('div', { className: 'ck-portfolio-card' + (isSelf ? ' ck-portfolio-self' : '') +
-      (ok ? '' : ' ck-portfolio-err-card'), tabindex: '0',
+    // only interactive cards (peers with a URL) get tabindex + role=button.
+    // The self card has no activate action, so it should not be a focus stop.
+    const interactive = !isSelf && !!row.url;
+    const attrs = { className: 'ck-portfolio-card' + (isSelf ? ' ck-portfolio-self' : '') +
+      (ok ? '' : ' ck-portfolio-err-card'),
       dataHealth: health,
-      'aria-label': 'Project ' + (row.project || row.name || '?') + (isSelf ? ' (this console)' : '') });
+      'aria-label': 'Project ' + (row.project || row.name || '?') + (isSelf ? ' (this console)' : '') };
+    if (interactive) { attrs.tabindex = '0'; attrs.role = 'button'; }
+    const card = el('div', attrs);
     const head = el('div', { className: 'ck-portfolio-head' }, [
       el('span', { className: 'ck-portfolio-dot', dataHealth: health,
         title: portfolioHealthTitle(health, row), 'aria-label': 'Status: ' + health }, []),
@@ -6447,6 +6671,7 @@
   function renderChatCompose() {
     const id = 'ck-chat-input';
     const box = el('textarea', { className: 'ck-textarea', id: id, rows: '3', maxlength: String(MAX_CHAT),
+      'aria-label': 'Message the agent',
       placeholder: 'Ask the agent… (Enter sends, Shift+Enter for a new line)' });
     if (draftTexts.chat === undefined) draftTexts.chat = memGet('chat-draft') || '';
     box.value = draftTexts.chat;
