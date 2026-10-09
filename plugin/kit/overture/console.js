@@ -1912,6 +1912,7 @@
         itemData ? ' — ' + itemData.title : ''
       ]),
       renderStarButton('item:' + itemId, 'this item'),
+      renderSkinToggle(),
       renderThemeToggle(),
       el('button', {
         className: 'ck-close-btn',
@@ -3710,6 +3711,7 @@
     const header = el('div', { className: 'ck-header' }, [
       el('button', { className: 'ck-back-btn', type: 'button', 'aria-label': backLabel }, ['← Back']),
       el('span', { className: 'ck-title' }, titleChildren),
+      renderSkinToggle(),
       renderThemeToggle(),
       el('button', { className: 'ck-close-btn', type: 'button', 'aria-label': 'Close panel' }, ['×'])
     ]);
@@ -3732,6 +3734,46 @@
     const m = themeMode();
     if (m === 'auto') delete document.documentElement.dataset.theme;
     else document.documentElement.dataset.theme = m;
+    applySkin();
+  }
+
+  // Skins: palette overrides on top of auto/light/dark. 'primer' = unset (default). Persisted
+  // per project; set as dataset.skin on <html>, which CSS keys off (:root[data-skin="…"]).
+  const SKIN_MODES = ['primer', 'solarized', 'nord', 'contrast'];
+  const SKIN_LABEL = {
+    primer: 'Skin: Primer (default)',
+    solarized: 'Skin: Solarized (warm)',
+    nord: 'Skin: Nord (cool)',
+    contrast: 'Skin: High contrast'
+  };
+  const SKIN_GLYPH = { primer: '◉', solarized: '◉', nord: '◉', contrast: '◉' };
+  function skinMode() {
+    const v = memGet('skin');
+    return SKIN_MODES.includes(v) ? v : 'primer';
+  }
+  function applySkin() {
+    const s = skinMode();
+    if (s === 'primer') delete document.documentElement.dataset.skin;
+    else document.documentElement.dataset.skin = s;
+  }
+  function cycleSkin() {
+    const cur = skinMode();
+    const next = SKIN_MODES[(SKIN_MODES.indexOf(cur) + 1) % SKIN_MODES.length];
+    memSet('skin', next);
+    applySkin();
+    announce(SKIN_LABEL[next] + '.');
+    renderPanel();
+  }
+  function renderSkinToggle() {
+    const s = skinMode();
+    const label = SKIN_LABEL[s];
+    const btn = el('button', {
+      className: 'ck-skin-toggle', type: 'button',
+      title: label + ' — click to cycle',
+      'aria-label': label
+    }, [s === 'primer' ? '◉' : (s[0].toUpperCase())]);
+    btn.addEventListener('click', cycleSkin);
+    return btn;
   }
   function cycleTheme() {
     const cur = themeMode();

@@ -2098,3 +2098,113 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   white-space: pre; tab-size: 2;
 }
+
+/* Skins (1.14.0): token overrides on top of the Primer defaults. Combines with theme (auto/light/dark);
+   each skin ships light + dark variants. Default (primer) is the existing palette; no :root rule needed. */
+
+/* Solarized — warm, high-contrast, long-session-friendly. */
+:root[data-skin="solarized"] {
+  color-scheme: light;
+  --c-bg: #fdf6e3;
+  --c-surface: #eee8d5;
+  --c-surface-alt: #e4ded0;
+  --c-fg: #073642;
+  --c-fg-muted: #586e75;
+  --c-border: #93a1a1;
+  --c-border-light: #d0c9b4;
+  --c-accent: #268bd2;
+  --c-accent-fg: #fdf6e3;
+  --c-accent-soft: #e4ded0;
+  --c-open: #586e75; --c-open-bg: #eee8d5;
+  --c-claimed: #b58900; --c-claimed-bg: #fbf0cf;
+  --c-built: #859900; --c-built-bg: #e9efbf;
+  --c-blocked: #dc322f; --c-blocked-bg: #fbdedd;
+}
+:root[data-skin="solarized"][data-theme="dark"],
+@media (prefers-color-scheme: dark) {
+  :root[data-skin="solarized"]:not([data-theme="light"]) {
+    color-scheme: dark;
+    --c-bg: #002b36;
+    --c-surface: #073642;
+    --c-surface-alt: #0b4252;
+    --c-fg: #eee8d5;
+    --c-fg-muted: #93a1a1;
+    --c-border: #586e75;
+    --c-accent: #2aa198;
+    --c-accent-fg: #002b36;
+    --c-accent-soft: #0b4252;
+  }
+}
+
+/* Nord — cool, muted, blue-forward. */
+:root[data-skin="nord"] {
+  color-scheme: light;
+  --c-bg: #eceff4;
+  --c-surface: #e5e9f0;
+  --c-surface-alt: #d8dee9;
+  --c-fg: #2e3440;
+  --c-fg-muted: #4c566a;
+  --c-border: #b8bfcc;
+  --c-accent: #5e81ac;
+  --c-accent-fg: #eceff4;
+  --c-accent-soft: #d8dee9;
+  --c-blocked: #bf616a;
+  --c-built: #a3be8c;
+  --c-claimed: #d08770;
+}
+:root[data-skin="nord"][data-theme="dark"],
+@media (prefers-color-scheme: dark) {
+  :root[data-skin="nord"]:not([data-theme="light"]) {
+    color-scheme: dark;
+    --c-bg: #2e3440;
+    --c-surface: #3b4252;
+    --c-surface-alt: #434c5e;
+    --c-fg: #eceff4;
+    --c-fg-muted: #d8dee9;
+    --c-border: #4c566a;
+    --c-accent: #88c0d0;
+    --c-accent-fg: #2e3440;
+    --c-accent-soft: #434c5e;
+  }
+}
+
+/* Contrast — accessibility-forward: full black-and-white with saturated accents. */
+:root[data-skin="contrast"] {
+  color-scheme: light;
+  --c-bg: #ffffff;
+  --c-surface: #ffffff;
+  --c-surface-alt: #e8e8e8;
+  --c-fg: #000000;
+  --c-fg-muted: #333333;
+  --c-border: #000000;
+  --c-accent: #0040c0;
+  --c-accent-fg: #ffffff;
+  --c-accent-soft: #e0e8ff;
+  --c-blocked: #c00000;
+  --c-built: #006000;
+  --c-claimed: #a04000;
+}
+:root[data-skin="contrast"][data-theme="dark"],
+@media (prefers-color-scheme: dark) {
+  :root[data-skin="contrast"]:not([data-theme="light"]) {
+    color-scheme: dark;
+    --c-bg: #000000;
+    --c-surface: #000000;
+    --c-surface-alt: #202020;
+    --c-fg: #ffffff;
+    --c-fg-muted: #cccccc;
+    --c-border: #ffffff;
+    --c-accent: #4da3ff;
+    --c-accent-fg: #000000;
+  }
+}
+
+.ck-skin-toggle {
+  margin-left: 4px; padding: 2px 8px; font-size: 12px; line-height: 1;
+  border: 1px solid var(--c-border); border-radius: 999px;
+  background: var(--c-surface); color: var(--c-fg-muted); cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.ck-skin-toggle:hover, .ck-skin-toggle:focus-visible {
+  background: var(--c-surface-alt); color: var(--c-fg); outline: none;
+}
