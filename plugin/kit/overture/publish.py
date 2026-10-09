@@ -23,17 +23,29 @@ class PublishError(Exception):
     pass
 
 
-def console_block(config_json: str) -> str:
-    """Build the block the server injects. The config is JSON the page reads, never HTML."""
+def console_block(config_json: str, nonce: str = "") -> str:
+    """Build the block the server injects. The config is JSON the page reads, never HTML.
+
+    optional `nonce` carries a per-request CSP nonce that the server emits as
+    `script-src 'nonce-<nonce>'` on the response. The inline `<script>` tag that runs the
+    console gets that nonce as an attribute; a DOM-XSS-injected `<script>` without the nonce
+    is refused by the browser. The config JSON tag is `type="application/json"` and never
+    executed, so it doesn't need a nonce.
+
+    `check(..., console_block("{}"))` still works — the two call sites that pass "{}" don't
+    care about the nonce, so the default `""` leaves the `<script>` nonce-less (useful only
+    for the publish-check tool, never served live).
+    """
     css = (HERE / "console.css").read_text(encoding="utf-8")
     js = (HERE / "console.js").read_text(encoding="utf-8")
     for name, text in (("console.css", css), ("console.js", js)):
         if BEGIN in text or END in text or "</script" in text.lower() or "</style" in text.lower():
             raise PublishError(f"{name} contains a marker or a closing tag; it would break out of its block")
     safe_cfg = config_json.replace("<", "\\u003c")
+    nonce_attr = f' nonce="{nonce}"' if nonce else ""
     return (f"{BEGIN}\n<style>\n{css}</style>\n"
             f'<script type="application/json" id="overture-config">{safe_cfg}</script>\n'
-            f"<script>\n{js}</script>\n{END}\n")
+            f"<script{nonce_attr}>\n{js}</script>\n{END}\n")
 
 
 def inject(page: str, block: str) -> str:

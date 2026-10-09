@@ -114,6 +114,7 @@ OWNER_TRIGGER_REPLAY = "/api/trigger-replay"
 OWNER_ITEM_MOVE = "/api/item-move"
 OWNER_DRAFT = "/api/draft"
 # tickets — children of items; owner-only writes.
+OWNER_CSRF_ROTATE = "/api/csrf-rotate"   # invalidate all pages' CSRF without a server restart
 OWNER_TICKET_CREATE = "/api/ticket-create"
 OWNER_TICKET_UPDATE = "/api/ticket-update"
 OWNER_TICKET_CLOSE = "/api/ticket-close"
@@ -1121,6 +1122,64 @@ class Console:
         except Exception as e:  # noqa: BLE001
             sys.stderr.write(f"console issue_backlinks: {type(e).__name__}: {e}\n")
             out["view"] = {**out["view"], "issue_backlinks": {}}
+        # grill provenance — qids whose question was written on an item after an
+        # owner-authored `/message intent: grill`. The browser renders a ⚡ chip on these so
+        # the operator sees provenance before locking a ruling. The adversarial reviewer
+        # flagged this as a mild "owner social-engineering" asymmetry: without a badge, a
+        # compromised agent could sneak crafted questions into the audit trail as regular
+        # ones.
+        try:
+            out["view"] = {**out["view"], "grill_qids": sorted(self._compute_grill_qids(out["view"]))}
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"console grill_qids: {type(e).__name__}: {e}\n")
+            out["view"] = {**out["view"], "grill_qids": []}
+        return out
+
+    def _compute_grill_qids(self, view: dict) -> set[str]:
+        """qids written on an item inside an open grill cycle.
+
+        A cycle opens with an owner `message intent=grill` and closes with the next owner
+        `message intent=process` (the operator has processed the grill's answers). Any
+        question on the item whose ts falls inside the open window carries grill provenance.
+        """
+        threads = view.get("threads") or {}
+        windows: dict[str, list[tuple[str, bool]]] = {}
+        for item, msgs in threads.items():
+            if not isinstance(msgs, list):
+                continue
+            events: list[tuple[str, bool]] = []
+            for m in msgs:
+                if not isinstance(m, dict) or m.get("by") != "owner":
+                    continue
+                ts = m.get("ts")
+                intent = m.get("intent")
+                if not isinstance(ts, str):
+                    continue
+                if intent == "grill":
+                    events.append((ts, True))
+                elif intent == "process":
+                    events.append((ts, False))
+            if events:
+                windows[item] = sorted(events, key=lambda x: x[0])
+        out: set[str] = set()
+        for qid, q in (view.get("questions") or {}).items():
+            if not isinstance(q, dict):
+                continue
+            qq = q.get("question") or {}
+            item = qq.get("item")
+            qts = qq.get("ts")
+            if not isinstance(item, str) or not isinstance(qts, str):
+                continue
+            evs = windows.get(item)
+            if not evs:
+                continue
+            open_grill = False
+            for ts, is_open in evs:
+                if ts > qts:
+                    break
+                open_grill = is_open
+            if open_grill:
+                out.add(qid)
         return out
 
     # scan PR titles for qid literals ("A/Q1", "A.1.2/Q7"). The ruling card renders
@@ -1159,6 +1218,11 @@ class Console:
                         "url": issue.get("url"),
                         "state": issue.get("state"),
                         "closed_at": issue.get("closed_at"),
+                        # author is carried through so the chip can label provenance.
+                        # The security review found anyone with a GitHub account could inject a
+                        # qid literal into an issue body and have it render as "Discussed in" on
+                        # a ruling. Showing @alice signals this is a mention, not a trusted link.
+                        "author": issue.get("author"),
                     })
         return out
 
@@ -1181,13 +1245,20 @@ class Console:
                 continue
             title = str(pr.get("title", ""))
             # Pull every qid-shaped token from the title, intersect with real qids.
+            # dedup by PR number so the chip strip never shows the same PR twice (issue backlinks
+            # already did this; PR backlinks did not).
+            matched: set[str] = set()
             for m in self._QID_WORD.findall(title):
-                if m in qids:
+                if m in qids and m not in matched:
+                    matched.add(m)
                     out.setdefault(m, []).append({
                         "number": pr.get("number"),
                         "url": pr.get("url"),
                         "state": pr.get("state"),
                         "merged_at": pr.get("merged_at"),
+                        # PR author shown on the chip to signal provenance,
+                        # same as issue backlinks.
+                        "author": pr.get("author"),
                     })
         return out
 
@@ -1480,6 +1551,26 @@ class Console:
             sys.stderr.write(f"console drafts: write failed: {type(e).__name__}: {e}\n")
             raise RequestError(500, "could not write drafts; see server log") from None
         return {"drafts": drafts}
+
+    def rotate_csrf(self) -> dict:
+        """generate a fresh CSRF token AND bump the live-version so every open page sees
+        a boot change on its next long-poll wake. The pre-1.31 token had no remedy except a
+        server restart; a rotate from the console (future UI) or a curl invalidates all pages
+        now and makes them re-fetch `/` to pick up the new token from the config block.
+
+        The old token is thrown away in place; no window of overlap. In-flight POSTs that were
+        authenticated with the old token still succeed if they reach the handler before the
+        rotate runs (both ends are under `_lock`); after, they get the standard 403 "reload".
+        Nothing on disk changes.
+        """
+        with self._lock:
+            self._csrf = secrets.token_urlsafe(32)
+            # The live loop keys off `version()` which embeds self._boot. Changing _boot makes
+            # every open page's next /api/wait return with a mismatched ver, which triggers a
+            # full view refetch; the next write then surfaces the CSRF 403.
+            self._boot = secrets.token_hex(4)
+        self._bump()
+        return {"rotated": True, "csrf": self._csrf, "boot_id": self._boot}
 
     # ---- Tickets  ---------------------------------------------------------
     # Children of items. Owner-only writes for 1.26; the agent door will be opened
@@ -2106,12 +2197,32 @@ class Console:
 
         `cfg.page` is not read, by this server or the one server: a page an agent
         can edit would put its script in the owner's browser.
+
+        Returns just the HTML string — stable return shape for tests and the one-server
+        kernel. The owner-door handler uses `page_with_nonce()` instead, which carries the
+        per-request CSP nonce for the inline script.
         """
+        html, _nonce = self.page_with_nonce()
+        return html
+
+    def page_with_nonce(self) -> tuple[str, str]:
+        """returns `(html, nonce)` so the owner-door GET handler can set a matching
+        `Content-Security-Policy: ...; script-src 'nonce-<nonce>'` on the response. Pre-1.31
+        the inline `<script>` ran under the main-page CSP's implicit `script-src *` (there was
+        no `script-src` directive, only `frame-ancestors`), which meant any same-origin
+        DOM-XSS could read `config.csrf` and read/write everything the owner could. With the
+        nonce, the inline script runs only because it carries the right nonce attribute; a
+        DOM-injected `<script>` without the nonce is refused by the browser.
+        """
+        nonce = secrets.token_urlsafe(16)
         # `version` is the running kit's, the value /health reports: the footer shows it (owner, 2026-10-01).
         # carry the CSRF token so the browser can send it on every POST as X-Overture-CSRF.
-        block = P.console_block(json.dumps({"api": "/api", "project": self.cfg.project,
-                                            "version": __version__, "csrf": self._csrf}))
-        return PS.render(self.cfg.state, block)
+        block = P.console_block(
+            json.dumps({"api": "/api", "project": self.cfg.project,
+                        "version": __version__, "csrf": self._csrf}),
+            nonce=nonce,
+        )
+        return PS.render(self.cfg.state, block), nonce
 
     def push_page_snapshot(self, body: object) -> dict:
         """`page-snapshot` (Q28): a page the steward read from a commit, as data.
@@ -3053,7 +3164,28 @@ class OwnerHandler(_Handler):
         if not self._gate():
             return
         if self.path in ("/", "/index.html"):
-            return self._send(200, self.console.page(), "text/html; charset=utf-8")
+            # page_with_nonce() returns (html, nonce); the response's CSP carries
+            # `script-src 'nonce-<nonce>'` so the inline <script> runs ONLY because it carries
+            # the matching nonce attribute. A DOM-injected <script> without the nonce is
+            # refused by the browser. This closes the "any same-origin DOM-XSS reads
+            # config.csrf" seam the adversarial reviewer flagged.
+            html, nonce = self.console.page_with_nonce()
+            data = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            for k, v in SECURITY_HEADERS:
+                if k != "Content-Security-Policy":
+                    self.send_header(k, v)
+            # Overriding CSP: adds script-src nonce-… alongside the shared defaults.
+            self.send_header(
+                "Content-Security-Policy",
+                "frame-ancestors 'none'; object-src 'none'; base-uri 'none'; "
+                f"script-src 'nonce-{nonce}'",
+            )
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.path == "/api/view":
             return self._view(self.console.page_payload)   # with `ver`: the live loop's baseline
         if self.path == "/api/board":
@@ -3308,7 +3440,8 @@ class OwnerHandler(_Handler):
         if kind is None and self.path not in ("/api/relock", "/api/lock-all", "/api/page-publish",
                                               "/api/refactor", OWNER_FAVORITE, OWNER_PLAYBOOK,
                                               OWNER_TRIGGER_REPLAY, OWNER_ITEM_MOVE, OWNER_DRAFT,
-                                              OWNER_TICKET_CREATE, OWNER_TICKET_UPDATE, OWNER_TICKET_CLOSE):
+                                              OWNER_TICKET_CREATE, OWNER_TICKET_UPDATE, OWNER_TICKET_CLOSE,
+                                              OWNER_CSRF_ROTATE):
             return self._send(404, {"error": "not found"})
         # Browsers send Origin on every POST, same-origin included, so a missing one is refused too:
         # an absent header must not read as "trusted".
@@ -3342,6 +3475,8 @@ class OwnerHandler(_Handler):
                 return self._send(200, self.console.item_move(self._body()))
             if self.path == OWNER_DRAFT:            # 1.19.0: owner-draft autosave (per-key text)
                 return self._send(200, self.console.save_draft(self._body()))
+            if self.path == OWNER_CSRF_ROTATE:   # rotate the CSRF token without a restart
+                return self._send(200, self.console.rotate_csrf())
             if self.path == OWNER_TICKET_CREATE:    # create a ticket under an item
                 return self._send(200, self.console.ticket_create(self._body(), by="owner"))
             if self.path == OWNER_TICKET_UPDATE:    # patch a ticket's title/body/blocked_by

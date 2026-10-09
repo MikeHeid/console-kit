@@ -2562,6 +2562,36 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 }
 .ck-issue-chip-closed .ck-issue-chip-glyph { color: #fff; }
 
+/* 1.31.0: author label on backlink chips signals provenance. Any GitHub user can mention a
+   qid in an issue body; the "@alice" tag reminds the operator this is a mention, not a
+   trusted link from their own team. */
+.ck-backlink-author {
+  margin-left: 2px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.ck-pr-chip-merged .ck-backlink-author,
+.ck-issue-chip-closed .ck-backlink-author { color: color-mix(in srgb, #fff 70%, transparent); }
+
+/* 1.31.0: grill-provenance chip on a question. ⚡ in the project's accent to say "you asked for
+   this; the agent generated it in response to your grill". Visually distinct from an agent-
+   originated question so an attacker who compromised the agent fleet cannot sneak crafted
+   questions through as if they were raised independently. */
+.ck-q-grill-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--c-accent) 15%, transparent);
+  color: var(--c-accent);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
 /* ========= Rulings → PRs backlinks (1.25.0) =================================
    A chip strip under a locked ruling showing every tracked PR whose title mentions
    the qid. Merged PRs render filled (the ruling shipped); open/closed render as
