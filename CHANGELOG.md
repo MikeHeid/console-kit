@@ -2234,6 +2234,35 @@ review.
 Smoke-tested: 5 peers return 5 ordered rows in ~17ms (all error
 rows under test; a real peer run would see concurrent round-trips).
 
+## Mobile viewport polish (1.22.0)
+
+The console was designed around a docked wide screen (≥1024 px);
+below 640 px the Portfolio grid overflowed, the six tabs crowded
+off-screen, modals (palette, viewer, help) spilled past the
+viewport, and some tap targets were under the ergonomic 36 px
+floor. A `@media (max-width: 640px)` block fixes all of this
+without touching desktop behaviour.
+
+- **Full-width panel + safe-area insets** on notched phones.
+- **36 px tap-target floor** on every button, chip, tab, toggle,
+  skin cycle, ref link, snooze preset, inbox filter chip, caught-up
+  dismiss, etc.
+- **Horizontal-scroll tab bar** with scroll-snap and hidden
+  scrollbar — six tabs no longer wrap or clip.
+- **Portfolio grid stacks** to one card per row.
+- **Modals fit the viewport** at `calc(100vw - 20px)` with 4-6
+  vh top padding and 60-70 vh max-height on scrollable bodies so
+  the virtual keyboard doesn't eat the content.
+- **Shortcut help stacks** key chips over labels (single-column
+  list) and gets a position-fixed sheet with `inset: 10px`.
+- **Priority ribbon + Inbox rows wrap** so a long title no
+  longer pushes the pill off-screen.
+- **Snooze menu left-anchors** instead of right-anchoring,
+  avoiding right-edge overflow.
+- No desktop change: the breakpoint is `max-width: 640px` only;
+  the existing `min-width: 1024px` dock rules still rule the
+  owner's workstation experience.
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent

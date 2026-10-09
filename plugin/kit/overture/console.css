@@ -2220,3 +2220,88 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
 .ck-new-dot { color: var(--c-accent); font-size: 10px; }
 .ck-new-text { flex: 1; }
 .ck-new-dismiss { padding: 3px 10px; font-size: 12px; }
+
+/* ========= Mobile viewport polish (1.22.0) ================================================
+   Below 640px: ensure every interactive element has a ≥36px tap target, modals fit the viewport,
+   the tab bar scrolls horizontally without overflowing, and the Portfolio grid becomes one column.
+   Safe-area insets are respected on notched devices. */
+@media (max-width: 640px) {
+  /* The whole panel takes the full viewport; the backdrop pattern already does this at 399px — this
+     widens the breakpoint to the common 640px cutoff. */
+  .ck-panel {
+    width: 100vw;
+    max-width: 100vw;
+    padding-left: env(safe-area-inset-left, 0);
+    padding-right: env(safe-area-inset-right, 0);
+    padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+
+  /* Tap-target floor: buttons, chips, tabs, segment controls at ≥36px (WCAG AA target size is 24,
+     Apple HIG and Material both call out 44 for primary; 36 is the compromise that keeps secondary
+     actions dense without being tiny). */
+  .ck-btn, .ck-tab, .ck-trigger-replay, .ck-portfolio-notify, .ck-portfolio-dnd,
+  .ck-feed-digest, .ck-skin-toggle, .ck-theme-toggle, .ck-shortcut-close,
+  .ck-snooze-btn, .ck-snooze-opt, .ck-ref-link, .ck-frag-btn, .ck-inbox-chip,
+  .ck-del-preview, .ck-new-dismiss, .ck-snooze-unsnooze {
+    min-height: 36px;
+    line-height: 1.2;
+  }
+  .ck-ref-link, .ck-inbox-chip { padding: 6px 10px; }
+  .ck-frag-btn { padding: 8px 12px; }
+
+  /* Tab bar horizontal scroll on narrow — six tabs don't fit at 375px wide. */
+  .ck-tabs {
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex-wrap: nowrap;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    scroll-snap-type: x proximity;
+  }
+  .ck-tabs::-webkit-scrollbar { display: none; }
+  .ck-tab { flex: 0 0 auto; scroll-snap-align: start; }
+
+  /* Portfolio: one card per row rather than the 260px-min auto-fill grid. */
+  .ck-portfolio-grid { grid-template-columns: 1fr; }
+
+  /* Modals: palette, fragment viewer, playbook preview, digest, help, portfolio helper.
+     Full-width with a 10px gutter; bottom padding leaves room for the virtual keyboard. */
+  .ck-palette > *, .ck-frag-view > *, .ck-pb-preview > *,
+  .ck-digest > *, .ck-shortcut-help {
+    width: calc(100vw - 20px);
+    max-width: 100%;
+  }
+  .ck-palette { padding-top: 6vh; }
+  .ck-frag-view, .ck-pb-preview, .ck-digest { padding: 4vh 10px; }
+  .ck-shortcut-help {
+    position: fixed;
+    inset: 10px;
+    width: auto;
+    max-height: none;
+    overflow: auto;
+  }
+  .ck-palette-list { max-height: 70vh; }
+  .ck-frag-body, .ck-frag-raw, .ck-frag-rendered,
+  .ck-digest-text { max-height: 60vh; }
+
+  /* Priority ribbon rows: ensure text wraps rather than overflowing the panel. */
+  .ck-priority-row { flex-wrap: wrap; }
+  .ck-priority-text { flex: 1 1 100%; order: 10; }
+
+  /* Inbox-item rows: wrap the ref pill + id + title so long titles don't push off-screen. */
+  .ck-inbox-item { flex-wrap: wrap; row-gap: 2px; }
+  .ck-inbox-item-title { flex: 1 1 100%; order: 10; }
+
+  /* Delegate bar + trigger log: slightly tighter horizontal padding at this width. */
+  .ck-delegate-bar, .ck-triggers, .ck-new-banner, .ck-priority-ribbon {
+    margin-left: 10px;
+    margin-right: 10px;
+  }
+
+  /* Shortcut help: list switches from two-column grid to stacked so key chips don't crush labels. */
+  .ck-shortcut-list { grid-template-columns: 1fr; row-gap: 2px; }
+  .ck-shortcut-list dt { display: inline-block; }
+
+  /* Snooze menu: pin to the right edge of the row so it doesn't overflow the panel. */
+  .ck-snooze-menu { right: auto; left: 0; min-width: 180px; }
+}
