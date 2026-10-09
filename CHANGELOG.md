@@ -2118,6 +2118,46 @@ test-fixture updates in the matching test file, not code fixes.
   `~/.config/console-kit/projects.json` as a mirror. The new path
   stays the source of truth.
 
+## Open-items close-out (1.20.0)
+
+Four remaining items from the parallel review backlog, all fixed.
+
+### Peer URL ↔ secret binding
+
+An agent with write access to `.overture/portfolio.json` could
+previously change a peer's `url` without re-signing: the drift
+check hashed `secret` alone, so a URL swap kept the same hash. The
+1.19.1 patch mitigated with redirect refusal + private-host
+blocks; **this closes the gap** by binding the hash to the URL:
+
+    token_sha256 = sha256(secret + 0x00 + url).hexdigest()
+
+- `load_secret` prefers the URL-bound form.
+- The pre-1.20 shape `sha256(secret)` is still accepted with a
+  one-line stderr warning naming the peer and the fix.
+- `agent.py portfolio-token` prints the new formula.
+- A URL swap without re-signing now fails the drift check with
+  the same error the owner sees for a rotated-but-not-updated
+  secret.
+
+### `refs.json` unbounded growth
+
+The `retired` map was append-only. A project with high id churn
+could grow `refs.json` past `MAX_FILE` and brick `items-push`
+("refs.json is not JSON" once the file crosses the read cap). Fix:
+`MAX_RETIRED = 5000`; oldest retirements are pruned FIFO when the
+cap is hit (Python 3.7+ insertion-ordered dicts). Common
+"returning id" case still works for recent retirements; very old
+ones get a fresh ref.
+
+### Markdown italic hits `snake_case`
+
+`foo_bar_baz` was rendering as `foo<em>bar</em>baz`. A snake_case
+guard in `renderMdInline` detects an underscore-wrapped match
+adjacent to a word char on either side and emits the first
+underscore as literal text, retrying the rest. `_italic_` on its
+own and `_italic_` between non-word chars still work.
+
 ### Trust
 
 - The store is append-only in spirit: assignments are permanent

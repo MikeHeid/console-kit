@@ -1397,19 +1397,24 @@ def _run(a, bell: Path) -> int:
     if a.cmd == "item-move":
         return _item_move(a)
     if a.cmd == "portfolio-token":
-        import hashlib as _h
         print("Create a service token in Cloudflare Zero Trust → Access → Service Auth.")
         print("Attach it to each PEER console's Access application (inbound ACL).")
         print()
         print("Then on the HOME console's machine, write STATE/portfolio-secrets/<peer>.json (0600):")
         print('  {"client_secret": "<the-plaintext-secret-from-Cloudflare>"}')
         print()
-        print("Compute sha256(client_secret) with:")
-        print("  sha256=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.read().strip().encode()).hexdigest())' < secret.txt)")
+        print("Compute the URL-bound token hash (1.20.0: binds the secret to the peer URL so an")
+        print("edit of url in portfolio.json without re-signing is caught by the drift check):")
+        print("  python3 -c 'import hashlib,sys; s,u=sys.argv[1:3]; "
+              "print(hashlib.sha256(s.encode()+b\"\\\\0\"+u.encode()).hexdigest())' "
+              "'<secret>' 'https://peer-console.example.com'")
         print()
-        print('Then paste into .overture/portfolio.json alongside the Cloudflare client_id:')
+        print("Then paste into .overture/portfolio.json alongside the Cloudflare client_id:")
         print('  "peers": {"<peer-name>": {"url": "https://peer-console.example.com",')
-        print('                             "client_id": "...access", "token_sha256": "..."}}')
+        print('                             "client_id": "...access", "token_sha256": "<the hex above>"}}')
+        print()
+        print("Pre-1.20 shape sha256(secret) is still accepted with a one-line warning asking you")
+        print("to rotate. The server refuses redirects and private/loopback peer URLs regardless.")
         return 0
     if a.cmd == "trigger-token":
         from overture import triggers as TR

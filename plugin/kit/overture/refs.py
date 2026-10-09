@@ -61,6 +61,7 @@ from . import atfile as AF
 
 FILE = "refs.json"
 MAX_FILE = 1 << 20
+MAX_RETIRED = 5000   # 1.20.0: cap the retired map; older-than-this returning ids get a new ref
 REF_RE = re.compile(r"^[1-9][0-9]*(?:\.[1-9][0-9]*)*$")
 STATE_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
 
@@ -203,6 +204,14 @@ def assign_refs(state: Path, items: dict, auto: bool = True) -> dict[str, str]:
         if stale_id not in items:
             retired[assignments[stale_id]] = stale_id
             del assignments[stale_id]
+
+    # 1.20.0: cap `retired` so a project with high id churn can't grow refs.json without bound and
+    # eventually brick items-push ("file is not JSON" once the file crosses MAX_FILE). The dict is
+    # insertion-ordered (Py 3.7+); the oldest keys drop first. A dropped retirement means a very
+    # old returning id gets a fresh ref instead of its historical one — the common "returning id"
+    # case still works because recent retirements remain.
+    while len(retired) > MAX_RETIRED:
+        retired.pop(next(iter(retired)), None)
 
     new_doc = {"assignments": assignments, "retired": retired}
     if new_doc != doc:
