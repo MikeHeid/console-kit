@@ -56,8 +56,9 @@ MAX_BLOCKED_BY = 32      # per ticket
 KINDS = ("task", "bug", "research", "grilling")
 STATUSES = ("open", "blocked", "closed")
 WRITERS = ("owner", "agent")
-# Ticket id: T- + 4 base64url chars. 2^24 = 16M distinct; collisions handled on create.
-ID_RE = re.compile(r"^T-[A-Za-z0-9_-]{4,16}\Z")
+# Ticket id: T- + base64url chars. bumped from 4 → 8 random bytes (64-bit) after the
+# adversarial review noted the 2^32 variant had a birthday-collision risk around 93k tickets.
+ID_RE = re.compile(r"^T-[A-Za-z0-9_-]{4,20}\Z")
 # Item id: a repo-shaped identifier. Looser than schema.ITEM but tighter than "anything".
 ITEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-]{0,127}\Z")
 
@@ -69,21 +70,33 @@ class TicketError(ValueError):
 
 
 def _new_id(existing: dict) -> str:
-    """Generate a fresh ticket id; retries up to 8 times on a collision."""
+    """Generate a fresh ticket id; retries up to 8 times on a collision.
+
+    bumped from `token_urlsafe(4)[:6]` (32 bits of entropy, ~93k birthday collision)
+    to `token_urlsafe(8)[:10]` (~64 bits), which pushes the collision horizon well past the
+    MAX_TICKETS=10_000 cap. The retry loop stays as a safety net; it should essentially never fire.
+    """
     for _ in range(8):
-        tid = "T-" + secrets.token_urlsafe(4)[:6]
+        tid = "T-" + secrets.token_urlsafe(8)[:10]
         if tid not in existing:
             return tid
     raise TicketError("could not pick a fresh ticket id after 8 tries")
 
 
 def load(state: Path) -> dict:
-    """Read `STATE/tickets.json`, returning `{"tickets": {id: ticket}}`. Missing → empty."""
+    """Read `STATE/tickets.json`, returning `{"tickets": {id: ticket}}`. Missing → empty.
+
+    pre-1.30-dot-1 this silently DROPPED rows whose shape didn't match the current schema;
+    the next save() then rewrote the file WITHOUT them — permanent data loss on any schema
+    drift. The reviewer flagged this as HIGH. Now `load` preserves every row with a well-formed
+    id key (and whose value is a dict); filtering by `kind`/`status`/`title` happens at
+    `as_view` time instead, so a bad row is just skipped in the live view and not erased from
+    disk. One `_unknown` key counts rows we had to drop at parse time; stderr logs it so the
+    operator sees the drift without losing anything.
+    """
     sfd = os.open(state, STATE_FLAGS)
     try:
         raw = AF.read_at(sfd, FILE, MAX_FILE)
-    except FileNotFoundError:
-        return {"tickets": {}}
     finally:
         os.close(sfd)
     if raw is None:
@@ -95,21 +108,40 @@ def load(state: Path) -> dict:
     if not isinstance(doc, dict) or not isinstance(doc.get("tickets"), dict):
         raise TicketError(f"{FILE} must be an object with a 'tickets' map")
     out: dict = {"tickets": {}}
+    dropped = 0
     for k, v in doc["tickets"].items():
         if not isinstance(k, str) or not ID_RE.match(k):
+            dropped += 1
             continue
         if not isinstance(v, dict):
-            continue
-        # Light shape check; any row with an invalid required field is dropped silently rather
-        # than raising, so a stale on-disk shape never faults the live view.
-        if v.get("kind") not in KINDS:
-            continue
-        if v.get("status") not in STATUSES:
-            continue
-        if not isinstance(v.get("title"), str) or not isinstance(v.get("body", ""), str):
+            dropped += 1
             continue
         out["tickets"][k] = v
+    if dropped:
+        import sys as _sys
+        _sys.stderr.write(f"console tickets: {dropped} row(s) with malformed id/shape ignored (not deleted)\n")
     return out
+
+
+def _row_is_viewable(v: object) -> bool:
+    """Does this ticket row have the fields the view renderer needs?
+
+    this check moved out of `load` so a row that fails it is skipped in the view but
+    kept on disk. If a kind/status enum ever grows, old rows survive the next save.
+    """
+    if not isinstance(v, dict):
+        return False
+    if v.get("kind") not in KINDS:
+        return False
+    if v.get("status") not in STATUSES:
+        return False
+    if not isinstance(v.get("title"), str):
+        return False
+    if not isinstance(v.get("body", ""), str):
+        return False
+    if not isinstance(v.get("parent_item"), str) or not ITEM_RE.match(v["parent_item"]):
+        return False
+    return True
 
 
 def save(state: Path, doc: dict) -> None:
@@ -277,10 +309,16 @@ def close(state: Path, tid: str, now_iso: str) -> dict:
 
 
 def as_view(doc: dict) -> dict:
-    """Shape for inclusion in `view.tickets`: grouped by parent item, with counts."""
+    """Shape for inclusion in `view.tickets`: grouped by parent item, with counts.
+
+    filters by `_row_is_viewable` so a row the `load` relaxation preserved on disk but
+    that doesn't fit the current view schema is skipped here without KeyError.
+    """
     tickets = doc.get("tickets") or {}
     by_item: dict[str, list[dict]] = {}
     for t in tickets.values():
+        if not _row_is_viewable(t):
+            continue
         by_item.setdefault(t["parent_item"], []).append(t)
     # Sort each group newest-first.
     for lst in by_item.values():

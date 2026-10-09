@@ -55,6 +55,7 @@ import argparse
 import calendar
 import collections
 import hashlib
+import hmac
 import ipaddress
 import json
 import math
@@ -76,6 +77,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from . import anchors as A
+from . import atfile as AF   # cursor + working now use atfile.write_at
 from . import chart as CH
 from . import doorbell as D
 from . import favorites as FV
@@ -628,7 +630,12 @@ SECURITY_HEADERS = (
     ("Cache-Control", "no-store"),
     ("X-Content-Type-Options", "nosniff"),
     ("Referrer-Policy", "no-referrer"),
-    ("Content-Security-Policy", "frame-ancestors 'none'"),
+    # `object-src 'none'` blocks <object>/<embed>/<applet> from loading plugins; `base-uri
+    # 'none'` prevents a <base> tag (e.g. injected via DOM-XSS) from redirecting every relative URL
+    # on the page. Both are no-op for the honest console (which uses neither). `script-src 'self'`
+    # is NOT added here because publish.py injects console.js inline — tightening script-src
+    # requires a per-request nonce in the <script> tag, which is 1.31 scope.
+    ("Content-Security-Policy", "frame-ancestors 'none'; object-src 'none'; base-uri 'none'"),
     # adversarial review flagged that the brief claimed cross-origin isolation
     # was set but no COOP header actually was. COOP: same-origin isolates the owner
     # window from any opener (ad hoc tab opens pointing here lose the WindowProxy),
@@ -1273,12 +1280,21 @@ class Console:
         """the owner's Issues view, mirroring `prs()`."""
         return IS.load(self.cfg.state)
 
-    def run_playbook(self, body: object) -> dict:
-        """0.11.0: fan out a named playbook's steps as owner `message` writes, in order.
+    def run_playbook(self, body: object, by: str = "owner", agent: str | None = None) -> dict:
+        """0.11.0: fan out a named playbook's steps as `message` writes, in order.
 
         Each step goes through the regular `message` write path (same checks, same doorbell rings, same
-        view updates). Owner-only. A step that writes nothing because of a nonce retry does not fail the
-        rest. Returns {"records": [...], "skipped": [{index, why}, ...]}.
+        view updates). A step that writes nothing because of a nonce retry does not fail the rest. Returns
+        {"records": [...], "skipped": [{index, why}, ...]}.
+
+        `by` is a parameter so the agent door (`/playbook` over the Unix socket, used by
+        `/overture:playbook` from a Claude session on the owner's own machine) can run a playbook
+        AND have the resulting message records attributed to the calling agent — not forged as
+        owner. Pre-1.30-dot-1 security review flagged this as "owner authorship forged by agent" (HIGH):
+        an agent that could author a `.overture/playbooks/*.json` could run it and forge `fork` /
+        `visual` intents under `by: owner`. The schema's `_check_message` still refuses OWNER_INTENTS
+        under `by: agent`, so this closes the escalation path by name rather than relying on review
+        of each new owner intent. Cron and replay still invoke this with the default `by="owner"`.
         """
         if (not isinstance(body, dict)
                 or set(body) - {"name", "nonce"}
@@ -1307,7 +1323,7 @@ class Console:
                 continue
             step_nonce = f"{body['nonce']}-{index}"
             try:
-                rec = self.write("message", {**PB.step_body(step), "nonce": step_nonce}, "owner")
+                rec = self.write("message", {**PB.step_body(step), "nonce": step_nonce}, by, agent)
             except RequestError as e:
                 skipped.append({"index": index, "why": str(e)})
                 continue
@@ -2817,9 +2833,16 @@ class Console:
         return {b: m for b, m in sorted(out.items()) if m}
 
     def _write_working(self, by: dict[str, dict[str, str]]) -> None:
-        tmp = self.cfg.working.with_suffix(".tmp")
-        tmp.write_text(json.dumps({b: m for b, m in by.items() if m}, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, self.cfg.working)
+        # route through `atfile.write_at` (O_NOFOLLOW on the dir fd + O_EXCL temp +
+        # fsync'd rename) instead of a fixed `.tmp` sibling. Pre-1.30-dot-1 two concurrent writes
+        # could race on `working.tmp` and a planted symlink would be followed. The caller holds
+        # `_working_lock` already, so there is no race between the dir open and the write.
+        data = json.dumps({b: m for b, m in by.items() if m}, sort_keys=True).encode("utf-8")
+        sfd = os.open(self.cfg.state, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            AF.write_at(sfd, "working.json", data)
+        finally:
+            os.close(sfd)
 
     def set_working(self, body: object, agent: str | None = None) -> dict:
         items = body.get("items") if isinstance(body, dict) and set(body) == {"items"} else None
@@ -2862,11 +2885,19 @@ class Console:
         if err is not None and S.one_line(err, "last_error"):
             raise RequestError(400, f"last_error must be one line of at most {S.MAX_LINE} characters, or null")
         cur = {"last_synced_at": synced, "last_error": err}
-        tmp = self.cfg.cursor.with_suffix(".tmp")
-        tmp.write_text(json.dumps(cur, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, self.cfg.cursor)
-        # Synced or failed, THIS agent is no longer at work; every other agent's marks stay (0.8.2).
+        # route through atfile.write_at under _working_lock (shared with set_working so
+        # the cursor + working update is one atomic sequence from any one agent's view). Pre-1.30-dot-1
+        # this used a fixed `.tmp` sibling with no O_NOFOLLOW; two concurrent /cursor POSTs raced,
+        # and a symlink planted at `cursor.tmp` would be followed. The lock also prevents a
+        # cursor write from re-ordering around the set_working below.
+        data = json.dumps(cur, sort_keys=True).encode("utf-8")
         with self._working_lock:
+            sfd = os.open(self.cfg.state, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                AF.write_at(sfd, "cursor.json", data)
+            finally:
+                os.close(sfd)
+            # Synced or failed, THIS agent is no longer at work; every other agent's marks stay (0.8.2).
             by = self.read_working_by()
             if by.pop(agent or N.UNNAMED, None) is not None:
                 self._write_working(by)
@@ -3286,7 +3317,11 @@ class OwnerHandler(_Handler):
         # CSRF double-submit — the HTML carried the boot's CSRF token in its config block;
         # every POST must echo it in X-Overture-CSRF. Belt-and-braces with the Origin check; also
         # guards against a cross-origin page that spoofs Origin (rare, but not impossible).
-        if self.headers.get("X-Overture-CSRF") != self.console._csrf:
+        # constant-time compare — a `!=` would leak the token one byte at a time to a timing
+        # attacker who could issue many POSTs. Both sides are known-length base64url, so no need to
+        # equalize length first; hmac.compare_digest is still safe when they differ.
+        presented = self.headers.get("X-Overture-CSRF") or ""
+        if not hmac.compare_digest(presented, self.console._csrf):
             return self._send(403, {"error": "missing or stale CSRF token; reload the console"})
         try:
             if self.path == "/api/relock":
@@ -3383,9 +3418,12 @@ class AgentHandler(_Handler):
                 self.max_body = PS.MAX_BODY   # per instance, safe for the same reason as /history-blob above
                 return self._send(200, self.console.push_page_snapshot(self._body()))
             if self.path == "/playbook":   # 0.18.0: a session on the owner's machine runs a named playbook
-                # The agent socket is user-only (0600, in a 0700 dir): same trust surface as the owner door
-                # for owner-privileged actions, matching items-push / prs-push / page-snapshot.
-                return self._send(200, self.console.run_playbook(self._body()))
+                # Pre-1.30-dot-1 the agent-door /playbook ran steps with by="owner", so an agent that
+                # could author `.overture/playbooks/*.json` could forge owner-only intents (fork, visual).
+                # The agent socket is still user-only (0600 under a 0700 dir), so the trust surface is the
+                # OS user, but attributing agent-side writes under the calling agent closes the escalation
+                # path by name. OWNER_INTENTS still refuse `by: agent` at the schema layer.
+                return self._send(200, self.console.run_playbook(self._body(), by="agent", agent=agent))
             if self.path == "/item-move":  # 1.17.0: record a re-parent intent on an item
                 # 1.19.1: a session on the owner's machine writes with its own authorship; the
                 # intent "move" is reserved for the owner-door path. The agent variant lands as a
