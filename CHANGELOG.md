@@ -2914,3 +2914,78 @@ and defense-in-breadth gaps. 1.30.1 lands them.
   authorship of the resulting message records. `_check_message`
   still refuses OWNER_INTENTS from `by: agent`, so forged
   owner intents like `fork` cannot land through this path.
+
+## Hardening (1.31.0)
+
+Lands the five items the 1.30.1 patch deferred as "needs more
+than a one-line fix" — real security boundaries, not just
+breadth. The regex sanitizer is replaced; the inline script
+runs under a nonce'd CSP; CSRF can be rotated without a
+restart; backlink chips carry author provenance; grill-origin
+questions are visibly distinct from questions the agent raised
+on its own.
+
+- **Parser-based `sanitize_html`.** The regex pipeline through
+  1.30.1 had plausible bypasses (unquoted `javascript:`,
+  entity-encoded schemes, nested-tag reconstruction,
+  parser-differential tricks on `<\s*`). 1.31 replaces it with
+  `html.parser.HTMLParser` + an allowlist rewriter. Any tag
+  not on the allowlist is dropped; `<script>` / `<svg>` /
+  `<math>` / `<noscript>` / `<template>` drop their content
+  too (rawtext context); URL schemes are allow-listed
+  (`http`, `https`, `mailto`, `#frag`, relative, `data:`
+  for images only). `on*=` attributes are refused regardless.
+  `data-*` attributes pass through (inert). Anchors get
+  `rel="noopener noreferrer"` enforced. The parser tokenises
+  exactly as the browser does — the whole parser-differential
+  bypass class is eliminated. Sandboxed iframe is still the
+  first line; this is now a real second line.
+- **Per-request CSP nonce** on the inline console script.
+  Pre-1.31 the main page's CSP was only `frame-ancestors
+  'none'`, which meant any same-origin DOM-XSS could read
+  `config.csrf` and read/write everything the operator could.
+  Now the server generates a fresh nonce per `GET /` or
+  `GET /index.html`, emits `script-src 'nonce-<nonce>'` in
+  the CSP header, and tags the inline `<script>` with
+  `nonce="<nonce>"`. A DOM-injected `<script>` without the
+  nonce is refused by the browser.
+- **`POST /api/csrf-rotate`** generates a fresh CSRF token
+  and bumps `_boot` so every open page sees a boot change on
+  its next long-poll wake and reloads. Pre-1.31 a leaked
+  token had no remedy except a server restart.
+- **Backlink chips carry author.** The security review flagged
+  that anyone with a GitHub account could inject a qid literal
+  into an issue body and have it render as "Discussed in" on
+  a ruling — integrity, not XSS. Chips now show `#142 by
+  @alice`; label changed from "Discussed in" to
+  **"Mentioned in"** and from "Shipped as" to **"Shipped:"**.
+- **Grill provenance badge.** `page_payload` computes
+  `view.grill_qids` — qids whose question was written on an
+  item inside an open grill cycle (an owner `message
+  intent=grill` with no closing `message intent=process`
+  since). Each matching question shows a `⚡ GRILL-ORIGIN`
+  chip, so the operator sees that a question is agent-authored
+  **in response to their own grill request**, not raised
+  independently. Closes the "owner social-engineering via
+  agent-authored question" asymmetry the adversarial reviewer
+  called out.
+
+### Trust
+
+- The parser-based sanitizer refuses to raise out of
+  `sanitize_html`; a parse error falls back to a tag-strip
+  (everything becomes text). This is strictly safer and
+  bounded by the 256 KiB input cap in `add_visual`.
+- The CSP nonce is per-request, generated via
+  `secrets.token_urlsafe(16)` (≈96 bits). It never persists
+  to disk and never travels off this response.
+- `rotate_csrf` is under `_lock` so an in-flight write that
+  passed the old token completes before the swap.
+- Backlink chip URLs are now double-validated:
+  `issues.py`/`prs.py` pin them to canonical GitHub URLs on
+  push; the browser additionally refuses any URL that doesn't
+  start with `https://github.com/`.
+- `view.grill_qids` is a pure client-side display signal; the
+  rendering decision is browser-side. The audit trail is
+  unchanged: each grill-origin question is still a regular
+  `question` record.

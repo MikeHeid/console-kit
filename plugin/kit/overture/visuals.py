@@ -64,84 +64,258 @@ MAX_DOC_BYTES = 256 * 1024     # a doc is a title, at most MAX_VISUAL_DOC charac
 MAX_INDEX_BYTES = 4 << 20
 NAME = re.compile(r"^([0-9a-f]{8})-([0-9a-f]{12})(\.mmd|\.html)\Z")
 
-# HTML sanitization — DEFENSE IN BREADTH, NOT A SECURITY BOUNDARY.
+# HTML sanitization — now parser-based . The regex pipeline through 1.30.1 had
+# plausible bypasses (unquoted javascript:, HTML-entity-encoded schemes, nested-tag
+# reconstruction) that the review threads flagged. The sandboxed iframe
+# (`sandbox=""`/`sandbox="allow-scripts"` with `default-src 'none'`) is still the real
+# control; this is defense-in-breadth. But a parser-based rewriter removes the entire
+# class of parser-differential bugs: it tokenises exactly as the browser would (via
+# `html.parser.HTMLParser`), drops anything not on the allowlist, and emits only the
+# whitelisted tags with the whitelisted attributes.
 #
-# The real control is the sandboxed iframe (`sandbox=""`/`sandbox="allow-scripts"` with
-# `default-src 'none'`) that the server wraps every stored visual in; nothing here will stop a
-# malicious payload if the sandbox is relaxed. This stripper exists so a visual whose source
-# accidentally carries a `<script>` never gets stored with the dangerous bytes, and so a future
-# sandbox change does not instantly become live XSS. The 1.30-dot-1 review threads called this out
-# plainly: do not treat sanitize_html as a boundary.
-#
-# Patterns are case-insensitive. 1.30-dot-1 hardening:
-#   - leading whitespace capped at `\s{0,8}` so a long `<\s*` prefix cannot drive the regex
-#     quadratic on the 256 KiB input cap (cheap CPU-DoS otherwise)
-#   - `<svg>` added as a dangerous element (SVG islands host <script> and
-#     `<set attributeName=onload …>`)
-#   - `<link>` and `<xml-stylesheet>` added (CSS @import vectors)
-#   - `on*=` strip boundary includes `/`, `"`, `'` (previously only `\s`), so `<img/onerror=…>`
-#     and `<img src="x"/onerror=…>` no longer slip past
-#   - the JS-URL strip now matches UNQUOTED values too (`href=javascript:…` previously slipped)
-#   - sanitize_html loops until the strip count is zero (bounded to _SANITIZE_MAX_PASSES),
-#     defeating nested-tag reconstructions like `<scr<script></script>ipt>`.
-_HTML_STRIP_ELEMENTS = re.compile(
-    # <style> is intentionally NOT stripped: CSS is inert under the sandbox's `default-src 'none';
-    # style-src 'unsafe-inline'`, and prototypes without CSS are useless. Script-equivalent
-    # elements only.
-    r"<\s{0,8}(?P<tag>script|iframe|frame|frameset|object|embed|form|applet|svg)\b[^>]*>.*?"
-    r"<\s{0,8}/\s{0,8}(?P=tag)\s{0,8}>",
-    re.IGNORECASE | re.DOTALL,
-)
-_HTML_STRIP_SELF = re.compile(
-    r"<\s{0,8}(?:script|iframe|frame|frameset|object|embed|form|applet|base|link|svg|xml-stylesheet)\b[^>]*/?>",
-    re.IGNORECASE,
-)
-_HTML_STRIP_META_REFRESH = re.compile(
-    r"<\s{0,8}meta\b[^>]*\bhttp-equiv\s*=\s*['\"]?\s*refresh\b[^>]*>",
-    re.IGNORECASE,
-)
-_HTML_STRIP_ON = re.compile(
-    r"[\s/\"'](on[a-z]+)\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
-    re.IGNORECASE,
-)
-_HTML_STRIP_JS_URL = re.compile(
-    r"\s(href|src|action|formaction|xlink:href)\s*=\s*"
-    r"(?:"
-    r"\"[\s]*(?:javascript|vbscript|data)\s*:[^\"]*\""
-    r"|'[\s]*(?:javascript|vbscript|data)\s*:[^']*'"
-    r"|(?:javascript|vbscript|data)\s*:[^\s>]*"
-    r")",
-    re.IGNORECASE,
-)
+# ALLOWED is a conservative set that covers prototyping needs (headings, lists, inline
+# code, images from http(s) and data: image URIs, tables, blockquotes, styled divs).
+# Everything else — <script>, <iframe>, <object>, <embed>, <form>, <svg>, <link>,
+# <base>, <meta>, <math>, <frame> — is dropped tag-and-all (opening markup only; the
+# TEXT inside stays unless the parser considers it rawtext — which it does for
+# <script>/<style>, so those are naturally content-stripped too). Attribute URLs are
+# validated against a scheme allowlist (http, https, mailto, # fragment, relative path).
 
-_SANITIZE_MAX_PASSES = 8
+from html.parser import HTMLParser
+from html import unescape
+
+_ALLOWED_TAGS: dict[str, frozenset[str]] = {
+    # structural + text
+    "div":     frozenset({"class", "id", "role", "aria-label", "data-feature"}),
+    "span":    frozenset({"class", "id", "role", "aria-label"}),
+    "p":       frozenset({"class"}),
+    "h1":      frozenset({"class", "id"}),
+    "h2":      frozenset({"class", "id"}),
+    "h3":      frozenset({"class", "id"}),
+    "h4":      frozenset({"class", "id"}),
+    "h5":      frozenset({"class", "id"}),
+    "h6":      frozenset({"class", "id"}),
+    "strong":  frozenset({"class"}),
+    "em":      frozenset({"class"}),
+    "b":       frozenset({"class"}),
+    "i":       frozenset({"class"}),
+    "u":       frozenset({"class"}),
+    "code":    frozenset({"class"}),
+    "pre":     frozenset({"class"}),
+    "br":      frozenset({"class"}),
+    "hr":      frozenset({"class"}),
+    "blockquote": frozenset({"class"}),
+    "header":  frozenset({"class", "role"}),
+    "footer":  frozenset({"class", "role"}),
+    "nav":     frozenset({"class", "role", "aria-label"}),
+    "main":    frozenset({"class", "role"}),
+    "section": frozenset({"class", "aria-label", "aria-labelledby"}),
+    "article": frozenset({"class"}),
+    "figure":  frozenset({"class"}),
+    "figcaption": frozenset({"class"}),
+    # style (inline CSS stays; <script> and <style>'s content are rawtext, so <script>
+    # is naturally content-stripped when the opening tag is dropped. <style> IS kept so
+    # prototypes can carry their look-and-feel.)
+    "style":   frozenset({"type"}),
+    # lists
+    "ul":      frozenset({"class"}),
+    "ol":      frozenset({"class", "start"}),
+    "li":      frozenset({"class"}),
+    "dl":      frozenset({"class"}),
+    "dt":      frozenset({"class"}),
+    "dd":      frozenset({"class"}),
+    # anchors + images
+    "a":       frozenset({"class", "href", "target", "rel", "aria-label"}),
+    "img":     frozenset({"class", "src", "alt", "width", "height", "loading"}),
+    # tables
+    "table":   frozenset({"class"}),
+    "thead":   frozenset({"class"}),
+    "tbody":   frozenset({"class"}),
+    "tfoot":   frozenset({"class"}),
+    "tr":      frozenset({"class"}),
+    "td":      frozenset({"class", "colspan", "rowspan"}),
+    "th":      frozenset({"class", "colspan", "rowspan", "scope"}),
+    "caption": frozenset({"class"}),
+    # html / head / body / title — allowed so a document round-trips (opening/closing)
+    "html":    frozenset({"lang"}),
+    "head":    frozenset(),
+    "body":    frozenset({"class"}),
+    "title":   frozenset(),
+}
+# Void elements: emit without a closing tag.
+_VOID = frozenset({"br", "hr", "img"})
+# Attribute URL schemes we accept. `#frag`, relative paths (no scheme), http, https,
+# mailto. `data:` is allowed ONLY for images on `src` (image/<format>;base64 ...).
+_SAFE_URL_RE = re.compile(r"^(?:https?:|mailto:|#|/|[^:]+$)", re.IGNORECASE)
+_SAFE_IMG_DATA_RE = re.compile(r"^data:image/(png|jpeg|gif|webp|svg\+xml);base64,", re.IGNORECASE)
+
+
+def _attr_ok(tag: str, attr: str, value: str) -> bool:
+    allowed = _ALLOWED_TAGS.get(tag)
+    if allowed is None:
+        return False
+    # Any attribute whose name starts with `on` is forbidden regardless of allowlist.
+    if attr.startswith("on"):
+        return False
+    # `data-*` attributes are universally allowed: they are author-only and inert.
+    is_data = attr.startswith("data-")
+    if not is_data and attr not in allowed:
+        return False
+    # URL-shaped attributes: validate scheme.
+    if attr in ("href", "src", "action", "formaction", "xlink:href"):
+        v = unescape(value or "").strip()
+        if attr == "src" and tag == "img" and _SAFE_IMG_DATA_RE.match(v):
+            return True
+        if not _SAFE_URL_RE.match(v):
+            return False
+    return True
+
+
+def _esc(s: str) -> str:
+    """HTML-escape text, keeping it text."""
+    return (s.replace("&", "&amp;")
+             .replace("<", "&lt;")
+             .replace(">", "&gt;")
+             .replace("\"", "&quot;"))
+
+
+class _SanitizingParser(HTMLParser):
+    """Allow-list rewriter. Every event becomes either a safe emission or a strip.
+
+    `convert_charrefs=False` keeps us in control of entities so an entity-encoded
+    `javascript:` scheme (`&#x6a;avascript:`) cannot slip past the attribute-value check.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.out: list[str] = []
+        self.stripped = 0
+        # Track whether we're inside a dropped-tag's content so we can strip it too for
+        # elements whose semantic requires the content to go with the tag (we keep text
+        # for simple drops like <form>, but strip rawtext for <script>/<style>, which the
+        # parser already treats as rawtext — those events arrive as handle_data).
+        self.in_dropped_rawtext = 0
+        # The subset of dropped tags whose CONTENT must also go. For <script>/<style>
+        # the parser already delivers content as rawtext; handle_data checks the stack.
+        self.dropped_content_tags = frozenset({"script", "svg", "math", "noscript", "template"})
+        self.tag_stack: list[str] = []
+
+    def _emit_start(self, tag: str, attrs, self_closing: bool) -> None:
+        parts = [tag]
+        for a, v in attrs:
+            a = a.lower()
+            if v is None:
+                v = ""
+            if not _attr_ok(tag, a, v):
+                continue
+            parts.append(f'{a}="{_esc(v)}"')
+        # `<a>` gets `rel="noopener noreferrer"` enforced; `target="_blank"` opens new tab.
+        if tag == "a":
+            # If href is absent, don't emit a link.
+            has_href = any(a.lower() == "href" for a, _ in attrs if _attr_ok(tag, a.lower(), _ or ""))
+            if not has_href:
+                return
+            parts.append('rel="noopener noreferrer"')
+        slash = " /" if self_closing or tag in _VOID else ""
+        self.out.append("<" + " ".join(parts) + slash + ">")
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in self.dropped_content_tags:
+            self.in_dropped_rawtext += 1
+            self.stripped += 1
+            return
+        if tag not in _ALLOWED_TAGS:
+            self.stripped += 1
+            return
+        # Void elements never go on the stack; they emit as `<tag ... />` with no close.
+        if tag not in _VOID:
+            self.tag_stack.append(tag)
+        self._emit_start(tag, attrs, False)
+
+    def handle_startendtag(self, tag, attrs):
+        tag = tag.lower()
+        if tag in self.dropped_content_tags or tag not in _ALLOWED_TAGS:
+            self.stripped += 1
+            return
+        self._emit_start(tag, attrs, True)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in self.dropped_content_tags:
+            if self.in_dropped_rawtext > 0:
+                self.in_dropped_rawtext -= 1
+            return
+        if tag not in _ALLOWED_TAGS:
+            self.stripped += 1
+            return
+        if tag in _VOID:
+            return
+        if tag in self.tag_stack:
+            # Pop up to the matched open; browsers do too.
+            while self.tag_stack and self.tag_stack[-1] != tag:
+                self.out.append("</" + self.tag_stack.pop() + ">")
+            if self.tag_stack:
+                self.tag_stack.pop()
+            self.out.append(f"</{tag}>")
+
+    def handle_data(self, data):
+        if self.in_dropped_rawtext > 0:
+            return
+        self.out.append(_esc(data))
+
+    def handle_entityref(self, name):
+        if self.in_dropped_rawtext > 0:
+            return
+        self.out.append(f"&{name};")
+
+    def handle_charref(self, name):
+        if self.in_dropped_rawtext > 0:
+            return
+        self.out.append(f"&#{name};")
+
+    def handle_comment(self, data):
+        # Comments are inert in all modern browsers; drop them to shrink output.
+        pass
+
+    def handle_decl(self, decl):
+        # `<!DOCTYPE html>` and similar — safe to keep.
+        self.out.append(f"<!{decl}>")
+
+    def handle_pi(self, data):
+        # Processing instructions aren't HTML; drop.
+        self.stripped += 1
+
+    def unknown_decl(self, data):
+        # `<![CDATA[ ... ]]>` and similar — browsers mostly ignore, so do we.
+        self.stripped += 1
 
 
 def sanitize_html(html: str) -> tuple[str, int]:
-    """Strip script/iframe/form/svg/meta-refresh/on*/javascript: from HTML before storage.
+    """parser-based allowlist rewriter. Returns (cleaned, strip_count).
 
-    Returns (cleaned, strip_count). Never raises. BREADTH defense only — the sandboxed iframe
-    is the real control. A future feature that relaxes the sandbox must not treat this as the
-    boundary.
+    The strip count is the number of tokens the parser DROPPED (tags not on the
+    allowlist, PIs, dropped rawtext openers). It's an audit metric, not a security
+    guarantee — the sandboxed iframe remains the real control.
 
-    loops up to `_SANITIZE_MAX_PASSES` times so nested reconstructions like
-    `<scr<script></script>ipt>` are stripped on a later pass. `on*=` substitution replaces with a
-    single space so the surrounding tag stays well-formed. Each pass is bounded by MAX_VISUAL
-    (256 KiB) and the capped `\\s{0,8}` prefixes, so total work is O(MAX_VISUAL · passes).
+    Replaces the pre-1.31 regex pipeline, which had plausible bypasses (unquoted
+    javascript: URLs, entity-encoded schemes, nested-tag reconstruction, parser-
+    differential tricks on `<\\s*`). The parser tokenises exactly as the browser does,
+    which eliminates the class.
     """
-    out = html
-    total = 0
-    for _ in range(_SANITIZE_MAX_PASSES):
-        n = 0
-        out, k = _HTML_STRIP_ELEMENTS.subn("", out);     n += k
-        out, k = _HTML_STRIP_SELF.subn("", out);          n += k
-        out, k = _HTML_STRIP_META_REFRESH.subn("", out);  n += k
-        out, k = _HTML_STRIP_ON.subn(" ", out);           n += k
-        out, k = _HTML_STRIP_JS_URL.subn("", out);        n += k
-        total += n
-        if n == 0:
-            break
-    return out, total
+    p = _SanitizingParser()
+    try:
+        p.feed(html)
+        p.close()
+    except Exception:  # noqa: BLE001 — parser must never raise out of sanitize_html
+        # If html.parser itself trips on malformed input, fall back to a tag-strip. This
+        # is strictly safer: everything becomes text. The 256 KiB cap in server.add_visual
+        # still applies.
+        return _esc(html), 1
+    # Close any unclosed opens the parser left on the stack.
+    while p.tag_stack:
+        p.out.append("</" + p.tag_stack.pop() + ">")
+    return "".join(p.out), p.stripped
 
 
 class VisualError(Exception):

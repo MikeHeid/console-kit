@@ -2998,6 +2998,14 @@
       textCol.appendChild(srcEl);
     }
     if (qData.agent) textCol.appendChild(el('div', { className: 'ck-q-agent' }, ['asked by ' + qData.agent]));
+    // grill provenance — if this qid is on view.grill_qids, show a ⚡ chip so the
+    // operator sees the question was written by an agent IN RESPONSE TO their own grill
+    // request. Different weight than a question an agent raised independently.
+    if (view && Array.isArray(view.grill_qids) && view.grill_qids.indexOf(qData.qid) >= 0) {
+      textCol.appendChild(el('div', { className: 'ck-q-grill-chip',
+        'aria-label': 'This question came from a grill-with-agent request' },
+        [el('span', { 'aria-hidden': 'true' }, ['⚡']), ' grill-origin']));
+    }
     const chips = tagChips(questionTags(qData.qid));
     if (chips) textCol.appendChild(chips);
     const direction = renderDirectionStrip(q);
@@ -4216,51 +4224,74 @@
   // Fix #6: wrap rejected in <s> with visually-hidden text for screen readers
   // Render PR chips threaded to a ruling. Each chip opens the PR in a new tab.
   // Merged PRs get a visibly distinct variant so the operator can see "this ruling shipped".
-  // GitHub Issues threaded to a ruling. Open issues render as outlines; closed as
-  // filled grey (the discussion wrapped up). Each chip opens the issue in a new tab via its
-  // own canonical URL from the stored snapshot.
-  function renderIssueBacklinks(backlinks) {
-    const wrap = el('div', { className: 'ck-issue-backlinks', role: 'group',
-      'aria-label': 'Issues that discuss this ruling' });
-    wrap.appendChild(el('span', { className: 'ck-issue-backlinks-label' }, ['Discussed in: ']));
-    for (const is of backlinks) {
-      if (!is || typeof is.number !== 'number') continue;
-      const closed = is.state === 'closed';
+  // Only accept canonical GitHub URLs on backlink chips. pre-this release the
+  // href fell back to '#' on an unknown shape; a `javascript:` URL in a stored snapshot
+  // would have been accepted (the snapshot schema pins it to github.com/.../pull/N or
+  // /issues/N, but client-side defense-in-breadth is cheap).
+  function safeGithubUrl(url) {
+    if (typeof url !== 'string') return '#';
+    if (!url.startsWith('https://github.com/')) return '#';
+    return url;
+  }
+
+  // one chip strip builder shared by PR and Issue backlinks. Pre-1.31 these
+  // were near-identical copies that drifted (PR had no dedup, issue did; different
+  // href-fallback shapes). `author` now appears on every chip so the operator can see
+  // that an issue titled "A/Q7: do X" was filed by @randomdrive-by, not by the team.
+  //
+  //   kind:    'pr' | 'issue'
+  //   label:   the prefix text ("Shipped (merged): ", "Mentioned in: ")
+  //   items:   backlinks[]
+  //   isPrimary: (item) => bool — e.g. merged, closed; renders the "filled" chip variant
+  //   stateWord: (item) => short string for aria-label ("merged" / "closed" / "open")
+  function renderBacklinkChips(kind, label, items, isPrimary, stateWord) {
+    const wrapClass = kind === 'pr' ? 'ck-pr-backlinks' : 'ck-issue-backlinks';
+    const chipClass = kind === 'pr' ? 'ck-pr-chip' : 'ck-issue-chip';
+    const primaryClass = kind === 'pr' ? 'ck-pr-chip-merged' : 'ck-issue-chip-closed';
+    const glyphClass = kind === 'pr' ? 'ck-pr-chip-glyph' : 'ck-issue-chip-glyph';
+    const wrap = el('div', { className: wrapClass, role: 'group',
+      'aria-label': kind === 'pr' ? 'Pull requests that cite this ruling'
+                                   : 'Issues that mention this ruling' });
+    wrap.appendChild(el('span', { className: wrapClass + '-label' }, [label]));
+    for (const it of items) {
+      if (!it || typeof it.number !== 'number') continue;
+      const primary = isPrimary(it);
+      const author = typeof it.author === 'string' && it.author ? it.author : null;
+      const chipChildren = [
+        el('span', { className: glyphClass, 'aria-hidden': 'true' },
+          [primary ? '●' : (kind === 'pr' ? '○' : '◉')]),
+        el('span', {}, ['#' + it.number])
+      ];
+      if (author) {
+        chipChildren.push(el('span', { className: 'ck-backlink-author ck-muted' },
+          [' by @' + author]));
+      }
       const chip = el('a', {
-        className: 'ck-issue-chip' + (closed ? ' ck-issue-chip-closed' : ''),
-        href: typeof is.url === 'string' ? is.url : '#',
+        className: chipClass + (primary ? ' ' + primaryClass : ''),
+        href: safeGithubUrl(it.url),
         target: '_blank',
         rel: 'noopener',
-        'aria-label': 'Open issue #' + is.number + (closed ? ' (closed)' : ' (open)')
-      }, [
-        el('span', { className: 'ck-issue-chip-glyph', 'aria-hidden': 'true' }, [closed ? '●' : '◉']),
-        el('span', {}, ['#' + is.number])
-      ]);
+        'aria-label': 'Open ' + (kind === 'pr' ? 'pull request' : 'issue')
+          + ' #' + it.number + ' (' + stateWord(it) + ')'
+          + (author ? ' by ' + author : '')
+      }, chipChildren);
       wrap.appendChild(chip);
     }
     return wrap;
   }
-
+  function renderIssueBacklinks(backlinks) {
+    // label changed from "Discussed in" to "Mentioned in" — the security review
+    // noted that anyone with a GitHub account can inject a qid literal into an issue
+    // body, so framing the chip as a mention (not a trust-weighted "discussion") is honest.
+    return renderBacklinkChips('issue', 'Mentioned in: ', backlinks,
+      (is) => is.state === 'closed',
+      (is) => is.state === 'closed' ? 'closed' : 'open');
+  }
   function renderPrBacklinks(backlinks) {
-    const wrap = el('div', { className: 'ck-pr-backlinks', role: 'group',
-      'aria-label': 'Pull requests that cite this ruling' });
-    wrap.appendChild(el('span', { className: 'ck-pr-backlinks-label' }, ['Shipped as: ']));
-    for (const pr of backlinks) {
-      if (!pr || typeof pr.number !== 'number') continue;
-      const merged = pr.state === 'merged' || !!pr.merged_at;
-      const chip = el('a', {
-        className: 'ck-pr-chip' + (merged ? ' ck-pr-chip-merged' : ''),
-        href: typeof pr.url === 'string' ? pr.url : '#',
-        target: '_blank',
-        rel: 'noopener',
-        'aria-label': 'Open pull request #' + pr.number + (merged ? ' (merged)' : ' (' + (pr.state || 'open') + ')')
-      }, [
-        el('span', { className: 'ck-pr-chip-glyph', 'aria-hidden': 'true' }, [merged ? '●' : '○']),
-        el('span', {}, ['#' + pr.number])
-      ]);
-      wrap.appendChild(chip);
-    }
-    return wrap;
+    return renderBacklinkChips('pr', 'Shipped: ', backlinks,
+      (pr) => pr.state === 'merged' || !!pr.merged_at,
+      (pr) => pr.state === 'merged' || !!pr.merged_at
+        ? 'merged' : (pr.state || 'open'));
   }
 
   function renderReceipt(qData, answer) {
