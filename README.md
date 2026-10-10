@@ -5,25 +5,214 @@
   </picture>
 </h1>
 
-> **Overture is the self-hosted owner-operator layer for AI software
-> development: one web cockpit, behind your own Cloudflare Access, that
-> unifies every AI-coding project you run — Portfolio and cross-project
-> Priority ribbon, Playbooks and Triggers with branching and replay,
-> Command palette and deep links for owner speed, and a full audit
-> trail from trigger log to Markdown export. In a market of AI
-> assistants that generate code, Overture is the trust-first
-> control plane — SHA-256 secret drift checks, sandboxed-iframe
-> visuals with no CDN, closed-set predicate validation, signed
-> releases — that keeps a single operator in command of what gets
-> shipped across many projects without surrendering oversight to a
-> third-party SaaS.
+<p align="center">
+  <strong>The decision layer for AI software development.</strong><br>
+  Your agents ask. You rule. Your rulings stay honest as the code moves.
+</p>
 
-**Answer your agents' questions from a web page.** An agent working in a
-project asks you structured questions: options, a recommended pick (★), what
-each costs, and the evidence behind it. You answer from any browser, behind
-Cloudflare Access. The next Claude session in that project is told what
-arrived, acts on it, and folds your locked answers into the project's own
-record.
+<p align="center">
+  <img alt="version" src="https://img.shields.io/badge/version-1.31.0-0969da">
+  <img alt="tests" src="https://img.shields.io/badge/tests-723-2da44e">
+  <img alt="runtime" src="https://img.shields.io/badge/runtime-Python%20stdlib%20%2B%20PyJWT-555">
+  <img alt="hosting" src="https://img.shields.io/badge/hosting-self--hosted-8250df">
+  <img alt="plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-d97757">
+</p>
+
+---
+
+## Why Overture exists
+
+AI agents now write much of the code. Two things have become scarce:
+
+- **the owner's attention**, and
+- **a reliable record of why the code is the way it is.**
+
+An agent that has to stop and ask has two bad choices today. It can block the
+terminal with a prompt that disappears when the session ends. Or it can guess,
+and the guess becomes architecture nobody chose.
+
+Overture is a Claude Code plugin plus a small self-hosted server. Together they
+turn every one of those moments into a **ruling**:
+
+1. **An agent asks a structured question.** It gives options, a recommended
+   pick (★) with who recommended it, what each option costs, and evidence that
+   cites `path:lines` in the repository.
+2. **You answer from any browser**, behind your own Cloudflare Access. You can
+   answer one at a time, or as a keyboard-driven round: `1`–`9` to pick, then
+   **Lock all**.
+3. **Locking turns the answer into a ruling**: a commitment, in your own words,
+   that every later agent session inherits.
+4. **The ruling watches the code it rests on.** Each ruling declares what must
+   stay true (`valid_if`): a cited excerpt, a file hash, or an item's status.
+   When that stops holding, the ruling reads **stale**, and **Why stale?** says
+   which check failed. You then re-lock it, replace it, withdraw it, or stop
+   checking it, on purpose.
+5. **The steward folds rulings into your repository's own decision log.** The
+   steward is one named session. The fold goes through a pull request, in your
+   git, not a vendor's database.
+
+```mermaid
+flowchart LR
+  A[Agent session] -- "ask: options · ★ · cost · evidence" --> I[(Your inbox)]
+  I -- "answer + lock" --> R{{Living ruling}}
+  R -- "valid_if holds" --> K[Future agents inherit it]
+  R -- "code moved" --> S[Stale: Why stale?]
+  S -- "re-lock / replace / withdraw" --> R
+  R -- "steward folds via PR" --> L[(Repo decision log)]
+  L -. "Shipped: / Mentioned in" .-> G[PRs & issues]
+```
+
+GitHub reviews **diffs**. Claude Code runs **sessions**. Cloudflare guards the
+**door**. Overture holds the **decisions** between them, and checks each one
+against the code it rests on.
+
+## Status at a glance (v1.31.0)
+
+| | |
+|---|---|
+| **Releases** | 85 commits, 0.7.0 → 1.31.0, each documented in [CHANGELOG.md](CHANGELOG.md) |
+| **Tests** | 723 test functions across 6 suites: kit 303, server 285, browser 78, onboard 31, build 15, vendor 11 |
+| **Server footprint** | Python standard library plus `PyJWT` and `cryptography`. No CDN: Mermaid and Cytoscape are vendored and checksum-verified. |
+| **Plugin surface** | 15 skills, 8 committee agents, 4 hook scripts on 3 events, ~40 `agent.py` commands |
+| **Latest release** | **1.31 Hardening**: parser-based HTML sanitizer, a per-request CSP nonce, CSRF rotation without a restart, author provenance on backlinks, a GRILL-ORIGIN badge |
+| **Operator model** | One owner per console. Many consoles are joined through the Portfolio and the cross-project priority ribbon. |
+
+## Roadmap: lanes, waves and progress
+
+The percentages below are judgement calls from the advisory review in
+[docs/STRATEGY.md](docs/STRATEGY.md), not measurements. They estimate how far
+each lane has got toward a *category-defining 1.0*: the version a team would
+adopt as its default way to supervise AI agents. They are grounded in what the
+code does today and what it lacks.
+
+### Lanes
+
+| Lane | Progress | What is done | What comes next |
+|---|---|---|---|
+| **Core decision engine**: questions, locks, anchors, the fold | `██████████████░░░░░░` **70%** | Typed questions with evidence; Living rulings with excerpt/sha256/status anchors; git-evidenced `reanchor`; append-only owner acts; a two-step reviewed fold; deliberation seats (roar, refine, drill, deliberate) | Symbol/AST anchors next to excerpts; agents check "rulings touching this path" before they edit; rulings as a CI check; ruling search and dependencies across items |
+| **Trust & security** | `█████████████░░░░░░░` **65%** | Access JWT on every request, loopback included; the server runs no project code and no git; closed-schema pushes; O_NOFOLLOW atomic writes; sandboxed visuals; nonce CSP; CSRF rotation; per-project tokens | Real release signing (sigstore/minisign); record *who* locked a ruling; a same-UID agent isolation recipe; built-in webhook HMAC; a collaborator-only trust filter on backlinks |
+| **Ecosystem & integrations** | `████████░░░░░░░░░░░░` **40%** | GitHub PRs and issues (`prs-push`, `issues-push`); "Shipped:" and "Mentioned in" backlinks; playbooks; webhook and cron triggers; adapters for any decision log | An MCP server so non-Claude agents can ask and query; Linear/Jira adapters; a Slack/email doorbell; ruling-aware PR comments; MADR/ADR adapter templates |
+| **Onboarding & distribution** | `███████░░░░░░░░░░░░░` **35%** | Plugin marketplace install; `/overture:console-onboard`; first-run hero; systemd installer; release zip with a deny-list build check | An identity backend other than Cloudflare (Tailscale/OIDC/loopback solo mode); launchd and Docker; a hosted demo console; a 5-minute path with no adapter |
+| **Team & multi-operator** | `███░░░░░░░░░░░░░░░░░` **15%** | One server can host many projects; Portfolio; a priority ribbon across consoles; Shift report | Named operators from Access identity; roles (owner/reviewer/observer); two-key locks for high-stakes rulings; routing questions by item or label; handoff reports |
+| **Overall, weighted toward the category 1.0** | `█████████░░░░░░░░░░░` **≈ 45%** | | |
+
+### Waves
+
+| Wave | Theme | Goal | Status |
+|---|---|---|---|
+| **Wave 1, The solo cockpit** (0.7 → 1.31) | One owner commanding many agents across many projects | Questions, Living rulings, the fold, deliberation, playbooks, triggers, Portfolio, the palette, Shift report, hardening | ✅ **100%: shipped** |
+| **Wave 2, Rulings that bite** | Solo depth and enforcement | A solo developer installs it in under 10 minutes, and a broken ruling blocks a bad merge. Symbol anchors, a CI Action, ruling lookup before an agent acts, signed releases, Docker/launchd, solo mode without Cloudflare | 🟡 **~15%**: excerpt-first anchors and reanchor are the base |
+| **Wave 3, Teams** | Several operators, accountable by name | Every record carries an operator identity; roles, routing, two-key locks, Slack/Linear. The audit trail holds up in a team review or a compliance setting. | 🟠 **~10%**: multi-project server and Portfolio are the base |
+| **Wave 4, Protocol** | From product to standard | Publish the question/ruling/`valid_if` format as an open spec, with an MCP reference server and adapters for other agent vendors. Overture becomes the reference implementation of a format others emit. | ⚪ **~5%**: the closed-set schema exists but is not yet published |
+
+## The moat
+
+An advisory board (product strategy, principal engineering, DevOps/SRE,
+security, developer-tools market) and a psychology team (cognitive,
+organizational, human factors, behavioral science) each reviewed the project.
+Their full reports are in [docs/STRATEGY.md](docs/STRATEGY.md). They ranked
+three moats:
+
+1. **Living rulings.** A decision that notices when the code under it has
+   moved. The hard part to copy is the edge cases already worked out, not the
+   idea:
+   - excerpts that hold anywhere in a file, ignoring whitespace;
+   - refusals for secrets, symlinks and oversized files;
+   - re-anchoring only when pushed git history proves the cited lines;
+   - refusing whole-file hashes where an excerpt fits;
+   - a year of owner rulings on what a stale decision *means*.
+
+   ([`anchors.py`](plugin/kit/overture/anchors.py),
+   [`refactor.py`](plugin/kit/overture/refactor.py))
+2. **The fold.** A reviewed gate from the console into *your* repository's
+   decision log. It is two-step and all-or-nothing, and rerunning it is safe.
+   The record of why lives in your git, not a SaaS database. This is the trust
+   argument no hosted competitor can make.
+   ([`fold.py`](plugin/kit/overture/fold.py))
+3. **The decision → outcome thread.** Every PR and issue that names a ruling is
+   linked back to it, and the Shift report measures time-to-answer and merged
+   PRs per ruling. The mechanism is easy to copy. The history it builds up is
+   not.
+
+## Why this changes development
+
+**The thesis.** When agents write most of the code, the valuable artifact is
+no longer the diff. It is the **decision** that shaped the diff. Today that
+decision is lost in a transient prompt, buried in a growing `CLAUDE.md`, or
+never made at all. Overture turns it into a *typed, evidenced, falsifiable
+constraint*. Agents must cite it, owners can audit it, and the code itself
+checks it.
+
+How it amplifies **an individual developer**:
+
+- **Interruptions become a batch you pull.** The `ask_guard` hook stops
+  non-steward sessions from blocking you with `AskUserQuestion` and routes
+  their questions to the inbox. You decide on your own schedule, not N agents'
+  schedules. Interruption research (Gloria Mark) shows how costly an
+  interruption is to recover from. Overture removes that cost by design.
+- **System 1 for the routine, System 2 where it matters.** The ★ default and
+  the 1–9 keyboard rounds make low-stakes calls fast. The cost shown before
+  deliberating (about 100k tokens a seat) makes deep thinking a deliberate
+  choice.
+- **Calibrated trust, not blind trust.** Research on trust in automation (Lee
+  & See; Parasuraman & Riley) says trust should track how reliable a thing
+  actually is. A stale flag is exactly that signal: *this* ruling's premise
+  just changed, so trust it less until you look.
+- **Situation awareness across many agents.** This covers all three of
+  Endsley's levels:
+  - *perceive*: status chip, active agents, Portfolio tallies;
+  - *comprehend*: Status flowchart, Project map, "what's new";
+  - *project*: a priority ribbon with traffic-light ages, and a stale count as
+    debt that is building up.
+
+How it amplifies **a team**:
+
+- **A shared memory of why.** Every ruling carries the question, the options,
+  the costs, the evidence, the owner's own words and forward links to PRs. A
+  new teammate learns *why* the code is the way it is from the decision log,
+  not by finding the right person to ask. This is a transactive memory system
+  (Wegner) that lives in git.
+- **Built-in dissent.** Adversarial, security and Roar seats make challenge a
+  standing part of the process instead of a social risk (Edmondson,
+  psychological safety). Launch Idea's five grill questions run a pre-mortem
+  (Klein) before work starts.
+- **Less bikeshedding.** Bounded options with a stated cost cap how wide a
+  debate can get.
+- **Accountability that sharpens thinking.** Locking is a public commitment.
+  When people expect to justify a choice, they decide more carefully (Lerner &
+  Tetlock).
+
+**How it becomes the standard.** It goes through three stages:
+
+1. **Within one repository**, every lock is a constraint that every future
+   session inherits, so the value grows with use.
+2. **Across one owner's portfolio**, the priority ribbon pools that owner's
+   attention.
+3. **Across the industry**, the step is Wave 4: publish the question/ruling/
+   `valid_if` format as an open spec, an "ADR for agents" that any agent vendor
+   can emit and any console can check. Standards come from formats, not
+   products. Overture gives up a proprietary schema and keeps what cannot be
+   copied: the engine's judgement and each team's history of rulings.
+
+**What could stop it.** Being honest about the risks is part of the case:
+
+- **Platform risk.** Claude Code or GitHub could ship "agent questions"
+  natively. Overture's answer is to be the open format plus the most careful
+  engine, so a native feature can adopt the format rather than replace it.
+- **Single operator.** Locks record `by: "owner"`, not a person, so teams
+  can't use it yet. That is Wave 3.
+- **Setup friction.** A Cloudflare account, an Access app, a tunnel and
+  systemd keep many developers out. That is Wave 2.
+- **Lexical anchors.** A behaviour change that leaves the cited text intact
+  never goes stale. Symbol anchors are the next step.
+- **Automation bias and question fatigue.** If agents ask too much, owners
+  rubber-stamp the ★. Planned mitigations:
+  - ★-acceptance rate per recommender in the Shift report;
+  - a "blind pick" mode for high-stakes questions;
+  - leaving changed-evidence questions out of **Lock all**;
+  - reporting withdrawn and replaced rulings next to speed metrics.
+
+---
 
 This README describes the kit as it is today. [CHANGELOG.md](CHANGELOG.md)
 says what each release added.
@@ -448,6 +637,10 @@ either side. A few traps worth knowing:
     .venv/bin/python test_kit.py && .venv/bin/python test_server.py && .venv/bin/python test_onboard.py
     .venv/bin/python test_build.py
     OVERTURE_BROWSER=1 .venv/bin/python test_browser.py   # needs playwright + browsers
+
+Three `test_kit.py` compatibility tests start older released kits, so they
+need the `v0.8.7` and `v0.8.8` tags; in a shallow or tag-less clone run
+`git fetch --tags` first, or they fail and name the missing tag.
 
 `test_server.py`'s syscall tests need `strace`, and FAIL when it is missing,
 so they cannot quietly not run. On a machine without it, set
