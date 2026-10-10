@@ -26,7 +26,7 @@ It has three parts:
 
 | Part | Where it runs | What it does |
 |---|---|---|
-| **server** (`server.py`) | a `systemd --user` service on loopback, one per project today | serves the page, keeps the store and the doorbell in a state directory, checks every request's Access token |
+| **server** (`server.py`) | on loopback: a `systemd --user` service per project, or one shared server for all of them (`server.py --all`) | serves the page, keeps the store and the doorbell in a state directory, checks every request's Access token |
 | **agent side** (`agent.py`, `fold.py`) | in the agent's shell | asks, replies, reads the inbox, waits on the doorbell, folds |
 | **Claude Code plugin** | in every Claude session you open | a SessionStart note of what you sent, the skills (`console-process`, `console-fork`, `console-fold`, `console-ask`, `console-visual`, `as`, `console-onboard`), the committee seat agents |
 
@@ -52,11 +52,18 @@ ruling, CONSOLE-kit/Q13.)
 Either way, an upgrade is something you do on purpose. Moving a project's
 branch never changes the kit.
 
-**Still to come (spec'd, not built):** one console **server** for all your
-projects. Each project's install will link into it through an API with a
-per-project token, and keep its own store. The design is in
-`overture-multiproject.md`. Until it ships, each project runs its own
-server process from the shared install.
+**One server for all your projects.** `server.py --all` serves every
+project you host on it from one process. You add a project with `agent.py
+--state <state dir> server add NAME …`; you run it, never an agent. Each
+project keeps its own store in its own state directory and its own port and
+Access application. Its agents reach the server with that project's own
+`ck1_` token, kept in `~/.config/overture/tokens/NAME` (mode 0600, outside
+every repository). `agent.py` picks the project from the directory it runs
+in, so there is no token to pass. `agent.py server token rotate NAME`
+refuses the old token from the next request. What the token does and does
+not protect: [README.md](../README.md) "What a project token protects". A
+project you have not added still runs its own server process from the shared
+install.
 
 ## Register a project
 
