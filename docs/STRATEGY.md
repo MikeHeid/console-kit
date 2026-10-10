@@ -18,8 +18,44 @@ Two caveats apply to everything below:
 - The psychological effects are inferred from the design, not measured on
   users.
 
-The README's [roadmap](../README.md#roadmap-lanes-waves-and-progress)
+The README's [Where it's going](../README.md#where-its-going) section
 summarises this document.
+
+---
+
+## Part 0: The thesis
+
+AI agents now write a large share of the code, so the things that run short
+are **the owner's attention** and **a reliable record of why the code is the
+way it is**. When the diff is cheap, the valuable artifact is the *decision*
+that shaped it. Today that decision gets lost in a few places:
+
+- a terminal prompt that is gone when the session ends;
+- a `CLAUDE.md` that keeps growing;
+- nowhere at all, because the agent guessed.
+
+Overture turns each such decision into a constraint with four properties:
+
+- **typed:** options, a ★ and who recommended it, and the cost of each option;
+- **evidenced:** cited `path:lines`;
+- **falsifiable:** `valid_if` conditions that can stop holding;
+- **owned:** it is folded into the project's own git through a reviewed PR.
+
+Agents must cite it, the owner can audit it, and the code itself checks it.
+
+**How it compounds.**
+
+1. Within a repository, every lock is a constraint that later sessions
+   inherit.
+2. Across a portfolio of projects, the priority ribbon pools one owner's
+   attention.
+3. Across the industry, the step is Wave 4: publish the
+   question/ruling/`valid_if` format as an open spec, an "ADR for agents",
+   that any agent vendor can emit and any console can check.
+
+Standards come from formats, not products. Opening the format gives up the
+proprietary schema and keeps what cannot be copied: the engine's judgement
+calls and each team's history of rulings.
 
 ---
 
@@ -287,6 +323,7 @@ friction aimed at decision quality rather than speed.
 | Ecosystem & integrations | 40% | MCP server for non-Claude agents; Linear/Jira adapters; Slack/email doorbell; ruling-aware PR comments; MADR/ADR templates |
 | Onboarding & distribution | 35% | Identity backend other than Cloudflare (Tailscale/OIDC/solo loopback); launchd and Docker; hosted demo; 5-minute path with no adapter; fix the USER-GUIDE drift |
 | Team & multi-operator | 15% | Named operators; roles; two-key locks; routing; per-operator handoff |
+| **Overall**, weighted toward the category 1.0 | **≈45%** | |
 
 Each wave below builds on the one before it.
 

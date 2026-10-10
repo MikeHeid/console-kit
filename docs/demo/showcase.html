@@ -1,0 +1,202 @@
+<!doctype html>
+<!-- The showcase dashboard used for README screenshots (docs/demo/screenshots.py).
+     A fictional project, "Northwind platform rebuild", planned as waves -> phases -> lanes.
+     Overture injects its console into this page; every <section data-ck-item="ID">
+     gets a live question badge, and the Inbox docks on the right. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Northwind · Platform rebuild</title>
+<style>
+  :root {
+    --c-bg:#f6f8fa; --c-surface:#ffffff; --c-surface-alt:#f6f8fa; --c-border:#d0d7de; --c-border-light:#e6eaef;
+    --c-fg:#1f2328; --c-fg-muted:#59636e; --c-accent:#0969da; --c-accent-fg:#ffffff;
+    --c-open:#0969da; --c-open-bg:#ddf4ff; --c-claimed:#9a6700; --c-claimed-bg:#fff8c5;
+    --c-built:#1a7f37; --c-built-bg:#dafbe1; --c-blocked:#cf222e; --c-blocked-bg:#ffebe9;
+    --c-deferred:#6e7781; --c-deferred-bg:#eaeef2;
+    --w1:#1a7f37; --w2:#0969da; --w3:#8250df; --w4:#bf8700;
+    --radius-sm:6px; --radius-md:10px;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --c-bg:#0d1117; --c-surface:#161b22; --c-surface-alt:#1c2128; --c-border:#30363d; --c-border-light:#262c33;
+      --c-fg:#e6edf3; --c-fg-muted:#9198a1; --c-accent:#58a6ff; --c-accent-fg:#0d1117;
+      --c-open:#58a6ff; --c-open-bg:#0c2d6b; --c-claimed:#d29922; --c-claimed-bg:#3b2e0a;
+      --c-built:#3fb950; --c-built-bg:#12361d; --c-blocked:#f85149; --c-blocked-bg:#4a1210;
+      --c-deferred:#8b949e; --c-deferred-bg:#21262d;
+      --w1:#3fb950; --w2:#58a6ff; --w3:#bc8cff; --w4:#d29922;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--c-bg); color:var(--c-fg); font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { padding:22px 26px 60px; max-width:1180px; }
+  header.top { display:flex; align-items:center; gap:14px; margin-bottom:18px; flex-wrap:wrap; }
+  header.top h1 { font-size:21px; margin:0; letter-spacing:-.01em; }
+  .pill { font-size:12px; padding:2px 9px; border-radius:999px; border:1px solid var(--c-border); color:var(--c-fg-muted); background:var(--c-surface); }
+  .pill.ok { color:var(--c-built); border-color:var(--c-built); background:var(--c-built-bg); }
+  .grid { display:grid; gap:14px; }
+  .kpis { grid-template-columns:repeat(5,minmax(0,1fr)); margin-bottom:14px; }
+  .card { background:var(--c-surface); border:1px solid var(--c-border); border-radius:var(--radius-md); padding:14px 16px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--c-fg-muted); margin:0 0 10px; font-weight:600; }
+  .kpi .v { font-size:28px; font-weight:650; line-height:1.1; font-variant-numeric:tabular-nums; }
+  .kpi .l { color:var(--c-fg-muted); font-size:12.5px; }
+  .kpi .d { font-size:12px; margin-top:4px; }
+  .up { color:var(--c-built); } .warn { color:var(--c-claimed); } .bad { color:var(--c-blocked); }
+  .row2 { grid-template-columns: 1.25fr 1fr; margin-bottom:14px; }
+  .wave { display:grid; grid-template-columns:150px 1fr 46px; align-items:center; gap:10px; margin:9px 0; }
+  .wave b { font-weight:600; } .wave small { display:block; color:var(--c-fg-muted); font-size:11.5px; }
+  .bar { height:10px; border-radius:999px; background:var(--c-surface-alt); border:1px solid var(--c-border-light); overflow:hidden; display:flex; }
+  .bar i { display:block; height:100%; }
+  .pct { text-align:right; font-variant-numeric:tabular-nums; font-weight:600; }
+  .phases { display:flex; gap:6px; margin:2px 0 0 160px; flex-wrap:wrap; }
+  .ph { font-size:11px; padding:1px 7px; border-radius:var(--radius-sm); border:1px solid var(--c-border); color:var(--c-fg-muted); }
+  .ph.done { color:var(--c-built); border-color:var(--c-built); }
+  .ph.now { color:var(--c-accent-fg); background:var(--c-accent); border-color:var(--c-accent); }
+  svg text { fill:var(--c-fg-muted); font-size:10px; }
+  .legend { display:flex; gap:12px; font-size:12px; color:var(--c-fg-muted); margin-top:6px; }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:4px; vertical-align:-1px; }
+  .board { grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; }
+  .lane { background:var(--c-surface-alt); border:1px solid var(--c-border-light); border-radius:var(--radius-md); padding:8px; min-width:0; }
+  .lane > h3 { font-size:12.5px; margin:2px 4px 8px; display:flex; justify-content:space-between; }
+  .lane > h3 span { color:var(--c-fg-muted); font-weight:500; }
+  section[data-ck-item] { background:var(--c-surface); border:1px solid var(--c-border); border-left:3px solid var(--st); border-radius:var(--radius-sm); padding:7px 9px; margin:0 0 7px; }
+  section[data-ck-item] { position:relative; }
+  /* the console's live badge (questions waiting, locked, stale) rides the card's corner */
+  section[data-ck-item] > .ck-section-badge { position:absolute; top:6px; right:6px; margin:0; font-size:10.5px; padding:1px 7px; }
+  section[data-ck-item] .id { font:600 11px ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--c-fg-muted); }
+  section[data-ck-item] .t { font-size:12.5px; margin:1px 0 4px; }
+  section[data-ck-item] .m { display:flex; gap:6px; align-items:center; font-size:11px; color:var(--c-fg-muted); flex-wrap:wrap; }
+  .st { padding:0 6px; border-radius:999px; font-size:10.5px; font-weight:600; color:var(--st); background:var(--stbg); }
+  .s-built { --st:var(--c-built); --stbg:var(--c-built-bg); } .s-claimed { --st:var(--c-claimed); --stbg:var(--c-claimed-bg); }
+  .s-open { --st:var(--c-open); --stbg:var(--c-open-bg); } .s-blocked { --st:var(--c-blocked); --stbg:var(--c-blocked-bg); }
+  .s-deferred { --st:var(--c-deferred); --stbg:var(--c-deferred-bg); }
+  .row3 { grid-template-columns: 1fr 1fr 1fr; margin-top:14px; }
+  ul.feed { list-style:none; margin:0; padding:0; } ul.feed li { padding:6px 0; border-top:1px solid var(--c-border-light); font-size:12.5px; }
+  ul.feed li:first-child { border-top:0; } ul.feed code { font-size:11.5px; color:var(--c-accent); }
+  ul.feed .w { color:var(--c-fg-muted); font-size:11.5px; }
+  .agent { display:flex; align-items:center; gap:8px; padding:5px 0; font-size:12.5px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--c-built); flex:none; }
+  .dot.idle { background:var(--c-deferred); } .agent .w { margin-left:auto; color:var(--c-fg-muted); font-size:11.5px; }
+  .tabs { display:flex; gap:6px; margin:0 0 10px; } .tabs span { font-size:12px; padding:3px 10px; border-radius:999px; border:1px solid var(--c-border); color:var(--c-fg-muted); }
+  .tabs span.on { background:var(--c-fg); color:var(--c-bg); border-color:var(--c-fg); }
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <h1>Northwind · Platform rebuild</h1>
+    <span class="pill ok">● 5 agents working</span>
+    <span class="pill">Wave 2 · Phase 2.2 · week 14</span>
+    <span class="pill">main @ 4f2c9e1</span>
+  </header>
+
+  <div class="grid kpis">
+    <div class="card kpi"><div class="v">6</div><div class="l">Questions waiting for you</div><div class="d warn">oldest 3h</div></div>
+    <div class="card kpi"><div class="v">41</div><div class="l">Decisions locked</div><div class="d up">▲ 9 this week</div></div>
+    <div class="card kpi"><div class="v">1</div><div class="l">Decision gone stale</div><div class="d bad">code moved under them</div></div>
+    <div class="card kpi"><div class="v">17</div><div class="l">PRs merged this week</div><div class="d up">▲ 5 vs last week</div></div>
+    <div class="card kpi"><div class="v">38m</div><div class="l">Median time to answer</div><div class="d up">▼ 12m vs last week</div></div>
+  </div>
+
+  <div class="grid row2">
+    <div class="card">
+      <h2>Roadmap · waves and phases</h2>
+      <div class="wave"><div><b>Wave 1</b><small>Foundations</small></div><div class="bar"><i style="width:100%;background:var(--w1)"></i></div><div class="pct">100%</div></div>
+      <div class="phases"><span class="ph done">1.1 Repo &amp; CI</span><span class="ph done">1.2 Auth</span><span class="ph done">1.3 Data model</span></div>
+      <div class="wave"><div><b>Wave 2</b><small>Core services</small></div><div class="bar"><i style="width:64%;background:var(--w2)"></i><i style="width:12%;background:var(--w2);opacity:.35"></i></div><div class="pct">64%</div></div>
+      <div class="phases"><span class="ph done">2.1 Jobs &amp; queue</span><span class="ph now">2.2 Billing</span><span class="ph">2.3 Search</span></div>
+      <div class="wave"><div><b>Wave 3</b><small>Scale &amp; harden</small></div><div class="bar"><i style="width:18%;background:var(--w3)"></i></div><div class="pct">18%</div></div>
+      <div class="phases"><span class="ph">3.1 Multi-region</span><span class="ph">3.2 Observability</span><span class="ph">3.3 Pen test</span></div>
+      <div class="wave"><div><b>Wave 4</b><small>Launch</small></div><div class="bar"><i style="width:3%;background:var(--w4)"></i></div><div class="pct">3%</div></div>
+      <div class="phases"><span class="ph">4.1 Beta</span><span class="ph">4.2 Docs &amp; pricing</span><span class="ph">4.3 GA</span></div>
+    </div>
+    <div class="card">
+      <h2>Decisions per week · locked vs. waiting</h2>
+      <svg viewBox="0 0 420 170" width="100%" role="img" aria-label="Locked decisions per week rising from 3 to 9">
+        <g stroke="var(--c-border-light)"><line x1="28" y1="20" x2="412" y2="20"/><line x1="28" y1="60" x2="412" y2="60"/><line x1="28" y1="100" x2="412" y2="100"/><line x1="28" y1="140" x2="412" y2="140"/></g>
+        <text x="4" y="24">12</text><text x="8" y="64">8</text><text x="8" y="104">4</text><text x="8" y="144">0</text>
+        <g fill="var(--w2)">
+          <rect x="40" y="110" width="22" height="30" rx="3"/><rect x="88" y="100" width="22" height="40" rx="3"/><rect x="136" y="90" width="22" height="50" rx="3"/>
+          <rect x="184" y="100" width="22" height="40" rx="3"/><rect x="232" y="70" width="22" height="70" rx="3"/><rect x="280" y="80" width="22" height="60" rx="3"/>
+          <rect x="328" y="60" width="22" height="80" rx="3"/><rect x="376" y="50" width="22" height="90" rx="3"/>
+        </g>
+        <polyline fill="none" stroke="var(--w4)" stroke-width="2.5" stroke-linejoin="round" points="51,90 99,100 147,110 195,100 243,120 291,110 339,125 387,80"/>
+        <g fill="var(--w4)"><circle cx="387" cy="80" r="3.5"/></g>
+        <text x="40" y="160">w7</text><text x="88" y="160">w8</text><text x="136" y="160">w9</text><text x="184" y="160">w10</text><text x="232" y="160">w11</text><text x="280" y="160">w12</text><text x="328" y="160">w13</text><text x="376" y="160">w14</text>
+      </svg>
+      <div class="legend"><span><i style="background:var(--w2)"></i>Locked</span><span><i style="background:var(--w4)"></i>Waiting for you</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Lanes · Wave 2, Phase 2.2</h2>
+    <div class="tabs"><span>Wave 1</span><span class="on">Wave 2</span><span>Wave 3</span><span>Wave 4</span></div>
+    <div class="grid board">
+      <div class="lane"><h3>API <span>4</span></h3>
+        <section data-ck-item="API-1" class="s-built"><div class="id">API-1</div><div class="t">Job queue on Postgres</div><div class="m"><span class="st">built</span> agent-2</div></section>
+        <section data-ck-item="API-2" class="s-claimed"><div class="id">API-2</div><div class="t">Retry &amp; dead-letter policy</div><div class="m"><span class="st">in progress</span> agent-2</div></section>
+        <section data-ck-item="API-3" class="s-open"><div class="id">API-3</div><div class="t">Public REST v2 versioning</div><div class="m"><span class="st">open</span></div></section>
+        <section data-ck-item="API-4" class="s-deferred"><div class="id">API-4</div><div class="t">GraphQL gateway</div><div class="m"><span class="st">deferred</span> wave 3</div></section>
+      </div>
+      <div class="lane"><h3>Web UI <span>4</span></h3>
+        <section data-ck-item="UI-1" class="s-built"><div class="id">UI-1</div><div class="t">Design tokens &amp; dark mode</div><div class="m"><span class="st">built</span> agent-4</div></section>
+        <section data-ck-item="UI-2" class="s-claimed"><div class="id">UI-2</div><div class="t">Invoice screen</div><div class="m"><span class="st">in progress</span> agent-4</div></section>
+        <section data-ck-item="UI-3" class="s-open"><div class="id">UI-3</div><div class="t">Onboarding checklist</div><div class="m"><span class="st">open</span></div></section>
+        <section data-ck-item="UI-4" class="s-blocked"><div class="id">UI-4</div><div class="t">Team invites</div><div class="m"><span class="st">blocked</span> on SEC-2</div></section>
+      </div>
+      <div class="lane"><h3>Data <span>3</span></h3>
+        <section data-ck-item="DATA-1" class="s-built"><div class="id">DATA-1</div><div class="t">Usage events pipeline</div><div class="m"><span class="st">built</span> agent-3</div></section>
+        <section data-ck-item="DATA-2" class="s-claimed"><div class="id">DATA-2</div><div class="t">Billing ledger schema</div><div class="m"><span class="st">in progress</span> agent-3</div></section>
+        <section data-ck-item="DATA-3" class="s-open"><div class="id">DATA-3</div><div class="t">Search index choice</div><div class="m"><span class="st">open</span> phase 2.3</div></section>
+      </div>
+      <div class="lane"><h3>Infra <span>3</span></h3>
+        <section data-ck-item="OPS-1" class="s-built"><div class="id">OPS-1</div><div class="t">Preview environments</div><div class="m"><span class="st">built</span> agent-5</div></section>
+        <section data-ck-item="OPS-2" class="s-claimed"><div class="id">OPS-2</div><div class="t">Backups &amp; restore drill</div><div class="m"><span class="st">in progress</span> agent-5</div></section>
+        <section data-ck-item="OPS-3" class="s-open"><div class="id">OPS-3</div><div class="t">Second region (wave 3 prep)</div><div class="m"><span class="st">open</span></div></section>
+      </div>
+      <div class="lane"><h3>Security <span>3</span></h3>
+        <section data-ck-item="SEC-1" class="s-built"><div class="id">SEC-1</div><div class="t">Session expiry</div><div class="m"><span class="st">built</span> agent-1</div></section>
+        <section data-ck-item="SEC-2" class="s-claimed"><div class="id">SEC-2</div><div class="t">Roles &amp; permissions</div><div class="m"><span class="st">in progress</span> agent-1</div></section>
+        <section data-ck-item="SEC-3" class="s-open"><div class="id">SEC-3</div><div class="t">Audit log export</div><div class="m"><span class="st">open</span></div></section>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid row3">
+    <div class="card"><h2>Recent decisions</h2>
+      <ul class="feed">
+        <li><code>BILL/Q1</code> Use Stripe Invoicing, don't build our own <div class="w">locked 40m ago · "keep it boring until 100 customers"</div></li>
+        <li><code>SEC-1/Q1</code> Sessions expire after 30 days idle <div class="w">locked 2h ago · ★ security</div></li>
+        <li><code>API-1/Q1</code> Job queue lives in Postgres <div class="w">locked yesterday · shipped in PR #212</div></li>
+        <li><code>UI-1/Q2</code> Follow system dark mode by default <div class="w">locked 2d ago</div></li>
+      </ul>
+    </div>
+    <div class="card"><h2>Agents</h2>
+      <div class="agent"><span class="dot"></span>agent-1 <span class="w">SEC-2 · roles</span></div>
+      <div class="agent"><span class="dot"></span>agent-2 <span class="w">API-2 · retries</span></div>
+      <div class="agent"><span class="dot"></span>agent-3 <span class="w">DATA-2 · ledger</span></div>
+      <div class="agent"><span class="dot"></span>agent-4 <span class="w">UI-2 · invoices</span></div>
+      <div class="agent"><span class="dot"></span>agent-5 <span class="w">OPS-2 · backups</span></div>
+      <div class="agent"><span class="dot idle"></span>steward <span class="w">waiting for your answers</span></div>
+    </div>
+    <div class="card"><h2>Lane health</h2>
+      <svg viewBox="0 0 300 130" width="100%" role="img" aria-label="Items per lane by status">
+        <g font-size="10">
+          <text x="0" y="16">API</text><text x="0" y="40">Web UI</text><text x="0" y="64">Data</text><text x="0" y="88">Infra</text><text x="0" y="112">Security</text>
+        </g>
+        <g>
+          <rect x="52" y="6" width="50" height="14" rx="3" fill="var(--c-built)"/><rect x="104" y="6" width="50" height="14" rx="3" fill="var(--c-claimed)"/><rect x="156" y="6" width="50" height="14" rx="3" fill="var(--c-open)"/><rect x="208" y="6" width="50" height="14" rx="3" fill="var(--c-deferred)"/>
+          <rect x="52" y="30" width="50" height="14" rx="3" fill="var(--c-built)"/><rect x="104" y="30" width="50" height="14" rx="3" fill="var(--c-claimed)"/><rect x="156" y="30" width="50" height="14" rx="3" fill="var(--c-open)"/><rect x="208" y="30" width="50" height="14" rx="3" fill="var(--c-blocked)"/>
+          <rect x="52" y="54" width="50" height="14" rx="3" fill="var(--c-built)"/><rect x="104" y="54" width="50" height="14" rx="3" fill="var(--c-claimed)"/><rect x="156" y="54" width="50" height="14" rx="3" fill="var(--c-open)"/>
+          <rect x="52" y="78" width="50" height="14" rx="3" fill="var(--c-built)"/><rect x="104" y="78" width="50" height="14" rx="3" fill="var(--c-claimed)"/><rect x="156" y="78" width="50" height="14" rx="3" fill="var(--c-open)"/>
+          <rect x="52" y="102" width="50" height="14" rx="3" fill="var(--c-built)"/><rect x="104" y="102" width="50" height="14" rx="3" fill="var(--c-claimed)"/><rect x="156" y="102" width="50" height="14" rx="3" fill="var(--c-open)"/>
+        </g>
+      </svg>
+      <div class="legend"><span><i style="background:var(--c-built)"></i>built</span><span><i style="background:var(--c-claimed)"></i>in progress</span><span><i style="background:var(--c-open)"></i>open</span><span><i style="background:var(--c-blocked)"></i>blocked</span></div>
+    </div>
+  </div>
+</main>
+</body>
+</html>

@@ -99,7 +99,7 @@
   position: fixed;
   top: 0;
   right: 0;
-  width: min(420px, 100vw);
+  width: min(480px, 100vw);
   height: 100%;
   background: var(--c-surface);
   border-left: 1px solid var(--c-border);
@@ -791,8 +791,10 @@
 @media (min-width: 1024px) {
   /* 1.24.0: default to a sensible 420px (was 50vw — a dock that ate half of a 27"
      monitor on open, which operators closed reflexively). The width is set per
-     project in localStorage via the drag handle; this is the fallback. */
-  :root { --ck-col: 420px; }
+     project in localStorage via the drag handle; this is the fallback.
+     Widened to 480px later: at 420px the eight-tab strip and the priority
+     rows were cut off. */
+  :root { --ck-col: 480px; }
   html.ck-dock-open .ck-dock-handle {
     display: block;
     position: absolute;
@@ -1085,11 +1087,18 @@
   border-bottom: 1px solid var(--c-border);
   background: var(--c-surface-alt);
   flex-shrink: 0;
+  /* Eight tabs outgrow a docked column; scroll them rather than clip the last ones. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-wrap: nowrap;
+  scrollbar-width: thin;
 }
 .ck-tab {
+  flex: 0 0 auto;
+  white-space: nowrap;
   font: inherit;
   font-size: 13px;
-  padding: 10px 12px;
+  padding: 10px 10px;
   min-height: 40px;
   border: 0;
   border-bottom: 3px solid transparent;
@@ -1922,7 +1931,12 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: var(--c-accent); font-size: 12px;
 }
-.ck-priority-text { color: var(--c-fg); }
+.ck-priority-row > * { flex-shrink: 0; }
+.ck-priority-text {
+  color: var(--c-fg);
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .ck-priority-when { font-size: 12px; }
 
 /* Snooze menu (0.26.0): per-row ⌛ button that opens a tiny preset list. */
@@ -1938,6 +1952,8 @@ a.ck-pr-link:hover .ck-pr-title, a.ck-pr-link:focus-visible .ck-pr-title { text-
   display: flex; flex-direction: column; padding: 4px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, .3);
 }
+/* `display: flex` above would beat the UA's [hidden] rule and leave every menu open. */
+.ck-snooze-menu[hidden] { display: none; }
 .ck-snooze-opt {
   background: transparent; border: 0; padding: 4px 8px; cursor: pointer;
   color: var(--c-fg); font-size: 12px; text-align: left; border-radius: 3px;

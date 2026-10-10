@@ -568,6 +568,20 @@ class PublishTests(unittest.TestCase):
             self.skipTest("console.js not written yet")
         P.console_block("{}")  # raises PublishError if either file contains a closing tag or a marker
 
+    def test_api_paths_are_not_prefixed_twice(self):
+        # config.api is already "/api" (server.py builds it), so a fetch of
+        # config.api + '/api/x' asks for /api/api/x: the status chip read "down"
+        # on every console from 1.23.0 until this was caught.
+        js = (KIT / "overture" / "console.js").read_text()
+        self.assertNotRegex(js, r"config\.api \+ ['\"]/api/")
+        self.assertIn("fetch(config.api + '/status'", js)
+
+    def test_hidden_snooze_menus_stay_hidden(self):
+        # .ck-snooze-menu sets display:flex, which beats the UA [hidden] rule;
+        # without its own [hidden] rule every priority row drew an empty menu.
+        css = (KIT / "overture" / "console.css").read_text()
+        self.assertIn(".ck-snooze-menu[hidden] { display: none; }", css)
+
     def test_dock_breakpoint_is_one_number_in_js_and_css(self):
         # AB-2/Q2: console.js decides docked-or-overlay from DOCK_QUERY and
         # console.css styles the dock under its own @media. If they drift, a
@@ -579,10 +593,11 @@ class PublishTests(unittest.TestCase):
         widths = set(re.findall(r"@media \(min-width: (\d+)px\)", css))
         self.assertEqual(widths, {m.group(1)})
         self.assertIn("html.ck-dock body { margin-right: 44px; }", css)
-        # 1.24.0: default dropped from 50vw to 420px (the drag handle persists per-project
+        # 1.24.0: default dropped from 50vw to 420px; widened to 480px so the tab
+        # strip and priority rows fit (the drag handle persists per-project
         # overrides to localStorage). One custom property still, read by the column, the
         # page's margin and the Reload bar's inset — the invariant the test guards.
-        self.assertIn(":root { --ck-col: 420px; }", css)
+        self.assertIn(":root { --ck-col: 480px; }", css)
         self.assertIn("html.ck-dock-open body { margin-right: var(--ck-col); }", css)
         self.assertIn("width: var(--ck-col);", css)
         self.assertIn("html.ck-dock-open .ck-board-stale { right: calc(var(--ck-col) + 16px); }", css)

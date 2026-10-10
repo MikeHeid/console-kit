@@ -31,7 +31,7 @@
   let dockHandle = null;         // drag handle on docked panel's left edge
   const DOCK_W_MIN = 320;        // px; narrower cuts off the inbox tab strip
   const DOCK_W_MAX_FRAC = 0.6;   // never eat more than 60% of the viewport
-  const DOCK_W_DEFAULT = 420;
+  const DOCK_W_DEFAULT = 480;
   // AB-2/Q2 (owner): at 1024px and wider the panel is a column docked on the
   // right, not an overlay; it starts collapsed to a strip with an unread badge.
   const DOCK_QUERY = '(min-width: 1024px)';
@@ -373,7 +373,7 @@
   async function fetchStatus() {
     if (!config || !config.api) return;
     try {
-      const resp = await fetch(config.api + '/api/status', { credentials: 'same-origin' });
+      const resp = await fetch(config.api + '/status', { credentials: 'same-origin' });
       if (!resp.ok) { paintStatus({ ok: false, error: 'HTTP ' + resp.status }); return; }
       const data = await resp.json().catch(() => null);
       if (data) { statusLast = data; paintStatus(data); }
@@ -6929,7 +6929,7 @@
     lines.push('- **' + s.closedIssues.length + '** issue'
       + (s.closedIssues.length === 1 ? '' : 's') + ' closed tied to a ruling');
     if (s.stale) lines.push('- **' + s.stale + '** Living ruling'
-      + (s.stale === 1 ? '' : 's') + ' still need review');
+      + (s.stale === 1 ? ' still needs' : 's still need') + ' review');
     lines.push('');
     if (s.itemsAdvancedList.length) {
       lines.push('## Items advanced');
@@ -7614,7 +7614,7 @@
       el('span', { className: 'ck-living-rulings-glyph', 'aria-hidden': 'true' }, [GLYPH.stale]),
       el('span', { className: 'ck-living-rulings-count' }, [String(stale.length)]),
       el('span', { className: 'ck-living-rulings-label' },
-        [' Living ruling' + (stale.length === 1 ? '' : 's') + ' need review']),
+        [' Living ruling' + (stale.length === 1 ? ' needs' : 's need') + ' review']),
     ]);
     chip.addEventListener('click', () => {
       // Narrow the filter to stale only, so the list focuses on what the badge named.

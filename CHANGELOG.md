@@ -2989,3 +2989,31 @@ on its own.
   rendering decision is browser-side. The audit trail is
   unchanged: each grill-origin question is still a regular
   `question` record.
+
+## Unreleased
+
+Found while rendering the new README screenshots against a full
+example dashboard.
+
+- **The status chip works.** The chip has said **down** on every
+  console since it shipped in 1.23.0. It fetched
+  `config.api + '/api/status'`, which is `/api/api/status`, a 404.
+  It now fetches `/api/status`, the route the server serves.
+- **Snooze menus stay closed until opened.** `.ck-snooze-menu` set
+  `display: flex`, which overrides the `hidden` attribute, so every
+  priority row drew an empty dropdown under itself. A `[hidden]` rule
+  now wins.
+- **The docked column is wider and the tabs scroll.** The default
+  column went from 420px to 480px, and you can still drag it to any
+  width. The tab strip scrolls sideways at every width instead of
+  cutting off its last tabs. Before, it only scrolled below 640px.
+- **Priority rows truncate their text, not their controls.** A long
+  question now ends in "…", and its age and snooze button stay in
+  view.
+- **Wording.** "1 Living ruling needs review" (it said "need").
+- **README.** Rewritten for people new to Overture: what it is in one
+  line, screenshots, three steps, and a glossary. The strategy review,
+  roadmap lanes and progress estimates are in `docs/STRATEGY.md`.
+  `docs/demo/screenshots.py` regenerates the screenshots from
+  `docs/demo/showcase.html`, an example dashboard with waves, phases
+  and lanes.
